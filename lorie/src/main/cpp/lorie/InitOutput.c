@@ -1180,12 +1180,22 @@ static inline __always_inline Bool lorieNeedsGpuLock(PixmapPtr pPix, LoriePixmap
 
 Bool loriePrepareAccess(PixmapPtr pPix, int index) {
     LoriePixmapPriv *priv = exaGetPixmapDriverPrivate(pPix);
+    {
+        // f8dbg: first-N access census (which pixmaps arrive here at all?).
+        static volatile int accCount = 0;
+        int n = __atomic_fetch_add(&accCount, 1, __ATOMIC_RELAXED);
+        if (n < 40)
+            f8dbg_log("access #%d pix=%p %dx%d devKind=%d index=%d hasPriv=%d", n,
+                      (void *) pPix, pPix->drawable.width, pPix->drawable.height,
+                      pPix->devKind, index, priv != NULL);
+    }
     if (lorieNeedsGpuLock(pPix, priv, index))
         lorie_mutex_lock(&pvfb->state->lock, &pvfb->state->lockingPid);
 
     if (!priv->locked && !priv->mem) {
         int err = LorieBuffer_lock(priv->buffer, &priv->locked);
         if (err) {
+            f8dbg_log("PrepareAccess LOCK FAIL pix=%p err=%d hasBuffer=%d", (void *) pPix, err, priv->buffer != NULL);
             dprintf(2, "Failed to lock buffer, err %d\n", err);
             return FALSE;
         }
