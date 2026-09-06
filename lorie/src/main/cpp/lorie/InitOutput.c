@@ -1112,8 +1112,10 @@ void *lorieCreatePixmap(__unused ScreenPtr pScreen, int width, int height, __unu
     if (!priv)
         return NULL;
 
-    if (width == 0 || height == 0)
+    if (width == 0 || height == 0) {
+        f8dbg_log("CreatePixmap ZERO %dx%d usage=%d priv=%p", width, height, usage_hint, priv);
         return priv;
+    }
 
     uint8_t type = usage_hint != CREATE_PIXMAP_USAGE_LORIEBUFFER_BACKED ? LORIEBUFFER_REGULAR : pvfb->root.legacyDrawing ? LORIEBUFFER_FD : LORIEBUFFER_AHARDWAREBUFFER;
     priv->buffer = LorieBuffer_allocate(width, height, AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM, type);
@@ -1137,6 +1139,11 @@ void *lorieCreatePixmap(__unused ScreenPtr pScreen, int width, int height, __unu
 
 void lorieExaDestroyPixmap(__unused ScreenPtr pScreen, void *driverPriv) {
     LoriePixmapPriv *priv = driverPriv;
+    if (priv) {
+        const LorieBuffer_Desc *dd = priv->buffer ? LorieBuffer_description(priv->buffer) : NULL;
+        f8dbg_log("DestroyPixmap priv=%p bufid=%llu locked=%p mem=%p", priv,
+                  dd ? (unsigned long long) dd->id : 999999ULL, priv->locked, priv->mem);
+    }
     if (priv->buffer) {
         if (priv->locked)
             LorieBuffer_unlock(priv->buffer);
@@ -1148,6 +1155,9 @@ void lorieExaDestroyPixmap(__unused ScreenPtr pScreen, void *driverPriv) {
 
 Bool lorieModifyPixmapHeader(PixmapPtr pPix, __unused int w, __unused int h, __unused int depth, __unused int bitsPerbppPixel, __unused int devKind, __unused void *data) {
     LoriePixmapPriv *priv = exaGetPixmapDriverPrivate(pPix);
+    f8dbg_log("ModifyPixmapHeader pix=%p priv=%p %dx%d devKind=%d data=%p (was mem=%p)",
+              (void *) pPix, (void *) priv, pPix->drawable.width, pPix->drawable.height,
+              devKind, data, priv ? priv->mem : NULL);
     if (priv && data)
         priv->mem = data;
     return FALSE;
