@@ -24,6 +24,10 @@ public class Loader {
             assert targetInfo.signatures.length == 1 && BuildConfig.SIGNATURE == targetInfo.signatures[0].hashCode() : BuildConfig.packageSignatureMismatchErrorText;
 
             android.util.Log.i(BuildConfig.logTag, "loading " + targetInfo.applicationInfo.sourceDir + "::" + cls + "::main of " + targetInfo.packageName + " application (commit " + BuildConfig.COMMIT + ")");
+            // f8-ahb-debug: hand the target package to CmdEntryPoint in-VM so its
+            // ACTION_START broadcast is package-scoped to THIS app (side-by-side safe).
+            // Stock behavior unchanged: CmdEntryPoint falls back to its own BuildConfig id.
+            System.setProperty("termux.x11.target.package", targetInfo.packageName);
             Class<?> targetClass = Class.forName(cls, true,
                     new dalvik.system.PathClassLoader(targetInfo.applicationInfo.sourceDir, null, ClassLoader.getSystemClassLoader()));
             targetClass.getMethod("main", String[].class).invoke(null, (Object) args);

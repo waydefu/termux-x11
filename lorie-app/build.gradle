@@ -6,7 +6,9 @@ android {
     compileSdkVersion 34
     ndkVersion termuxX11NdkVersion
     defaultConfig {
-        applicationId "com.termux.x11"
+        // f8-ahb-debug: side-by-side experimental identity. Stable stays com.termux.x11.
+        // Java/Kotlin namespaces intentionally untouched; only the runtime applicationId moves.
+        applicationId "com.waydefu.x11gpu"
         minSdkVersion 24
         targetSdkVersion 34
         versionCode 15

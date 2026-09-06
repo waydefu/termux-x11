@@ -62,7 +62,9 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
 
         Intent intent = new Intent(ACTION_START);
         intent.putExtra(null, bundle);
-        intent.setPackage(BuildConfig.APPLICATION_ID);
+        // f8-ahb-debug: side-by-side safe target. The Loader sets this property in-VM
+        // to the package it actually loaded; fall back to own id for stock loaders.
+        intent.setPackage(System.getProperty("termux.x11.target.package", BuildConfig.APPLICATION_ID));
 
         if (getuid() == 0 || getuid() == 2000)
             intent.setFlags(0x00400000 /* FLAG_RECEIVER_FROM_SHELL */);
