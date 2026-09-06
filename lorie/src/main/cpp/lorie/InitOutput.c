@@ -137,6 +137,21 @@ static LorieBuffer *lorieEnsureGpuSampleable(PixmapPtr pixmap, int8_t type) {
 
 static Bool lorieServerDebugEnabled = FALSE;
 
+// f8dbg: mirror early-init logs to /tmp (shared with proot) because logcat-fd
+// capture attaches later and would otherwise lose exactly these first lines.
+static void f8dbg_file(const char *msg) {
+    FILE *f = fopen("/tmp/x11gpu-f8dbg.log", "a");
+    if (f) {
+        fputs(msg, f);
+        fputc('\n', f);
+        fclose(f);
+    }
+}
+#define f8dbg_log(...) do { \
+    log(INFO, "f8dbg " __VA_ARGS__); \
+    { char _b[512]; snprintf(_b, sizeof(_b), "f8dbg " __VA_ARGS__); f8dbg_file(_b); } \
+} while (0)
+
 void OsVendorInit(void) {
     pthread_mutexattr_t mutex_attr;
 
@@ -567,10 +582,17 @@ static CARD32 lorieFramecounter(unused OsTimerPtr timer, unused CARD32 time, unu
 static Bool lorieCreateScreenResources(ScreenPtr pScreen) {
     pScreen->devPrivate = pScreen->CreatePixmap(pScreen, pScreen->width, pScreen->height, pScreen->rootDepth, CREATE_PIXMAP_USAGE_LORIEBUFFER_BACKED);
 
-    log(INFO, "f8dbg screen resources %dx%d root drawable at (%d,%d) size %dx%d",
-        pScreen->width, pScreen->height,
-        pScreen->root->drawable.x, pScreen->root->drawable.y,
-        pScreen->root->drawable.width, pScreen->root->drawable.height);
+    // f8dbg: root window does not exist yet when CreateScreenResources runs on
+    // some servers - never dereference it blindly (NULL guard).
+    if (pScreen->root) {
+        f8dbg_log("screen resources %dx%d root drawable at (%d,%d) size %dx%d",
+            pScreen->width, pScreen->height,
+            pScreen->root->drawable.x, pScreen->root->drawable.y,
+            pScreen->root->drawable.width, pScreen->root->drawable.height);
+    } else {
+        f8dbg_log("screen resources %dx%d (root window not created yet)",
+            pScreen->width, pScreen->height);
+    }
 
     pvfb->damage = DamageCreate(NULL, NULL, DamageReportNone, TRUE, pScreen, NULL);
     if (!pvfb->damage)
@@ -641,7 +663,7 @@ static Bool lorieRRScreenSetSize(ScreenPtr pScreen, CARD16 width, CARD16 height,
 
     pScreen->root->drawable.width = pvfb->root.width = pScreen->width = width;
     pScreen->root->drawable.height = pvfb->root.height = pScreen->height = height;
-    log(INFO, "f8dbg RRSetSize %dx%d root drawable at (%d,%d)",
+    f8dbg_log("RRSetSize %dx%d root drawable at (%d,%d)",
         width, height, pScreen->root->drawable.x, pScreen->root->drawable.y);
     pScreen->mmWidth = ((double) (width)) * 25.4 / monitorResolution;
     pScreen->mmHeight = ((double) (height)) * 25.4 / monitorResolution;
@@ -1105,7 +1127,7 @@ void *lorieCreatePixmap(__unused ScreenPtr pScreen, int width, int height, __unu
 
     {
         const LorieBuffer_Desc *dd = LorieBuffer_description(priv->buffer);
-        log(INFO, "f8dbg CreatePixmap %dx%d usage=%d type=%d bufid=%llu desc=%dx%d stride=%d locked=%p",
+        f8dbg_log("CreatePixmap %dx%d usage=%d type=%d bufid=%llu desc=%dx%d stride=%d locked=%p",
             width, height, usage_hint, (int) dd->type, (unsigned long long) dd->id,
             (int) dd->width, (int) dd->height, (int) dd->stride, priv->locked);
     }
@@ -1159,7 +1181,7 @@ Bool loriePrepareAccess(PixmapPtr pPix, int index) {
     if (pScreenPtr && pScreenPtr->GetScreenPixmap && pScreenPtr->GetScreenPixmap(pScreenPtr) == pPix) {
         static volatile int prepCount = 0;
         if ((__atomic_fetch_add(&prepCount, 1, __ATOMIC_RELAXED) & 511) == 0)
-            log(INFO, "f8dbg screen access #%d ptr=%p devKind=%d size=%dx%d", prepCount,
+            f8dbg_log("screen access #%d ptr=%p devKind=%d size=%dx%d", prepCount,
                 pPix->devPrivate.ptr, pPix->devKind, pPix->drawable.width, pPix->drawable.height);
     }
     return TRUE;
