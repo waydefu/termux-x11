@@ -567,6 +567,11 @@ static CARD32 lorieFramecounter(unused OsTimerPtr timer, unused CARD32 time, unu
 static Bool lorieCreateScreenResources(ScreenPtr pScreen) {
     pScreen->devPrivate = pScreen->CreatePixmap(pScreen, pScreen->width, pScreen->height, pScreen->rootDepth, CREATE_PIXMAP_USAGE_LORIEBUFFER_BACKED);
 
+    log(INFO, "f8dbg screen resources %dx%d root drawable at (%d,%d) size %dx%d",
+        pScreen->width, pScreen->height,
+        pScreen->root->drawable.x, pScreen->root->drawable.y,
+        pScreen->root->drawable.width, pScreen->root->drawable.height);
+
     pvfb->damage = DamageCreate(NULL, NULL, DamageReportNone, TRUE, pScreen, NULL);
     if (!pvfb->damage)
         FatalError("Couldn't setup damage\n");
@@ -636,6 +641,8 @@ static Bool lorieRRScreenSetSize(ScreenPtr pScreen, CARD16 width, CARD16 height,
 
     pScreen->root->drawable.width = pvfb->root.width = pScreen->width = width;
     pScreen->root->drawable.height = pvfb->root.height = pScreen->height = height;
+    log(INFO, "f8dbg RRSetSize %dx%d root drawable at (%d,%d)",
+        width, height, pScreen->root->drawable.x, pScreen->root->drawable.y);
     pScreen->mmWidth = ((double) (width)) * 25.4 / monitorResolution;
     pScreen->mmHeight = ((double) (height)) * 25.4 / monitorResolution;
 
@@ -1096,6 +1103,13 @@ void *lorieCreatePixmap(__unused ScreenPtr pScreen, int width, int height, __unu
         return NULL;
     }
 
+    {
+        const LorieBuffer_Desc *dd = LorieBuffer_description(priv->buffer);
+        log(INFO, "f8dbg CreatePixmap %dx%d usage=%d type=%d bufid=%llu desc=%dx%d stride=%d locked=%p",
+            width, height, usage_hint, (int) dd->type, (unsigned long long) dd->id,
+            (int) dd->width, (int) dd->height, (int) dd->stride, priv->locked);
+    }
+
     return priv;
 }
 
@@ -1142,6 +1156,12 @@ Bool loriePrepareAccess(PixmapPtr pPix, int index) {
         priv->wasLocked = TRUE;
 
     pPix->devPrivate.ptr = priv->locked ?: priv->mem;
+    if (pScreenPtr && pScreenPtr->GetScreenPixmap && pScreenPtr->GetScreenPixmap(pScreenPtr) == pPix) {
+        static volatile int prepCount = 0;
+        if ((__atomic_fetch_add(&prepCount, 1, __ATOMIC_RELAXED) & 511) == 0)
+            log(INFO, "f8dbg screen access #%d ptr=%p devKind=%d size=%dx%d", prepCount,
+                pPix->devPrivate.ptr, pPix->devKind, pPix->drawable.width, pPix->drawable.height);
+    }
     return TRUE;
 }
 

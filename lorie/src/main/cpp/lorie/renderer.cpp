@@ -630,6 +630,7 @@ void Renderer::releaseWinAndSurface(ANativeWindow** anw, EGLSurface *esfc) {
 
 void Renderer::setViewport(int x, int y, int w, int h, int ew, int eh, int hidden) {
     pthread_mutex_lock(&stateLock);
+    log("f8dbg setViewport x=%d y=%d w=%d h=%d ew=%d eh=%d hidden=%d", x, y, w, h, ew, eh, hidden);
     viewportX = x;
     viewportY = y;
     viewportW = w;
