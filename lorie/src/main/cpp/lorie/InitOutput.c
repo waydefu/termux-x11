@@ -1155,9 +1155,15 @@ void lorieExaDestroyPixmap(__unused ScreenPtr pScreen, void *driverPriv) {
 
 Bool lorieModifyPixmapHeader(PixmapPtr pPix, __unused int w, __unused int h, __unused int depth, __unused int bitsPerbppPixel, __unused int devKind, __unused void *data) {
     LoriePixmapPriv *priv = exaGetPixmapDriverPrivate(pPix);
-    f8dbg_log("ModifyPixmapHeader pix=%p priv=%p %dx%d devKind=%d data=%p (was mem=%p)",
-              (void *) pPix, (void *) priv, pPix->drawable.width, pPix->drawable.height,
-              devKind, data, priv ? priv->mem : NULL);
+    // f8dbg: this hook can run while the pixmap is still under construction
+    // (driverPrivate not yet installed) - only touch priv when EXA hands us
+    // real sysmem (data != NULL), which never happens during creation.
+    // Logging anything else here SEGV'd startup (NULL+8), so stay quiet.
+    if (data) {
+        f8dbg_log("ModifyPixmapHeader pix=%p priv=%p %dx%d devKind=%d data=%p (was mem=%p)",
+                  (void *) pPix, (void *) priv, pPix->drawable.width, pPix->drawable.height,
+                  devKind, data, priv ? priv->mem : NULL);
+    }
     if (priv && data)
         priv->mem = data;
     return FALSE;
