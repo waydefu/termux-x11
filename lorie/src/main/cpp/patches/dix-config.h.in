@@ -204,4 +204,30 @@ static int memfd_create(const char *name, unsigned int flags) {
 extern int execl_xkbcomp(const char * path, const char * arg, ...);
 #define setgid(a) 0
 #define setuid(a) 0
+
+/* P2-A.2 observe-only: logcat + append-only snapshot (survives SIGSEGV without tombstoned). */
+#include <android/log.h>
+#include <fcntl.h>
+#include <string.h>
+#include <unistd.h>
+__attribute__((unused))
+static void p2a2_emit(const char *msg)
+{
+    size_t n;
+    int fd;
+
+    if (!msg)
+        return;
+    n = strlen(msg);
+    __android_log_print(ANDROID_LOG_INFO, "LorieNative", "%s", msg);
+    (void) write(2, msg, n);
+    (void) write(2, "\n", 1);
+    fd = open("/tmp/x11gpu-p2a2.snap", O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0666);
+    if (fd >= 0) {
+        (void) write(fd, msg, n);
+        (void) write(fd, "\n", 1);
+        (void) fsync(fd);
+        (void) close(fd);
+    }
+}
 #endif

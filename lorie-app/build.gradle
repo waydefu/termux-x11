@@ -6,7 +6,8 @@ android {
     compileSdkVersion 34
     ndkVersion termuxX11NdkVersion
     defaultConfig {
-        applicationId "com.termux.x11"
+        // P2-A.2 diagnostic APK must never be installable over Stable com.termux.x11.
+        applicationId "com.waydefu.x11gpu"
         minSdkVersion 24
         targetSdkVersion 34
         versionCode 15

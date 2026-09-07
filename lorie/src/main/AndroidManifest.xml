@@ -10,6 +10,7 @@
 
     <application
         android:allowBackup="false"
+        android:gwpAsanMode="always"
         tools:ignore="DataExtractionRules,GoogleAppIndexingWarning">
         <activity
             android:name=".MainActivity"

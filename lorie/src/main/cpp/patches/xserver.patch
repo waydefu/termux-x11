@@ -653,3 +653,280 @@
      free(xkbbasedirflag);
  
      if (!buf) {
+--- ./exa/exa.c	2026-09-08 02:23:16.101993613 +0800
++++ ./exa/exa.c	2026-09-08 02:23:16.101993613 +0800
+@@ -36,6 +36,7 @@
+ 
+ #include "exa_priv.h"
+ #include "exa.h"
++#include <stdio.h>
+ 
+ DevPrivateKeyRec exaScreenPrivateKeyRec;
+ 
+@@ -288,6 +289,13 @@
+     ExaPixmapPriv(pPixmap);
+     Bool has_gpu_copy, ret;
+     int i;
++    int pa_called = 0;
++    int pa_ret = -1;
++    int nested = 0;
++    const char *skip = "none";
++    void *dev_ptr_before = NULL;
++    int devKind_before = 0;
++    char msg[768];
+ 
+     if (!(pExaScr->info->flags & EXA_OFFSCREEN_PIXMAPS))
+         return FALSE;
+@@ -299,6 +307,21 @@
+     for (i = 0; i < EXA_NUM_PREPARE_INDICES; i++) {
+         if (pExaScr->access[i].pixmap == pPixmap) {
+             pExaScr->access[i].count++;
++            nested = 1;
++            skip = "nested";
++            snprintf(msg, sizeof(msg),
++                     "Sprep pix=%p index=%d has_gpu_copy=%d fb_ptr=%p sys_ptr=%p sys_pitch=%d fb_pitch=%d "
++                     "dev_ptr_before=%p devKind_before=%d PrepareAccess_called=0 PrepareAccess_ret=%d "
++                     "dev_ptr_after=%p devKind_after=%d width=%d height=%d bpp=%d nested=1 skip=%s",
++                     (void *) pPixmap, index, (int) exaPixmapHasGpuCopy(pPixmap),
++                     (void *) pExaPixmap->fb_ptr, (void *) pExaPixmap->sys_ptr,
++                     pExaPixmap->sys_pitch, pExaPixmap->fb_pitch,
++                     pPixmap->devPrivate.ptr, pPixmap->devKind,
++                     (int) pExaScr->access[i].retval,
++                     pPixmap->devPrivate.ptr, pPixmap->devKind,
++                     pPixmap->drawable.width, pPixmap->drawable.height,
++                     pPixmap->drawable.bitsPerPixel, skip);
++            p2a2_emit(msg);
+             return pExaScr->access[i].retval;
+         }
+     }
+@@ -330,13 +353,30 @@
+     pExaScr->access[index].pixmap = pPixmap;
+     pExaScr->access[index].count = 1;
+ 
+-    if (!has_gpu_copy)
++    dev_ptr_before = pPixmap->devPrivate.ptr;
++    devKind_before = pPixmap->devKind;
++    snprintf(msg, sizeof(msg),
++             "Sprep-pre pix=%p index=%d has_gpu_copy=%d fb_ptr=%p sys_ptr=%p sys_pitch=%d fb_pitch=%d "
++             "dev_ptr_before=%p devKind_before=%d width=%d height=%d bpp=%d",
++             (void *) pPixmap, index, (int) has_gpu_copy,
++             (void *) pExaPixmap->fb_ptr, (void *) pExaPixmap->sys_ptr,
++             pExaPixmap->sys_pitch, pExaPixmap->fb_pitch,
++             dev_ptr_before, devKind_before,
++             pPixmap->drawable.width, pPixmap->drawable.height,
++             pPixmap->drawable.bitsPerPixel);
++    p2a2_emit(msg);
++
++    if (!has_gpu_copy) {
++        skip = "no_gpu_copy";
+         goto out;
++    }
+ 
+     exaWaitSync(pScreen);
+ 
+-    if (pExaScr->info->PrepareAccess == NULL)
++    if (pExaScr->info->PrepareAccess == NULL) {
++        skip = "null_hook";
+         goto out;
++    }
+ 
+     if (index >= EXA_PREPARE_AUX_DEST &&
+         !(pExaScr->info->flags & EXA_SUPPORTS_PREPARE_AUX)) {
+@@ -344,22 +384,39 @@
+             FatalError("Unsupported AUX indices used on a pinned pixmap.\n");
+         exaMoveOutPixmap(pPixmap);
+         ret = FALSE;
++        skip = "aux_moveout";
+         goto out;
+     }
+ 
++    pa_called = 1;
+     if (!(*pExaScr->info->PrepareAccess) (pPixmap, index)) {
++        pa_ret = 0;
+         if (pExaPixmap->score == EXA_PIXMAP_SCORE_PINNED &&
+             !(pExaScr->info->flags & EXA_MIXED_PIXMAPS))
+             FatalError("Driver failed PrepareAccess on a pinned pixmap.\n");
+         exaMoveOutPixmap(pPixmap);
+         ret = FALSE;
++        skip = "hook_false";
+         goto out;
+     }
++    pa_ret = 1;
+ 
+     ret = TRUE;
+ 
+  out:
+     pExaScr->access[index].retval = ret;
++    snprintf(msg, sizeof(msg),
++             "Sprep pix=%p index=%d has_gpu_copy=%d fb_ptr=%p sys_ptr=%p sys_pitch=%d fb_pitch=%d "
++             "dev_ptr_before=%p devKind_before=%d PrepareAccess_called=%d PrepareAccess_ret=%d "
++             "dev_ptr_after=%p devKind_after=%d width=%d height=%d bpp=%d nested=%d skip=%s ret=%d",
++             (void *) pPixmap, index, (int) has_gpu_copy,
++             (void *) pExaPixmap->fb_ptr, (void *) pExaPixmap->sys_ptr,
++             pExaPixmap->sys_pitch, pExaPixmap->fb_pitch,
++             dev_ptr_before, devKind_before, pa_called, pa_ret,
++             pPixmap->devPrivate.ptr, pPixmap->devKind,
++             pPixmap->drawable.width, pPixmap->drawable.height,
++             pPixmap->drawable.bitsPerPixel, nested, skip, (int) ret);
++    p2a2_emit(msg);
+     return ret;
+ }
+ 
+--- ./fb/fbpict.c	2026-09-08 02:23:16.117993613 +0800
++++ ./fb/fbpict.c	2026-09-08 02:23:16.117993613 +0800
+@@ -34,6 +34,9 @@
+ #include "picturestr.h"
+ #include "mipict.h"
+ #include "fbpict.h"
++#include <stdio.h>
++
++static const char *p2a2_fb_role = "?";
+ 
+ void
+ fbComposite(CARD8 op,
+@@ -54,9 +57,13 @@
+     if (pMask)
+         miCompositeSourceValidate(pMask);
+ 
++    p2a2_fb_role = "src";
+     src = image_from_pict(pSrc, FALSE, &src_xoff, &src_yoff);
++    p2a2_fb_role = "mask";
+     mask = image_from_pict(pMask, FALSE, &msk_xoff, &msk_yoff);
++    p2a2_fb_role = "dst";
+     dest = image_from_pict(pDst, TRUE, &dst_xoff, &dst_yoff);
++    p2a2_fb_role = "?";
+ 
+     if (src && dest && !(pMask && !mask)) {
+         pixman_image_composite(op, src, mask, dest,
+@@ -290,6 +297,19 @@
+     fbGetDrawablePixmap(pict->pDrawable, pixmap, *xoff, *yoff);
+     fbGetPixmapBitsData(pixmap, bits, stride, bpp);
+ 
++    {
++        char msg[512];
++        int rowstride_bytes = stride * (int) sizeof(FbStride);
++
++        snprintf(msg, sizeof(msg),
++                 "Sfb role=%s bits=%p devKind=%d width=%d height=%d bpp=%d rowstride_bytes=%d "
++                 "stride_words=%d xoff=%d yoff=%d pix=%p",
++                 p2a2_fb_role, (void *) bits, pixmap->devKind,
++                 pixmap->drawable.width, pixmap->drawable.height, bpp,
++                 rowstride_bytes, stride, *xoff, *yoff, (void *) pixmap);
++        p2a2_emit(msg);
++    }
++
+     image = pixman_image_create_bits((pixman_format_code_t) pict->format,
+                                      pixmap->drawable.width,
+                                      pixmap->drawable.height, (uint32_t *) bits,
+--- ./os/osinit.c	2026-09-08 02:23:16.129993613 +0800
++++ ./os/osinit.c	2026-09-08 02:23:16.129993613 +0800
+@@ -56,6 +56,9 @@
+ #include <X11/Xos.h>
+ #include <signal.h>
+ #include <errno.h>
++#ifdef __ANDROID__
++#include <android/log.h>
++#endif
+ #ifdef HAVE_DLFCN_H
+ #include <dlfcn.h>
+ #endif
+@@ -132,6 +135,19 @@
+     }
+ 
+     /* log, cleanup, and abort */
++#ifdef __ANDROID__
++    {
++        char msg[256];
++#ifdef SA_SIGINFO
++        snprintf(msg, sizeof(msg),
++                 "Ssig Caught signal %d si_code=%d si_addr=%p",
++                 signo, sip ? sip->si_code : -1, sip ? sip->si_addr : NULL);
++#else
++        snprintf(msg, sizeof(msg), "Ssig Caught signal %d", signo);
++#endif
++        p2a2_emit(msg);
++    }
++#endif
+     xorg_backtrace();
+ 
+ #ifdef SA_SIGINFO
+@@ -187,10 +203,10 @@
+         sigemptyset(&act.sa_mask);
+ #ifdef SA_SIGINFO
+         act.sa_sigaction = OsSigHandler;
+-        act.sa_flags = SA_SIGINFO;
++        act.sa_flags = SA_SIGINFO | SA_ONSTACK;
+ #else
+         act.sa_handler = OsSigHandler;
+-        act.sa_flags = 0;
++        act.sa_flags = SA_ONSTACK;
+ #endif
+         for (i = 0; siglist[i] != 0; i++) {
+             if (sigaction(siglist[i], &act, &oact)) {
+--- ./os/backtrace.c	2026-09-08 02:23:16.141993613 +0800
++++ ./os/backtrace.c	2026-09-08 02:23:16.145993613 +0800
+@@ -318,12 +318,64 @@
+ 
+ #else
+ 
++#ifdef __ANDROID__
++#include <unwind.h>
++#include <dlfcn.h>
++#include <stdio.h>
++#include <android/log.h>
++
++struct p2a2_unw {
++    int n;
++};
++
++static _Unwind_Reason_Code
++p2a2_unw_cb(struct _Unwind_Context *ctx, void *arg)
++{
++    struct p2a2_unw *s = (struct p2a2_unw *) arg;
++    uintptr_t ip = _Unwind_GetIP(ctx);
++    Dl_info info;
++    const char *fname = "?";
++    const char *sname = "?";
++    uintptr_t off = 0;
++    char msg[512];
++
++    if (dladdr((void *) ip, &info)) {
++        if (info.dli_fname && info.dli_fname[0])
++            fname = info.dli_fname;
++        if (info.dli_sname) {
++            sname = info.dli_sname;
++            off = ip - (uintptr_t) info.dli_saddr;
++        }
++        else if (info.dli_fbase)
++            off = ip - (uintptr_t) info.dli_fbase;
++    }
++    snprintf(msg, sizeof(msg), "Sbt %u: %s (%s+0x%x) [%p]",
++             s->n, fname, sname, (int) off, (void *) ip);
++    p2a2_emit(msg);
++    ErrorFSigSafe("%u: %s (%s+0x%x) [%p]\n", s->n, fname, sname, (int) off,
++                  (void *) ip);
++    s->n++;
++    return s->n >= 64 ? _URC_END_OF_STACK : _URC_NO_REASON;
++}
++
++void
++xorg_backtrace(void)
++{
++    struct p2a2_unw s = { 0 };
++
++    p2a2_emit("Sbt Backtrace:");
++    ErrorFSigSafe("\nBacktrace:\n");
++    _Unwind_Backtrace(p2a2_unw_cb, &s);
++}
++
++#else
+ /* Default fallback if we can't find any way to get a backtrace */
+ void
+ xorg_backtrace(void)
+ {
+     return;
+ }
++#endif /* __ANDROID__ */
+ 
+ #endif
+ #endif

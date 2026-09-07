@@ -16,6 +16,7 @@
 #include <sys/errno.h>
 #include <sys/socket.h>
 #include <string.h>
+#include <stdio.h>
 #include <time.h>
 #include <unistd.h>
 #include <libxcvt/libxcvt.h>
@@ -27,6 +28,8 @@
 #include <dri3.h>
 #include <sys/stat.h>
 #include <dlfcn.h>
+#include <signal.h>
+#include <sys/syscall.h>
 #include "fb.h"
 #include "mipointer.h"
 #include "micmap.h"
@@ -141,8 +144,75 @@ static LorieBuffer *lorieEnsureGpuSampleable(PixmapPtr pixmap, int8_t type) {
 
 static Bool lorieServerDebugEnabled = FALSE;
 
+extern void xorg_backtrace(void);
+
+static char p2a2AltStack[64 * 1024];
+
+static void p2a2CrashHandler(int signo, siginfo_t *si, unused void *uctx) {
+    char msg[256];
+    snprintf(msg, sizeof(msg), "Ssig signo=%d code=%d addr=%p (rt_sigaction)",
+             signo, si ? si->si_code : -1, si ? si->si_addr : NULL);
+    p2a2_emit(msg);
+    lorieDumpFlightRecorder("P2-A.2 Ssig");
+    xorg_backtrace();
+    _exit(128 + signo);
+}
+
+static void p2a2InstallCrashProbe(void) {
+    static int installed;
+    stack_t ss;
+
+    if (installed)
+        return;
+    installed = 1;
+
+    memset(&ss, 0, sizeof(ss));
+    ss.ss_sp = p2a2AltStack;
+    ss.ss_size = sizeof(p2a2AltStack);
+    if (sigaltstack(&ss, NULL) != 0)
+        log(ERROR, "P2-A.2 sigaltstack failed: %s", strerror(errno));
+
+#if defined(__aarch64__) || defined(__x86_64__)
+    {
+        /* Kernel aarch64/x86_64 sigaction layout (not bionic's). */
+        struct kernel_sigaction {
+            void (*handler)(int, siginfo_t *, void *);
+            unsigned long flags;
+            void (*restorer)(void);
+            unsigned long mask;
+        } kact;
+
+        memset(&kact, 0, sizeof(kact));
+        kact.handler = p2a2CrashHandler;
+        kact.flags = SA_SIGINFO | SA_ONSTACK;
+        /* Kernel rt_sigaction bypasses ART libsigchain so Ssig/Sbt reach logcat
+         * before debuggerd wins the ~110ms attach race. Rendering path unchanged. */
+        if (syscall(SYS_rt_sigaction, SIGSEGV, &kact, NULL, 8) != 0)
+            log(ERROR, "P2-A.2 rt_sigaction SIGSEGV failed: %s", strerror(errno));
+        if (syscall(SYS_rt_sigaction, SIGBUS, &kact, NULL, 8) != 0)
+            log(ERROR, "P2-A.2 rt_sigaction SIGBUS failed: %s", strerror(errno));
+    }
+#else
+    {
+        struct sigaction act;
+
+        memset(&act, 0, sizeof(act));
+        act.sa_sigaction = p2a2CrashHandler;
+        act.sa_flags = SA_SIGINFO | SA_ONSTACK;
+        sigemptyset(&act.sa_mask);
+        if (sigaction(SIGSEGV, &act, NULL) != 0)
+            log(ERROR, "P2-A.2 sigaction SIGSEGV failed: %s", strerror(errno));
+        if (sigaction(SIGBUS, &act, NULL) != 0)
+            log(ERROR, "P2-A.2 sigaction SIGBUS failed: %s", strerror(errno));
+    }
+#endif
+    log(INFO, "P2-A.2 diagnostic: Sprep/Sfb/Ssig enabled; GWP-ASan always; miss does not exclude heap overflow");
+}
+
 void OsVendorInit(void) {
     pthread_mutexattr_t mutex_attr;
+
+    p2a2InstallCrashProbe();
 
     if (lorieScreen.stateFd != -1) // already initialized
         return;

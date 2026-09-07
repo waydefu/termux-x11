@@ -27,7 +27,7 @@ def signingConfig = project(':lorie-app').android.signingConfigs.debug
 def keyStore = java.security.KeyStore.getInstance(java.security.KeyStore.getDefaultType())
 keyStore.load(new FileInputStream(signingConfig.storeFile), signingConfig.keyPassword.toCharArray())
 
-ext.targetApplicationId = "com.termux.x11"
+ext.targetApplicationId = "com.waydefu.x11gpu"
 ext.embeddedApplicationId = "com.termux"
 
 android.defaultConfig.buildConfigField "String", "APPLICATION_ID", "\"$targetApplicationId\""

@@ -5,7 +5,8 @@
         android:roundIcon="@mipmap/lorie_ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/LorieAppTheme"
-        android:hardwareAccelerated="true">
+        android:hardwareAccelerated="true"
+        android:gwpAsanMode="always">
         <meta-data android:name="com.samsung.android.multidisplay.keep_process_alive" android:value="false" />
     </application>
 </manifest>
