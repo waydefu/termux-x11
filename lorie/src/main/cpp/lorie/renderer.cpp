@@ -840,8 +840,11 @@ uint64_t Renderer::applyPendingGpuCopiesLocked() {
                     float u1 = (float) rec.x2 / srcUvDivisor;
                     float v0 = (float) rec.y1 / (float) srcDesc->height;
                     float v1 = (float) rec.y2 / (float) srcDesc->height;
-                    // Only swap channels if src/dst storage formats actually differ.
-                    uint8_t needsSwizzle = LorieBuffer_isRgba(src) != LorieBuffer_isRgba(dst);
+                    // Copy between matching AHB formats still uses the display BGRA
+                    // shader when src/dst disagree. Composite uploads BGRA src as
+                    // GLES RGBA (X11 LE), which already matches RGBX dest FBOs.
+                    uint8_t needsSwizzle = composite ? 0
+                        : (LorieBuffer_isRgba(src) != LorieBuffer_isRgba(dst));
                     log("rendererApplyPendingGpuCopies: rect (%d,%d)-(%d,%d) off=(%d,%d) -> ndc=(%.3f,%.3f)-(%.3f,%.3f) uv=(%.3f,%.3f)-(%.3f,%.3f) srcTex=%u dstTex=%u swizzle=%d op=%u\n",
                         rec.x1, rec.y1, rec.x2, rec.y2, entry.xOff, entry.yOff, x0, y0, x1, y1, u0, v0, u1, v1,
                         LorieBuffer_getGLTextureId(src), LorieBuffer_getGLTextureId(dst), needsSwizzle, entry.op);

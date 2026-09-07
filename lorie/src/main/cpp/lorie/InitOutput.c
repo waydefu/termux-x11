@@ -1678,6 +1678,16 @@ static void lorieExaCpuCopyRect(PixmapPtr src, PixmapPtr dst, int srcX, int srcY
     lorieFinishAccess(src, EXA_PREPARE_SRC);
 }
 
+static void lorieUnlockBgraAhb(PixmapPtr pPix) {
+    LoriePixmapPriv *sp = LORIE_PIXMAP_PRIV_FROM_PIXMAP(pPix);
+    if (sp && sp->buffer && sp->locked &&
+        LorieBuffer_description(sp->buffer)->format == AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM) {
+        LorieBuffer_unlock(sp->buffer);
+        sp->locked = NULL;
+        sp->wasLocked = FALSE;
+    }
+}
+
 static Bool lorieExaPrepareCopy(PixmapPtr src, PixmapPtr dst, unused int dx, unused int dy, int alu, Pixel planemask) {
     Pixel fullmask;
 
@@ -1696,6 +1706,7 @@ static Bool lorieExaPrepareCopy(PixmapPtr src, PixmapPtr dst, unused int dx, unu
         return FALSE;
     exaGpuCopy.src = src;
     exaGpuCopy.dst = dst;
+    lorieUnlockBgraAhb(src);
     return TRUE;
 }
 
@@ -1832,6 +1843,9 @@ static Bool lorieExaPrepareComposite(int op, PicturePtr pSrc, PicturePtr pMask, 
     }
     exaGpuComp.src = pSrcPix;
     exaGpuComp.dst = pDstPix;
+    /* BGRA AHB EGLImages sample as black here. Drop the src CPU lock so the
+     * renderer can upload BGRA bytes as GLES RGBA (same LE layout as RGBX dest). */
+    lorieUnlockBgraAhb(pSrcPix);
     exaCompPrepareTrue++;
 #ifdef __ANDROID__
     p2a2_emit("Gcomp Prepare TRUE");

@@ -438,12 +438,59 @@ __LIBC_HIDDEN__ void LorieBuffer_recvHandleFromUnixSocket(int socketFd, LorieBuf
     *outBuffer = ret;
 }
 
+/* BGRA AHB EGLImages sample as black on this GPU (RGBX EGLImages work). Upload
+ * the CPU bytes as GL_RGBA so X11 LE B,G,R,A matches RGBX dest FBOs. Tight-pack
+ * if AHB stride > width (GLES2 has no UNPACK_ROW_LENGTH). */
+static bool uploadBgraAhbAsRgba(LorieBuffer *buffer) {
+    void *pixels = NULL;
+    int32_t w, h, s, y;
+    uint8_t *tight = NULL;
+    const void *upload;
+    int err;
+
+    if (!buffer || !buffer->desc.buffer ||
+        buffer->desc.format != AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM)
+        return false;
+    w = buffer->desc.width;
+    h = buffer->desc.height;
+    s = buffer->desc.stride;
+    if (w <= 0 || h <= 0 || s < w)
+        return false;
+    if (!__builtin_available(android 26, *))
+        return false;
+    err = AHardwareBuffer_lock(buffer->desc.buffer, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, NULL, &pixels);
+    if (err != 0 || !pixels)
+        return false;
+    upload = pixels;
+    if (s != w) {
+        tight = malloc((size_t) w * (size_t) h * 4);
+        if (!tight) {
+            AHardwareBuffer_unlock(buffer->desc.buffer, NULL);
+            return false;
+        }
+        for (y = 0; y < h; y++)
+            memcpy(tight + (size_t) y * w * 4,
+                   (uint8_t *) pixels + (size_t) y * s * 4,
+                   (size_t) w * 4);
+        upload = tight;
+    }
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, upload);
+    free(tight);
+    AHardwareBuffer_unlock(buffer->desc.buffer, NULL);
+    return true;
+}
+
 __LIBC_HIDDEN__ void LorieBuffer_attachToGL(LorieBuffer* buffer) {
     const EGLint imageAttributes[] = { EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE };
+    bool bgraAhb;
     if (!eglGetCurrentDisplay() || !buffer)
         return;
 
-    if (buffer->image == NULL && buffer->desc.buffer && eglGetNativeClientBufferANDROID)
+    bgraAhb = buffer->desc.format == AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM && buffer->desc.buffer;
+
+    /* Do not EGLImage BGRA: sampling it in the composite FBO path is black. */
+    if (!bgraAhb && buffer->image == NULL && buffer->desc.buffer && eglGetNativeClientBufferANDROID)
         buffer->image = eglCreateImageKHR(eglGetCurrentDisplay(), EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, eglGetNativeClientBufferANDROID(buffer->desc.buffer), imageAttributes);
 
     glGenTextures(1, &buffer->id);
@@ -451,7 +498,10 @@ __LIBC_HIDDEN__ void LorieBuffer_attachToGL(LorieBuffer* buffer) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    if (buffer->image)
+    if (bgraAhb) {
+        if (!uploadBgraAhbAsRgba(buffer) && buffer->desc.width > 0 && buffer->desc.height > 0)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, buffer->desc.width, buffer->desc.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    } else if (buffer->image)
         glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, buffer->image);
     else if (buffer->desc.data && buffer->desc.width > 0 && buffer->desc.height > 0) {
         int format = buffer->desc.format == AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM ? GL_BGRA_EXT : GL_RGBA;
@@ -467,6 +517,8 @@ __LIBC_HIDDEN__ void LorieBuffer_bindTexture(LorieBuffer *buffer) {
     glBindTexture(GL_TEXTURE_2D, buffer->id);
     if (buffer->desc.type == LORIEBUFFER_FD)
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, buffer->desc.stride, buffer->desc.height, buffer->desc.format == AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM ? GL_BGRA_EXT : GL_RGBA, GL_UNSIGNED_BYTE, buffer->desc.data);
+    else if (buffer->desc.format == AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM && buffer->desc.buffer)
+        uploadBgraAhbAsRgba(buffer);
 }
 
 __LIBC_HIDDEN__ unsigned int LorieBuffer_getGLTextureId(LorieBuffer *buffer) {
