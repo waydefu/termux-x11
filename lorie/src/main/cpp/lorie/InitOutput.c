@@ -1152,6 +1152,9 @@ static struct {
     uint64_t lastSerial;
     int scheduled;
     void *dstBuf;
+    int nrepair;
+    BoxRec repair[32];
+    BoxRec repairUnion;
 } exaGpuSolid;
 
 Bool loriePrepareAccess(PixmapPtr pPix, int index);
@@ -1239,6 +1242,34 @@ static void lorieExaCpuSolidRect(PixmapPtr dst, int x1, int y1, int x2, int y2, 
     lorieFinishAccess(dst, EXA_PREPARE_DEST);
 }
 
+static void lorieExaRepairSolidXByte(PixmapPtr dst, BoxPtr boxes, int nbox, Pixel fg) {
+    int b, y, x, x1, y1, x2, y2, dstride;
+    uint8_t xbyte, *d;
+
+    if (!dst || nbox <= 0 || dst->drawable.bitsPerPixel != 32)
+        return;
+    xbyte = (uint8_t) ((fg >> 24) & 0xff);
+    if (!loriePrepareAccess(dst, EXA_PREPARE_DEST))
+        return;
+    d = dst->devPrivate.ptr;
+    dstride = dst->devKind;
+    if (d) {
+        for (b = 0; b < nbox; b++) {
+            x1 = boxes[b].x1; y1 = boxes[b].y1; x2 = boxes[b].x2; y2 = boxes[b].y2;
+            if (x1 < 0) x1 = 0;
+            if (y1 < 0) y1 = 0;
+            if (x2 > dst->drawable.width) x2 = dst->drawable.width;
+            if (y2 > dst->drawable.height) y2 = dst->drawable.height;
+            for (y = y1; y < y2; y++) {
+                uint8_t *row = d + y * dstride + x1 * 4;
+                for (x = 0; x < x2 - x1; x++)
+                    row[x * 4 + 3] = xbyte;
+            }
+        }
+    }
+    lorieFinishAccess(dst, EXA_PREPARE_DEST);
+}
+
 static Bool lorieExaPrepareSolid(PixmapPtr dst, int alu, Pixel planemask, Pixel fg) {
     Pixel fullmask;
 
@@ -1284,9 +1315,20 @@ static void lorieExaSolid(PixmapPtr dst, int x1, int y1, int x2, int y2) {
         scheduled = lorieTryScheduleGpuSolid(dst, x1, y1, x2, y2, exaGpuSolid.fg, &serial, &dstBuf);
     }
     if (scheduled) {
+        BoxRec box = { (short) x1, (short) y1, (short) x2, (short) y2 };
         exaGpuSolid.lastSerial = serial;
         exaGpuSolid.scheduled++;
         exaGpuSolid.dstBuf = dstBuf;
+        if (exaGpuSolid.nrepair == 0)
+            exaGpuSolid.repairUnion = box;
+        else {
+            if (box.x1 < exaGpuSolid.repairUnion.x1) exaGpuSolid.repairUnion.x1 = box.x1;
+            if (box.y1 < exaGpuSolid.repairUnion.y1) exaGpuSolid.repairUnion.y1 = box.y1;
+            if (box.x2 > exaGpuSolid.repairUnion.x2) exaGpuSolid.repairUnion.x2 = box.x2;
+            if (box.y2 > exaGpuSolid.repairUnion.y2) exaGpuSolid.repairUnion.y2 = box.y2;
+        }
+        if (exaGpuSolid.nrepair < 32)
+            exaGpuSolid.repair[exaGpuSolid.nrepair++] = box;
         exaSolidRects++;
         return;
     }
@@ -1302,6 +1344,13 @@ static void lorieExaDoneSolid(unused PixmapPtr dst) {
         if (!lorieGpuCopyWait(exaGpuSolid.lastSerial, 2000))
             log(ERROR, "EXA GPU solid wait timeout serial=%llu scheduled=%d",
                 (unsigned long long) exaGpuSolid.lastSerial, exaGpuSolid.scheduled);
+        /* R8G8B8X8 FBO writes leave the unused byte 0xFF. 24bpp X11 pixels store 0 there. */
+        if (dst && dst->drawable.depth < 32) {
+            if (exaGpuSolid.nrepair > 0 && exaGpuSolid.nrepair < 32)
+                lorieExaRepairSolidXByte(dst, exaGpuSolid.repair, exaGpuSolid.nrepair, exaGpuSolid.fg);
+            else
+                lorieExaRepairSolidXByte(dst, &exaGpuSolid.repairUnion, 1, exaGpuSolid.fg);
+        }
         for (i = 0; i < exaGpuSolid.scheduled; i++)
             lorieGpuCopyAck(NULL, exaGpuSolid.dstBuf);
     }
