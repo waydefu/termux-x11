@@ -268,7 +268,50 @@ __LIBC_HIDDEN__ void LorieBuffer_convert(LorieBuffer* buffer, int8_t type, int8_
 
         if (__builtin_available(android 26, *)) {
             if (AHardwareBuffer_lock(b, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN | AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN, -1, NULL, &data) == 0) {
+#ifdef __ANDROID__
+                {
+                    uint32_t src_px = 0, dst_px = 0;
+                    uint32_t hash = 2166136261u;
+                    memcpy(&src_px, buffer->desc.data, sizeof(src_px));
+                    memcpy(&dst_px, data, sizeof(dst_px));
+                    hash ^= dst_px & 0xff;
+                    hash *= 16777619u;
+                    hash ^= (dst_px >> 8) & 0xff;
+                    hash *= 16777619u;
+                    hash ^= (dst_px >> 16) & 0xff;
+                    hash *= 16777619u;
+                    hash ^= (dst_px >> 24) & 0xff;
+                    hash *= 16777619u;
+                    dprintf(2, "R3 S1_AHB buffer=%p src=%p ahb=%p dst=%p "
+                               "w=%d h=%d srcStride=%d dstStride=%d format=%u "
+                               "req=0,0 srcPx=%08x dstPx=%08x hash=%08x\n",
+                            (void *) buffer, buffer->desc.data, (void *) b, data,
+                            buffer->desc.width, buffer->desc.height, buffer->desc.stride,
+                            desc.stride, desc.format, src_px, dst_px, hash);
+                }
                 pixman_blt(buffer->desc.data, data, buffer->desc.stride, desc.stride, 32, 32, 0, 0, 0, 0, buffer->desc.width, buffer->desc.height);
+#ifdef __ANDROID__
+                {
+                    uint32_t src_px = 0, dst_px = 0;
+                    uint32_t hash = 2166136261u;
+                    memcpy(&src_px, buffer->desc.data, sizeof(src_px));
+                    memcpy(&dst_px, data, sizeof(dst_px));
+                    hash ^= dst_px & 0xff;
+                    hash *= 16777619u;
+                    hash ^= (dst_px >> 8) & 0xff;
+                    hash *= 16777619u;
+                    hash ^= (dst_px >> 16) & 0xff;
+                    hash *= 16777619u;
+                    hash ^= (dst_px >> 24) & 0xff;
+                    hash *= 16777619u;
+                    dprintf(2, "R3 S2_AHB_COPY buffer=%p src=%p ahb=%p dst=%p "
+                               "w=%d h=%d srcStride=%d dstStride=%d format=%u "
+                               "req=0,0 srcPx=%08x dstPx=%08x hash=%08x\n",
+                            (void *) buffer, buffer->desc.data, (void *) b, data,
+                            buffer->desc.width, buffer->desc.height, buffer->desc.stride,
+                            desc.stride, desc.format, src_px, dst_px, hash);
+                }
+#endif
                 AHardwareBuffer_unlock(b, NULL);
             }
         }

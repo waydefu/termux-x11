@@ -130,6 +130,70 @@ typedef struct {
 #define LORIE_PIXMAP_PRIV_FROM_PIXMAP(pixmap) (pixmap ? ((LoriePixmapPriv*) exaGetPixmapDriverPrivate(pixmap)) : NULL)
 #define LORIE_BUFFER_FROM_PIXMAP(pixmap) (pixmap ? ((LoriePixmapPriv*) exaGetPixmapDriverPrivate(pixmap))->buffer : NULL)
 
+#ifdef __ANDROID__
+static uint32_t lorieP2b2HashRect(const uint8_t *base, int width, int height, int stride,
+                                   int x, int y, int rectWidth, int rectHeight) {
+    uint32_t hash = 2166136261u;
+    int row, col;
+
+    if (!base || width <= 0 || height <= 0 || stride < width ||
+        x < 0 || y < 0 || x >= width || y >= height || rectWidth <= 0 || rectHeight <= 0)
+        return 0;
+    if (rectWidth > width - x)
+        rectWidth = width - x;
+    if (rectHeight > height - y)
+        rectHeight = height - y;
+    for (row = 0; row < rectHeight; row++) {
+        const uint8_t *p = base + (size_t) (y + row) * (size_t) stride * 4 + (size_t) x * 4;
+        for (col = 0; col < rectWidth * 4; col++) {
+            hash ^= p[col];
+            hash *= 16777619u;
+        }
+    }
+    return hash;
+}
+
+static void lorieP2b2Stamp(const char *stage, PixmapPtr pixmap, LoriePixmapPriv *priv,
+                           const LorieBuffer_Desc *desc, const void *base,
+                           int requestedType, int srcX, int srcY, int width, int height) {
+    const uint8_t *pixel = NULL;
+    uint8_t first[8] = {0};
+    uint32_t px = 0;
+    uint32_t hash;
+    int i;
+    char msg[640];
+
+    if (base && desc && srcX >= 0 && srcY >= 0 &&
+        srcX < desc->width && srcY < desc->height) {
+        pixel = (const uint8_t *) base +
+                (size_t) srcY * (size_t) desc->stride * 4 + (size_t) srcX * 4;
+        memcpy(&px, pixel, sizeof(px));
+        memcpy(first, pixel, sizeof(first));
+    }
+    hash = lorieP2b2HashRect((const uint8_t *) base,
+                             desc ? desc->width : 0, desc ? desc->height : 0,
+                             desc ? desc->stride : 0, srcX, srcY, width, height);
+    snprintf(msg, sizeof(msg),
+             "R3 %s pix=%p priv=%p buf=%p type=%u reqType=%d w=%d h=%d stride=%d "
+             "depth=%d bpp=%d devKind=%d devptr=%p data=%p locked=%p mem=%p ahb=%p "
+             "req=%d,%d rect=%dx%d addr=%p px=%08x first=%02x%02x%02x%02x%02x%02x%02x%02x "
+             "hash=%08x",
+             stage, (void *) pixmap, (void *) priv, priv ? (void *) priv->buffer : NULL,
+             desc ? desc->type : 0, requestedType,
+             desc ? desc->width : 0, desc ? desc->height : 0, desc ? desc->stride : 0,
+             pixmap ? pixmap->drawable.depth : 0,
+             pixmap ? pixmap->drawable.bitsPerPixel : 0,
+             pixmap ? pixmap->devKind : 0,
+             pixmap ? pixmap->devPrivate.ptr : NULL,
+             desc ? desc->data : NULL, priv ? priv->locked : NULL,
+             priv ? priv->mem : NULL, desc ? (void *) desc->buffer : NULL,
+             srcX, srcY, width, height, (void *) pixel, px,
+             first[0], first[1], first[2], first[3], first[4], first[5], first[6], first[7],
+             hash);
+    p2a2_emit(msg);
+}
+#endif
+
 static LorieBuffer *lorieEnsureGpuSampleable(PixmapPtr pixmap, int8_t type) {
     LoriePixmapPriv *priv = LORIE_PIXMAP_PRIV_FROM_PIXMAP(pixmap);
     const LorieBuffer_Desc *desc;
@@ -141,11 +205,17 @@ static LorieBuffer *lorieEnsureGpuSampleable(PixmapPtr pixmap, int8_t type) {
         int8_t format = pixmap->drawable.depth >= 32
             ? AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM
             : AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM;
+#ifdef __ANDROID__
+        lorieP2b2Stamp("S0_REGULAR", pixmap, priv, desc, desc->data, type, 0, 0, 1, 1);
+#endif
         LorieBuffer_convert(priv->buffer, type, format);
         if (desc->type != LORIEBUFFER_REGULAR) {
             // LorieBuffer_convert does not report status but it does not let the type change in the case of error.
             pScreenPtr->ModifyPixmapHeader(pixmap, 0, 0, 0, 0, desc->stride * 4, NULL);
             LorieBuffer_lock(priv->buffer, &priv->locked);
+#ifdef __ANDROID__
+            lorieP2b2Stamp("S2_AHB", pixmap, priv, desc, priv->locked, type, 0, 0, 1, 1);
+#endif
         }
     }
 
@@ -1982,6 +2052,19 @@ static void lorieExaComposite(PixmapPtr dst, int srcX, int srcY, unused int mask
         return;
     box = (BoxRec) { (short) srcX, (short) srcY, (short) (srcX + width), (short) (srcY + height) };
     RegionInit(&region, &box, 1);
+#ifdef __ANDROID__
+    {
+        LoriePixmapPriv *sp = LORIE_PIXMAP_PRIV_FROM_PIXMAP(exaGpuComp.src);
+        const LorieBuffer_Desc *sd = sp && sp->buffer ? LorieBuffer_description(sp->buffer) : NULL;
+        lorieP2b2Stamp("REQ_AHB", exaGpuComp.src, sp, sd, sp ? sp->locked : NULL,
+                       LORIEBUFFER_AHARDWAREBUFFER, srcX, srcY, width, height);
+        if (exaCompSrcUpload) {
+            const LorieBuffer_Desc *ud = LorieBuffer_description(exaCompSrcUpload);
+            lorieP2b2Stamp("S3_FD", exaGpuComp.src, sp, ud, ud->data,
+                           LORIEBUFFER_FD, srcX, srcY, width, height);
+        }
+    }
+#endif
     scheduled = lorieTryScheduleGpuBlit(exaGpuComp.src, dst, &region,
                                         (int16_t) (dstX - srcX), (int16_t) (dstY - srcY),
                                         LORIE_GPU_OP_COMPOSITE, &serial, &dstBuf);
