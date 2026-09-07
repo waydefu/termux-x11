@@ -1288,6 +1288,46 @@ Bool lorieTryScheduleGpuCopy(PixmapPtr pixmap, PixmapPtr dst, RegionPtr update, 
                                    out_serial, out_dst_buffer);
 }
 
+/* FD snapshot of a locked BGRA AHB src so the renderer can glTexSubImage2D as GLES
+ * RGBA. Renderer-side AHardwareBuffer_lock of the live AHB fails while X holds it. */
+static LorieBuffer *exaCompSrcUpload;
+
+static LorieBuffer *lorieCloneBgraAhbToFd(PixmapPtr pixmap) {
+    LoriePixmapPriv *priv = LORIE_PIXMAP_PRIV_FROM_PIXMAP(pixmap);
+    const LorieBuffer_Desc *d, *dd;
+    LorieBuffer *fd;
+    uint8_t *src, *dst;
+    int32_t y, w, h, ss, ds;
+
+    if (!priv || !priv->buffer || !priv->locked)
+        return NULL;
+    d = LorieBuffer_description(priv->buffer);
+    if (d->type != LORIEBUFFER_AHARDWAREBUFFER ||
+        d->format != AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM)
+        return NULL;
+    fd = LorieBuffer_allocate(d->width, d->height, AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM, LORIEBUFFER_FD);
+    if (!fd)
+        return NULL;
+    dd = LorieBuffer_description(fd);
+    src = priv->locked;
+    dst = dd->data;
+    if (!dst) {
+        LorieBuffer_release(fd);
+        return NULL;
+    }
+    w = d->width;
+    h = d->height;
+    ss = d->stride;
+    ds = dd->stride;
+    if (w <= 0 || h <= 0 || ss < w || ds < w) {
+        LorieBuffer_release(fd);
+        return NULL;
+    }
+    for (y = 0; y < h; y++)
+        memcpy(dst + (size_t) y * ds * 4, src + (size_t) y * ss * 4, (size_t) w * 4);
+    return fd;
+}
+
 static Bool lorieTryScheduleGpuBlit(PixmapPtr pixmap, PixmapPtr dst, RegionPtr update, int16_t x_off, int16_t y_off,
                                     uint8_t gpuOp, uint64_t *out_serial, void **out_dst_buffer) {
     LorieBuffer *srcBuffer, *dstBuffer;
@@ -1322,6 +1362,10 @@ static Bool lorieTryScheduleGpuBlit(PixmapPtr pixmap, PixmapPtr dst, RegionPtr u
     priv = LORIE_PIXMAP_PRIV_FROM_PIXMAP(pixmap);
     desc = LorieBuffer_description(srcBuffer);
     dstDesc = LorieBuffer_description(dstBuffer);
+    if (gpuOp == LORIE_GPU_OP_COMPOSITE && exaCompSrcUpload) {
+        srcBuffer = exaCompSrcUpload;
+        desc = LorieBuffer_description(srcBuffer);
+    }
 
     if (update) {
         numRects = RegionNumRects(update);
@@ -1843,9 +1887,30 @@ static Bool lorieExaPrepareComposite(int op, PicturePtr pSrc, PicturePtr pMask, 
     }
     exaGpuComp.src = pSrcPix;
     exaGpuComp.dst = pDstPix;
-    /* BGRA AHB EGLImages sample as black here. Drop the src CPU lock so the
-     * renderer can upload BGRA bytes as GLES RGBA (same LE layout as RGBX dest). */
-    lorieUnlockBgraAhb(pSrcPix);
+    if (exaCompSrcUpload) {
+        LorieBuffer_release(exaCompSrcUpload);
+        exaCompSrcUpload = NULL;
+    }
+    /* Snapshot BGRA src into an FD while X still holds the CPU lock. Renderer
+     * cannot AHardwareBuffer_lock the live AHB, and BGRA EGLImages sample black. */
+    exaCompSrcUpload = lorieCloneBgraAhbToFd(pSrcPix);
+    if (!exaCompSrcUpload) {
+        exaCompPrepareFalse++;
+#ifdef __ANDROID__
+        p2a2_emit("Gcomp Prepare FALSE");
+#endif
+        return FALSE;
+    }
+#ifdef __ANDROID__
+    {
+        LoriePixmapPriv *sp = LORIE_PIXMAP_PRIV_FROM_PIXMAP(pSrcPix);
+        uint32_t px0 = sp && sp->locked ? *((uint32_t *) sp->locked) : 0;
+        char msg[96];
+        snprintf(msg, sizeof(msg), "Gcomp FDCLONE id=%llu px0=%08x",
+                 (unsigned long long) LorieBuffer_description(exaCompSrcUpload)->id, px0);
+        p2a2_emit(msg);
+    }
+#endif
     exaCompPrepareTrue++;
 #ifdef __ANDROID__
     p2a2_emit("Gcomp Prepare TRUE");
@@ -1961,6 +2026,7 @@ static void lorieExaComposite(PixmapPtr dst, int srcX, int srcY, unused int mask
 
 static void lorieExaDoneComposite(PixmapPtr dst) {
     int i;
+    LorieBuffer *upload = exaCompSrcUpload;
 
     if (exaGpuComp.scheduled) {
         if (!lorieGpuCopyWait(exaGpuComp.lastSerial, 2000))
@@ -1972,8 +2038,23 @@ static void lorieExaDoneComposite(PixmapPtr dst) {
             else
                 lorieExaRepairDestXByteZero(dst, &exaGpuComp.repairUnion, 1);
         }
-        for (i = 0; i < exaGpuComp.scheduled; i++)
-            lorieGpuCopyAck(exaGpuComp.src, exaGpuComp.dstBuf);
+        for (i = 0; i < exaGpuComp.scheduled; i++) {
+            if (upload) {
+                LorieBuffer_gpuCopyPendingDec(upload);
+                LorieBuffer_release(upload);
+                if (exaGpuComp.dstBuf) {
+                    LorieBuffer_gpuCopyPendingDec((LorieBuffer *) exaGpuComp.dstBuf);
+                    LorieBuffer_release((LorieBuffer *) exaGpuComp.dstBuf);
+                } else
+                    pvfb->rootGpuCopyPending--;
+            } else {
+                lorieGpuCopyAck(exaGpuComp.src, exaGpuComp.dstBuf);
+            }
+        }
+    }
+    if (upload) {
+        LorieBuffer_release(upload);
+        exaCompSrcUpload = NULL;
     }
     exaCompDone++;
 #ifdef __ANDROID__

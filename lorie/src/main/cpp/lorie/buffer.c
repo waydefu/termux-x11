@@ -459,8 +459,10 @@ static bool uploadBgraAhbAsRgba(LorieBuffer *buffer) {
     if (!__builtin_available(android 26, *))
         return false;
     err = AHardwareBuffer_lock(buffer->desc.buffer, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN, -1, NULL, &pixels);
-    if (err != 0 || !pixels)
+    if (err != 0 || !pixels) {
+        dprintf(2, "uploadBgraAhbAsRgba: AHardwareBuffer_lock err=%d pixels=%p\n", err, pixels);
         return false;
+    }
     upload = pixels;
     if (s != w) {
         tight = malloc((size_t) w * (size_t) h * 4);
@@ -504,9 +506,8 @@ __LIBC_HIDDEN__ void LorieBuffer_attachToGL(LorieBuffer* buffer) {
     } else if (buffer->image)
         glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, buffer->image);
     else if (buffer->desc.data && buffer->desc.width > 0 && buffer->desc.height > 0) {
-        int format = buffer->desc.format == AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM ? GL_BGRA_EXT : GL_RGBA;
-        // The image will be updated in redraw call because of `drawRequested` flag, so we are not uploading pixels
-        glTexImage2D(GL_TEXTURE_2D, 0, format, buffer->desc.stride, buffer->desc.height, 0, format, GL_UNSIGNED_BYTE, NULL);
+        /* X11 LE B,G,R,A uploaded as GL_RGBA; GL_BGRA_EXT samples black on this GPU. */
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, buffer->desc.stride, buffer->desc.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     }
 }
 
@@ -516,7 +517,7 @@ __LIBC_HIDDEN__ void LorieBuffer_bindTexture(LorieBuffer *buffer) {
 
     glBindTexture(GL_TEXTURE_2D, buffer->id);
     if (buffer->desc.type == LORIEBUFFER_FD)
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, buffer->desc.stride, buffer->desc.height, buffer->desc.format == AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM ? GL_BGRA_EXT : GL_RGBA, GL_UNSIGNED_BYTE, buffer->desc.data);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, buffer->desc.stride, buffer->desc.height, GL_RGBA, GL_UNSIGNED_BYTE, buffer->desc.data);
     else if (buffer->desc.format == AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM && buffer->desc.buffer)
         uploadBgraAhbAsRgba(buffer);
 }
