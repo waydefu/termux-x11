@@ -653,3 +653,144 @@
      free(xkbbasedirflag);
  
      if (!buf) {
+--- ./exa/exa_render.c
++++ ./exa/exa_render.c
+@@ -31,6 +31,7 @@
+ #include "exa_priv.h"
+ 
+ #include "mipict.h"
++#include <android/log.h>
+ 
+ #if DEBUG_TRACE_FALL
+ static void
+@@ -881,6 +882,12 @@
+     Bool saveMaskRepeat = pMask ? pMask->repeat : 0;
+     RegionRec region;
+ 
++    __android_log_print(6, "LorieNative",
++                        "P2STAGE S1 exaComposite op=%u w=%u h=%u srcDrw=%p maskDrw=%p dstDrw=%p",
++                        (unsigned)op, (unsigned)width, (unsigned)height,
++                        (void*)pSrc->pDrawable, (void*)(pMask ? pMask->pDrawable : 0),
++                        (void*)pDst->pDrawable);
++
+     if (pExaScr->swappedOut)
+         goto fallback;
+ 
+@@ -890,6 +897,10 @@
+         (ySrc + height) <= pSrc->pDrawable->height)
+         pSrc->repeat = 0;
+ 
++
++    __android_log_print(6, "LorieNative",
++                        "P2STAGE S2 fastpath-check op=%u srcFmt=%08x dstFmt=%08x",
++                        (unsigned)op, (unsigned)pSrc->format, (unsigned)pDst->format);
+     if (!pMask && !pSrc->alphaMap && !pDst->alphaMap &&
+         (op == PictOpSrc || (op == PictOpOver && !PICT_FORMAT_A(pSrc->format))))
+     {
+@@ -935,6 +946,7 @@
+                                     RegionNumRects(&region), xSrc - xDst,
+                                     ySrc - yDst, FALSE, FALSE);
+                 RegionUninit(&region);
++                __android_log_print(6, "LorieNative", "P2STAGE S3 hwcopy suc=%d", (int)suc);
+ 
+                 /* Reset values to their original values. */
+                 xDst -= pDst->pDrawable->x;
+@@ -996,6 +1008,7 @@
+         }
+     }
+ 
++    __android_log_print(6, "LorieNative", "P2STAGE S4 trydriver op=%u", (unsigned)op);
+     /* Remove repeat in mask if useless */
+     if (pMask && pMask->pDrawable && pMask->repeat && !pMask->transform &&
+         xMask >= 0 && (xMask + width) <= pMask->pDrawable->width &&
+@@ -1008,6 +1021,7 @@
+ 
+         ret = exaTryDriverComposite(op, pSrc, pMask, pDst, xSrc, ySrc, xMask,
+                                     yMask, xDst, yDst, width, height);
++        __android_log_print(6, "LorieNative", "P2STAGE S5 trydriver ret=%d", ret);
+         if (ret == 1)
+             goto done;
+ 
+@@ -1039,8 +1053,10 @@
+     exaPrintCompositeFallback(op, pSrc, pMask, pDst);
+ #endif
+ 
++    __android_log_print(6, "LorieNative", "P2STAGE S6 fallback op=%u", (unsigned)op);
+     ExaCheckComposite(op, pSrc, pMask, pDst, xSrc, ySrc,
+                       xMask, yMask, xDst, yDst, width, height);
++    __android_log_print(6, "LorieNative", "P2STAGE S8 done op=%u", (unsigned)op);
+ 
+  done:
+     pSrc->repeat = saveSrcRepeat;
+--- ./exa/exa.c
++++ ./exa/exa.c
+@@ -36,6 +36,7 @@
+ 
+ #include "exa_priv.h"
+ #include "exa.h"
++#include <android/log.h>
+ 
+ DevPrivateKeyRec exaScreenPrivateKeyRec;
+ 
+@@ -360,6 +361,11 @@
+ 
+  out:
+     pExaScr->access[index].retval = ret;
++    __android_log_print(6, "LorieNative",
++                        "P2STAGE Sprep pix=%p idx=%d hasgpu=%d fb=%p sys=%p syspitch=%d devKind=%d ret=%d",
++                        (void*)pPixmap, index, (int)has_gpu_copy,
++                        pExaPixmap->fb_ptr, pExaPixmap->sys_ptr, pExaPixmap->sys_pitch,
++                        pPixmap->devKind, (int)ret);
+     return ret;
+ }
+ 
+--- ./exa/exa_unaccel.c
++++ ./exa/exa_unaccel.c
+@@ -24,6 +24,7 @@
+ #include "exa_priv.h"
+ 
+ #include "mipict.h"
++#include <android/log.h>
+ 
+ /*
+  * These functions wrap the low-level fb rendering functions and
+@@ -631,6 +632,31 @@
+             exaPrepareAccess(pMask->pDrawable, EXA_PREPARE_MASK);
+     }
+ 
++
++    {
++        DrawablePtr _dd[3];
++        const char *_nm = "smd";
++        int _i;
++        _dd[0] = pSrc->pDrawable;
++        _dd[1] = pMask ? pMask->pDrawable : NULL;
++        _dd[2] = pDst->pDrawable;
++        for (_i = 0; _i < 3; _i++) {
++            if (_dd[_i] && _dd[_i]->type == DRAWABLE_PIXMAP) {
++                PixmapPtr _pp = (PixmapPtr) _dd[_i];
++                __android_log_print(6, "LorieNative",
++                                    "P2STAGE S7a pict=%c ptr=%p devKind=%d %dx%d depth=%d",
++                                    _nm[_i], (void*)_pp->devPrivate.ptr, _pp->devKind,
++                                    _pp->drawable.width, _pp->drawable.height,
++                                    _pp->drawable.depth);
++            }
++            else {
++                __android_log_print(6, "LorieNative",
++                                    "P2STAGE S7a pict=%c drawable=%p type=%d",
++                                    _nm[_i], (void*)_dd[_i],
++                                    _dd[_i] ? _dd[_i]->type : -1);
++            }
++        }
++    }
+     swap(pExaScr, ps, Composite);
+     ps->Composite(op,
+                   pSrc,
+@@ -638,6 +664,7 @@
+                   pDst, xSrc, ySrc, xMask, yMask, xDst, yDst, width, height);
+     swap(pExaScr, ps, Composite);
+     if (pMask && pMask->pDrawable != NULL)
++    __android_log_print(6, "LorieNative", "P2STAGE S7b fbComposite returned op=%u", (unsigned)op);
+         exaFinishAccess(pMask->pDrawable, EXA_PREPARE_MASK);
+     if (pSrc->pDrawable != NULL)
+         exaFinishAccess(pSrc->pDrawable, EXA_PREPARE_SRC);
