@@ -617,10 +617,15 @@ static void lorieCompositeProbe(CARD8 op, PicturePtr pSrc, PicturePtr pMask, Pic
 
 static void lorieInstallXRenderProbe(ScreenPtr pScreen) {
     PictureScreenPtr ps = GetPictureScreenIfSet(pScreen);
-    if (!ps || lorieSavedComposite)
+    if (!ps) {
+        log(ERROR, "XRender probe: PictureScreen missing");
+        return;
+    }
+    if (ps->Composite == lorieCompositeProbe)
         return;
     lorieSavedComposite = ps->Composite;
     ps->Composite = lorieCompositeProbe;
+    log(INFO, "XRender histogram probe installed");
 }
 
 static CARD32 lorieFramecounter(unused OsTimerPtr timer, unused CARD32 time, unused void *arg) {
@@ -676,6 +681,7 @@ static Bool lorieCreateScreenResources(ScreenPtr pScreen) {
     pvfb->fpsTimer = TimerSet(NULL, 0, 5000, lorieFramecounter, pScreen);
 
     lorieRegisterBuffer(LORIE_BUFFER_FROM_PIXMAP(pScreenPtr->devPrivate));
+    lorieInstallXRenderProbe(pScreen);
 
     return TRUE;
 }
