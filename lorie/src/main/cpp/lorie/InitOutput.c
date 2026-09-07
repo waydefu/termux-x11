@@ -95,6 +95,9 @@ typedef struct {
 
     uint64_t gpuCopySerialCounter;
     uint64_t rootGpuCopyPending;
+
+    Bool xrenderProbeInstalled;
+    CompositeProcPtr xrenderSavedComposite;
 } lorieScreenInfo;
 
 ScreenPtr pScreenPtr;
@@ -746,7 +749,10 @@ typedef struct {
 } XRenderHistEnt;
 static XRenderHistEnt xrenderHist[XRENDER_HIST_SLOTS];
 static uint64_t xrenderOps = 0;
-static CompositeProcPtr lorieSavedComposite = NULL;
+static int p2a4ProbeDepth;
+static int p2a4ProbeMaxDepth;
+static uint64_t p2a4ProbeEnter;
+static uint64_t p2a4ProbeReturn;
 
 static uint8_t xrenderSizeBucket(int w, int h) {
     int m = w > h ? w : h;
@@ -801,21 +807,75 @@ static void xrenderHistRecord(int op, PicturePtr src, PicturePtr mask, PicturePt
 static void lorieCompositeProbe(CARD8 op, PicturePtr pSrc, PicturePtr pMask, PicturePtr pDst,
                                 INT16 xSrc, INT16 ySrc, INT16 xMask, INT16 yMask,
                                 INT16 xDst, INT16 yDst, CARD16 width, CARD16 height) {
+    CompositeProcPtr saved = pvfb->xrenderSavedComposite;
+#ifdef __ANDROID__
+    {
+        char msg[256];
+
+        p2a4ProbeEnter++;
+        p2a4ProbeDepth++;
+        if (p2a4ProbeDepth > p2a4ProbeMaxDepth)
+            p2a4ProbeMaxDepth = p2a4ProbeDepth;
+        snprintf(msg, sizeof(msg),
+                 "Probe ENTER depth=%d max=%d enter=%llu return=%llu saved=%p",
+                 p2a4ProbeDepth, p2a4ProbeMaxDepth,
+                 (unsigned long long) p2a4ProbeEnter,
+                 (unsigned long long) p2a4ProbeReturn, (void *) saved);
+        p2a2_emit(msg);
+    }
+#endif
     xrenderHistRecord(op, pSrc, pMask, pDst, width, height);
-    if (lorieSavedComposite)
-        lorieSavedComposite(op, pSrc, pMask, pDst, xSrc, ySrc, xMask, yMask, xDst, yDst, width, height);
+    if (saved)
+        saved(op, pSrc, pMask, pDst, xSrc, ySrc, xMask, yMask, xDst, yDst, width, height);
+#ifdef __ANDROID__
+    {
+        char msg[256];
+
+        snprintf(msg, sizeof(msg),
+                 "Probe RETURN depth=%d enter=%llu return=%llu",
+                 p2a4ProbeDepth,
+                 (unsigned long long) p2a4ProbeEnter,
+                 (unsigned long long) (p2a4ProbeReturn + 1));
+        p2a2_emit(msg);
+        p2a4ProbeReturn++;
+        if (p2a4ProbeDepth > 0)
+            p2a4ProbeDepth--;
+    }
+#endif
 }
 
 static void lorieInstallXRenderProbe(ScreenPtr pScreen) {
     PictureScreenPtr ps = GetPictureScreenIfSet(pScreen);
+#ifdef __ANDROID__
+    char msg[256];
+#endif
+
     if (!ps) {
         log(ERROR, "XRender probe: PictureScreen missing");
         return;
     }
-    if (ps->Composite == lorieCompositeProbe)
+    /* Idempotent on per-screen state, not ps->Composite == probe.
+     * Damage wrap changes ps->Composite after the first install; comparing
+     * the live hook would re-enter and create a probe↔damage cycle. */
+    if (pvfb->xrenderProbeInstalled) {
+#ifdef __ANDROID__
+        snprintf(msg, sizeof(msg),
+                 "InstallProbe installed=1 SKIP saved=%p current=%p",
+                 (void *) pvfb->xrenderSavedComposite, (void *) ps->Composite);
+        p2a2_emit(msg);
+#endif
+        log(INFO, "XRender histogram probe already installed; skip");
         return;
-    lorieSavedComposite = ps->Composite;
+    }
+#ifdef __ANDROID__
+    snprintf(msg, sizeof(msg),
+             "InstallProbe installed=0 saved=%p new=lorieCompositeProbe current=%p",
+             (void *) ps->Composite, (void *) ps->Composite);
+    p2a2_emit(msg);
+#endif
+    pvfb->xrenderSavedComposite = ps->Composite;
     ps->Composite = lorieCompositeProbe;
+    pvfb->xrenderProbeInstalled = TRUE;
     log(INFO, "XRender histogram probe installed");
 }
 
@@ -872,12 +932,19 @@ static Bool lorieCreateScreenResources(ScreenPtr pScreen) {
     pvfb->fpsTimer = TimerSet(NULL, 0, 5000, lorieFramecounter, pScreen);
 
     lorieRegisterBuffer(LORIE_BUFFER_FROM_PIXMAP(pScreenPtr->devPrivate));
-    lorieInstallXRenderProbe(pScreen);
 
     return TRUE;
 }
 
 static Bool lorieCloseScreen(ScreenPtr pScreen) {
+    PictureScreenPtr ps = GetPictureScreenIfSet(pScreen);
+
+    if (pvfb->xrenderProbeInstalled && ps &&
+        ps->Composite == lorieCompositeProbe && pvfb->xrenderSavedComposite)
+        ps->Composite = pvfb->xrenderSavedComposite;
+    pvfb->xrenderProbeInstalled = FALSE;
+    pvfb->xrenderSavedComposite = NULL;
+
     pScreenPtr = NULL;
     pScreen->DestroyPixmap(pScreen->devPrivate);
     pScreen->devPrivate = NULL;
