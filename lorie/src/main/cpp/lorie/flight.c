@@ -13,7 +13,6 @@
 #include <unistd.h>
 
 #include "dixstruct.h"
-#include "registry.h"
 #include "lorie.h"
 
 #define log(prio, ...) __android_log_print(ANDROID_LOG_ ## prio, "LorieNative", __VA_ARGS__)
@@ -151,20 +150,19 @@ void lorieDumpFlightRecorder(const char *why) {
     }
     for (i = 0; i < n; i++) {
         LorieFlightEnt *e = &flightRing->ents[(start + i) & (LORIE_FLIGHT_CAP - 1)];
-        const char *name = LookupMajorName(e->major);
         int last = (i + 1 == n);
         log(ERROR,
-            "flight %s%03u seq=%u cli=%u op=%u.%u len=%u ph=%u r=%d %s head=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
+            "flight %s%03u seq=%u cli=%u op=%u.%u len=%u ph=%u r=%d head=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
             last ? "LAST " : "", i, e->seq, e->client, e->major, e->minor, e->req_len,
-            e->phase, e->result, name ? name : "?",
+            e->phase, e->result,
             e->head[0], e->head[1], e->head[2], e->head[3], e->head[4], e->head[5],
             e->head[6], e->head[7], e->head[8], e->head[9], e->head[10], e->head[11],
             e->head[12], e->head[13], e->head[14], e->head[15]);
         if (dumpFd >= 0) {
             len = snprintf(line, sizeof(line),
-                           "%s%u %u %u %u %u %u %u %d %s %02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x\n",
+                           "%s%u %u %u %u %u %u %u %d %02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x\n",
                            last ? "LAST " : "", i, e->seq, e->client, e->major, e->minor,
-                           e->req_len, e->phase, e->result, name ? name : "?",
+                           e->req_len, e->phase, e->result,
                            e->head[0], e->head[1], e->head[2], e->head[3], e->head[4], e->head[5],
                            e->head[6], e->head[7], e->head[8], e->head[9], e->head[10], e->head[11],
                            e->head[12], e->head[13], e->head[14], e->head[15]);
