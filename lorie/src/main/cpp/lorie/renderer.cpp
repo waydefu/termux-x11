@@ -120,6 +120,19 @@ static const char vertexShaderSrc[] =
 static const char fragmentShaderSrc[] = FRAGMENT_SHADER();
 static const char fragmentShaderBgraSrc[] = FRAGMENT_SHADER(".bgra");
 
+static const char solidVertexShaderSrc[] =
+    "attribute vec4 position;\n"
+    "void main(void) {\n"
+    "   gl_Position = position;\n"
+    "}\n";
+
+static const char solidFragmentShaderSrc[] =
+    "precision mediump float;\n"
+    "uniform vec4 color;\n"
+    "void main(void) {\n"
+    "   gl_FragColor = color;\n"
+    "}\n";
+
 // The renderer's end of activity.c's socket to the X server; used to notify it immediately when a
 // GPU copy batch finishes instead of it waiting for the next vblank-tick poll.
 extern "C" volatile int conn_fd;
@@ -281,6 +294,12 @@ void* Renderer::initThread() {
 
     gv_pos_bgra = (GLuint) glGetAttribLocation(g_texture_program_bgra, "position");
     gv_coords_bgra = (GLuint) glGetAttribLocation(g_texture_program_bgra, "texCoords");
+
+    g_solid_program = createProgram(solidVertexShaderSrc, solidFragmentShaderSrc);
+    if (!g_solid_program)
+        log("Xlorie: GLESv2: Unable to create solid shader program.\n");
+    gv_solid_pos = (GLuint) glGetAttribLocation(g_solid_program, "position");
+    g_solid_color = (GLuint) glGetUniformLocation(g_solid_program, "color");
 
     glActiveTexture(GL_TEXTURE0);
     glGenTextures(1, &cursor.id);
@@ -723,16 +742,18 @@ uint64_t Renderer::applyPendingGpuCopiesLocked() {
 
     while (state->gpuCopyQueue.readIndex != state->gpuCopyQueue.writeIndex) {
         LorieGpuCopyEntry entry = state->gpuCopyQueue.entries[state->gpuCopyQueue.readIndex % LORIE_GPU_COPY_QUEUE_CAPACITY];
-        LorieBuffer *src = findBufferWithRetry(entry.srcBufferId);
         LorieBuffer *dst = findBufferWithRetry(entry.dstBufferId);
+        LorieBuffer *src = NULL;
 
-        if (!src)
+        if (entry.op != LORIE_GPU_OP_SOLID)
+            src = findBufferWithRetry(entry.srcBufferId);
+
+        if (entry.op != LORIE_GPU_OP_SOLID && !src)
             log("rendererApplyPendingGpuCopies: source buffer %llu not found after waiting, skipping\n", (unsigned long long) entry.srcBufferId);
         if (!dst)
             log("rendererApplyPendingGpuCopies: destination buffer %llu not found after waiting, skipping\n", (unsigned long long) entry.dstBufferId);
 
-        if (src && dst) {
-            const LorieBuffer_Desc *srcDesc = LorieBuffer_description(src);
+        if (dst && (entry.op == LORIE_GPU_OP_SOLID || src)) {
             const LorieBuffer_Desc *dstDesc = LorieBuffer_description(dst);
             int i;
 
@@ -763,36 +784,59 @@ uint64_t Renderer::applyPendingGpuCopiesLocked() {
                 }
             }
 
-            LorieBuffer_bindTexture(src);
-            {
-                if (lorieDebugEnabled && (srcSizeLogCount++ & 15) == 0 && srcDesc->buffer) {
-                    AHardwareBuffer_Desc realSrcDesc;
-                    AHardwareBuffer_describe(srcDesc->buffer, &realSrcDesc);
-                    loge("gpucopy src texId=%u real AHB size %ux%u stride=%u vs LorieBuffer desc %dx%d (stride=%d)\n",
-                         LorieBuffer_getGLTextureId(src), realSrcDesc.width, realSrcDesc.height,
-                         realSrcDesc.stride, srcDesc->width, srcDesc->height, srcDesc->stride);
+            if (entry.op == LORIE_GPU_OP_SOLID) {
+                float xr = ((entry.color >> 16) & 0xff) / 255.f;
+                float xg = ((entry.color >> 8) & 0xff) / 255.f;
+                float xb = (entry.color & 0xff) / 255.f;
+                // CPU stores X11 0x00RRGGBB as LE bytes B,G,R. An RGBA FBO's byte0 is GL R,
+                // so pass B,G,R to match GetImage of a software fill. BGRA AHB attachments
+                // already swap on write, so pass R,G,B there.
+                float r = entry.dstIsRgba ? xb : xr;
+                float g = xg;
+                float b = entry.dstIsRgba ? xr : xb;
+                glDisable(GL_BLEND);
+                state->rendererSolidSubmits++;
+                for (i = 0; i < entry.numRects; i++) {
+                    LorieGpuCopyRect rec = entry.rects[i];
+                    float x0 = 2.f * (float) (rec.x1 + entry.xOff) / (float) dstDesc->width - 1.f;
+                    float x1 = 2.f * (float) (rec.x2 + entry.xOff) / (float) dstDesc->width - 1.f;
+                    float y0 = 1.f - 2.f * (float) (rec.y1 + entry.yOff) / (float) dstDesc->height;
+                    float y1 = 1.f - 2.f * (float) (rec.y2 + entry.yOff) / (float) dstDesc->height;
+                    drawSolid(x0, y0, x1, y1, r, g, b, 1.f);
                 }
-            }
-            for (i = 0; i < entry.numRects; i++) {
-                LorieGpuCopyRect r = entry.rects[i];
-                float x0 = 2.f * (float) (r.x1 + entry.xOff) / (float) dstDesc->width - 1.f;
-                float x1 = 2.f * (float) (r.x2 + entry.xOff) / (float) dstDesc->width - 1.f;
-                // FBO writes and on-screen draws use opposite y conventions here, unlike x.
-                float y0 = 1.f - 2.f * (float) (r.y1 + entry.yOff) / (float) dstDesc->height;
-                float y1 = 1.f - 2.f * (float) (r.y2 + entry.yOff) / (float) dstDesc->height;
-                // EGLImage-backed textures sample by logical width regardless of row stride;
-                // only our own CPU-uploaded LORIEBUFFER_FD texture is stride-wide.
-                float srcUvDivisor = srcDesc->type == LORIEBUFFER_FD ? (float) srcDesc->stride : (float) srcDesc->width;
-                float u0 = (float) r.x1 / srcUvDivisor;
-                float u1 = (float) r.x2 / srcUvDivisor;
-                float v0 = (float) r.y1 / (float) srcDesc->height;
-                float v1 = (float) r.y2 / (float) srcDesc->height;
-                // Only swap channels if src/dst storage formats actually differ.
-                uint8_t needsSwizzle = LorieBuffer_isRgba(src) != LorieBuffer_isRgba(dst);
-                log("rendererApplyPendingGpuCopies: rect (%d,%d)-(%d,%d) off=(%d,%d) -> ndc=(%.3f,%.3f)-(%.3f,%.3f) uv=(%.3f,%.3f)-(%.3f,%.3f) srcTex=%u dstTex=%u swizzle=%d\n",
-                    r.x1, r.y1, r.x2, r.y2, entry.xOff, entry.yOff, x0, y0, x1, y1, u0, v0, u1, v1,
-                    LorieBuffer_getGLTextureId(src), LorieBuffer_getGLTextureId(dst), needsSwizzle);
-                drawRegion(0, x0, y0, x1, y1, u0, v0, u1, v1, needsSwizzle);
+            } else {
+                const LorieBuffer_Desc *srcDesc = LorieBuffer_description(src);
+                LorieBuffer_bindTexture(src);
+                {
+                    if (lorieDebugEnabled && (srcSizeLogCount++ & 15) == 0 && srcDesc->buffer) {
+                        AHardwareBuffer_Desc realSrcDesc;
+                        AHardwareBuffer_describe(srcDesc->buffer, &realSrcDesc);
+                        loge("gpucopy src texId=%u real AHB size %ux%u stride=%u vs LorieBuffer desc %dx%d (stride=%d)\n",
+                             LorieBuffer_getGLTextureId(src), realSrcDesc.width, realSrcDesc.height,
+                             realSrcDesc.stride, srcDesc->width, srcDesc->height, srcDesc->stride);
+                    }
+                }
+                for (i = 0; i < entry.numRects; i++) {
+                    LorieGpuCopyRect rec = entry.rects[i];
+                    float x0 = 2.f * (float) (rec.x1 + entry.xOff) / (float) dstDesc->width - 1.f;
+                    float x1 = 2.f * (float) (rec.x2 + entry.xOff) / (float) dstDesc->width - 1.f;
+                    // FBO writes and on-screen draws use opposite y conventions here, unlike x.
+                    float y0 = 1.f - 2.f * (float) (rec.y1 + entry.yOff) / (float) dstDesc->height;
+                    float y1 = 1.f - 2.f * (float) (rec.y2 + entry.yOff) / (float) dstDesc->height;
+                    // EGLImage-backed textures sample by logical width regardless of row stride;
+                    // only our own CPU-uploaded LORIEBUFFER_FD texture is stride-wide.
+                    float srcUvDivisor = srcDesc->type == LORIEBUFFER_FD ? (float) srcDesc->stride : (float) srcDesc->width;
+                    float u0 = (float) rec.x1 / srcUvDivisor;
+                    float u1 = (float) rec.x2 / srcUvDivisor;
+                    float v0 = (float) rec.y1 / (float) srcDesc->height;
+                    float v1 = (float) rec.y2 / (float) srcDesc->height;
+                    // Only swap channels if src/dst storage formats actually differ.
+                    uint8_t needsSwizzle = LorieBuffer_isRgba(src) != LorieBuffer_isRgba(dst);
+                    log("rendererApplyPendingGpuCopies: rect (%d,%d)-(%d,%d) off=(%d,%d) -> ndc=(%.3f,%.3f)-(%.3f,%.3f) uv=(%.3f,%.3f)-(%.3f,%.3f) srcTex=%u dstTex=%u swizzle=%d\n",
+                        rec.x1, rec.y1, rec.x2, rec.y2, entry.xOff, entry.yOff, x0, y0, x1, y1, u0, v0, u1, v1,
+                        LorieBuffer_getGLTextureId(src), LorieBuffer_getGLTextureId(dst), needsSwizzle);
+                    drawRegion(0, x0, y0, x1, y1, u0, v0, u1, v1, needsSwizzle);
+                }
             }
         }
 
@@ -824,6 +868,7 @@ void Renderer::applyPendingGpuCopies() {
         // Only now that the GPU has actually finished (not just been told to start) is it safe to
         // let present_execute_copy release/idle the source pixmap back to the client.
         state->gpuCopyQueue.completedSerial = serial;
+        state->rendererSolidComplete = state->rendererSolidSubmits;
         notifyGpuCopyDone();
     }
     lorie_mutex_unlock(&state->lock, &state->lockingPid);
@@ -987,6 +1032,7 @@ void Renderer::redrawLocked(bool* waitingForBuffers) {
     eglDestroySyncKHR(egl_display, fence);
     if (gpuCopySerial) {
         state->gpuCopyQueue.completedSerial = gpuCopySerial;
+        state->rendererSolidComplete = state->rendererSolidSubmits;
         notifyGpuCopyDone();
     }
     state->waitForNextFrame = true;
@@ -1156,6 +1202,22 @@ static GLuint createProgram(const char* p_vertex_source, const char* p_fragment_
     glDeleteProgram(program);
 
     return 0;
+}
+
+void Renderer::drawSolid(float x0, float y0, float x1, float y1, float r, float g, float b, float a) {
+    float coords[8] = {
+        x0, -y0,
+        x1, -y0,
+        x0, -y1,
+        x1, -y1,
+    };
+    if (!g_solid_program)
+        return;
+    glUseProgram(g_solid_program);
+    glUniform4f(g_solid_color, r, g, b, a);
+    glVertexAttribPointer(gv_solid_pos, 2, GL_FLOAT, GL_FALSE, 0, coords);
+    glEnableVertexAttribArray(gv_solid_pos);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4); checkGlError();
 }
 
 void Renderer::drawRegion(GLuint id, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1, uint8_t flip) {

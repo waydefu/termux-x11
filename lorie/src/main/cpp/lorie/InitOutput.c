@@ -82,6 +82,7 @@ typedef struct {
 
     Bool dri3;
     Bool gpuPresentDisabled;
+    Bool gpuExaDisabled;
 
     uint64_t vblank_interval;
     struct xorg_list vblank_queue;
@@ -326,6 +327,7 @@ void ddxUseMsg(void) {
     ErrorF("-force-sysvshm         force using SysV shm syscalls\n");
     ErrorF("-check-drawing         run server only able to draw some test image (for testing if rendering root window works or not),\n");
     ErrorF("-disable-gpu-present   disable offloading Present copies to the GPU, always use the CPU path\n");
+    ErrorF("-disable-gpu-exa       disable EXA GPU Copy/Solid/Composite, always use software fallback\n");
 }
 
 int ddxProcessArgument(unused int argc, unused char *argv[], unused int i) {
@@ -377,6 +379,11 @@ int ddxProcessArgument(unused int argc, unused char *argv[], unused int i) {
 
     if (strcmp(argv[i], "-disable-gpu-present") == 0) {
         pvfb->gpuPresentDisabled = TRUE;
+        return 1;
+    }
+
+    if (strcmp(argv[i], "-disable-gpu-exa") == 0) {
+        pvfb->gpuExaDisabled = TRUE;
         return 1;
     }
 
@@ -537,19 +544,124 @@ static Bool lorieRedraw(__unused ClientPtr pClient, __unused void *closure) {
 
 static uint64_t gpuCopyAttempts = 0, gpuCopyOffloads = 0;
 static uint64_t exaCopyAttempts = 0, exaCopyOffloads = 0, exaCopyFallbackRects = 0;
+static uint64_t exaSolidPrepare = 0, exaSolidGpu = 0, exaSolidFallback = 0, exaSolidRects = 0, exaSolidCpuRects = 0;
+
+#define XRENDER_HIST_SLOTS 64
+typedef struct {
+    uint8_t op, flags, filter, wbucket;
+    uint32_t srcFmt, maskFmt, dstFmt;
+    uint32_t count;
+    uint16_t lastW, lastH;
+} XRenderHistEnt;
+static XRenderHistEnt xrenderHist[XRENDER_HIST_SLOTS];
+static uint64_t xrenderOps = 0;
+static CompositeProcPtr lorieSavedComposite = NULL;
+
+static uint8_t xrenderSizeBucket(int w, int h) {
+    int m = w > h ? w : h;
+    if (m <= 1) return 0;
+    if (m <= 16) return 1;
+    if (m <= 64) return 2;
+    if (m <= 256) return 3;
+    if (m <= 1024) return 4;
+    return 5;
+}
+
+static void xrenderHistRecord(int op, PicturePtr src, PicturePtr mask, PicturePtr dst, int w, int h) {
+    XRenderHistEnt key;
+    int i, freeSlot = -1;
+    memset(&key, 0, sizeof(key));
+    key.op = (uint8_t) op;
+    key.srcFmt = src ? src->format : 0;
+    key.dstFmt = dst ? dst->format : 0;
+    key.maskFmt = mask ? mask->format : 0;
+    key.filter = src ? (uint8_t) src->filter : 0;
+    if (mask) key.flags |= 1;
+    if (src && src->transform) key.flags |= 2;
+    if (src && src->componentAlpha) key.flags |= 4;
+    if (mask && mask->componentAlpha) key.flags |= 8;
+    if (src && src->repeat) key.flags |= 16;
+    if (mask && mask->repeat) key.flags |= 32;
+    key.wbucket = xrenderSizeBucket(w, h);
+    xrenderOps++;
+    for (i = 0; i < XRENDER_HIST_SLOTS; i++) {
+        if (xrenderHist[i].count == 0) {
+            if (freeSlot < 0) freeSlot = i;
+            continue;
+        }
+        if (xrenderHist[i].op == key.op && xrenderHist[i].flags == key.flags &&
+            xrenderHist[i].filter == key.filter && xrenderHist[i].wbucket == key.wbucket &&
+            xrenderHist[i].srcFmt == key.srcFmt && xrenderHist[i].maskFmt == key.maskFmt &&
+            xrenderHist[i].dstFmt == key.dstFmt) {
+            xrenderHist[i].count++;
+            xrenderHist[i].lastW = (uint16_t) w;
+            xrenderHist[i].lastH = (uint16_t) h;
+            return;
+        }
+    }
+    if (freeSlot >= 0) {
+        key.count = 1;
+        key.lastW = (uint16_t) w;
+        key.lastH = (uint16_t) h;
+        xrenderHist[freeSlot] = key;
+    }
+}
+
+static void lorieCompositeProbe(CARD8 op, PicturePtr pSrc, PicturePtr pMask, PicturePtr pDst,
+                                INT16 xSrc, INT16 ySrc, INT16 xMask, INT16 yMask,
+                                INT16 xDst, INT16 yDst, CARD16 width, CARD16 height) {
+    xrenderHistRecord(op, pSrc, pMask, pDst, width, height);
+    if (lorieSavedComposite)
+        lorieSavedComposite(op, pSrc, pMask, pDst, xSrc, ySrc, xMask, yMask, xDst, yDst, width, height);
+}
+
+static void lorieInstallXRenderProbe(ScreenPtr pScreen) {
+    PictureScreenPtr ps = GetPictureScreenIfSet(pScreen);
+    if (!ps || lorieSavedComposite)
+        return;
+    lorieSavedComposite = ps->Composite;
+    ps->Composite = lorieCompositeProbe;
+}
 
 static CARD32 lorieFramecounter(unused OsTimerPtr timer, unused CARD32 time, unused void *arg) {
-    if (pvfb->state->renderedFrames || gpuCopyAttempts || exaCopyAttempts)
-        log(INFO, gpuCopyAttempts || exaCopyAttempts
-            ? "%d frames in 5.0 seconds = %.1f FPS, %llu/%llu present copies offloaded to GPU, %llu/%llu EXA copies offloaded (%llu CPU rects)"
-            : "%d frames in 5.0 seconds = %.1f FPS",
+    if (pvfb->state->renderedFrames || gpuCopyAttempts || exaCopyAttempts || exaSolidPrepare || xrenderOps)
+        log(INFO, "%d frames in 5.0 seconds = %.1f FPS, %llu/%llu present copies offloaded to GPU, %llu/%llu EXA copies offloaded (%llu CPU rects), exa_solid_prepare=%llu exa_solid_gpu=%llu exa_solid_fallback=%llu solid_rects=%llu cpu_solid_rects=%llu renderer_solid_submits=%llu renderer_solid_complete=%llu xrender_ops=%llu",
             pvfb->state->renderedFrames, ((float) pvfb->state->renderedFrames) / 5,
             (unsigned long long) gpuCopyOffloads, (unsigned long long) gpuCopyAttempts,
             (unsigned long long) exaCopyOffloads, (unsigned long long) exaCopyAttempts,
-            (unsigned long long) exaCopyFallbackRects);
+            (unsigned long long) exaCopyFallbackRects,
+            (unsigned long long) exaSolidPrepare, (unsigned long long) exaSolidGpu,
+            (unsigned long long) exaSolidFallback, (unsigned long long) exaSolidRects,
+            (unsigned long long) exaSolidCpuRects,
+            (unsigned long long) pvfb->state->rendererSolidSubmits,
+            (unsigned long long) pvfb->state->rendererSolidComplete,
+            (unsigned long long) xrenderOps);
+    if (xrenderOps) {
+        int i, n;
+        XRenderHistEnt top[8];
+        memset(top, 0, sizeof(top));
+        for (i = 0; i < XRENDER_HIST_SLOTS; i++) {
+            if (!xrenderHist[i].count)
+                continue;
+            for (n = 0; n < 8; n++) {
+                if (xrenderHist[i].count > top[n].count) {
+                    memmove(&top[n + 1], &top[n], sizeof(XRenderHistEnt) * (7 - n));
+                    top[n] = xrenderHist[i];
+                    break;
+                }
+            }
+        }
+        for (n = 0; n < 8 && top[n].count; n++)
+            log(INFO, "xrender hist[%d] count=%u op=%u src=%08x mask=%08x dst=%08x flags=0x%x filter=%u wbucket=%u last=%ux%u",
+                n, top[n].count, top[n].op, top[n].srcFmt, top[n].maskFmt, top[n].dstFmt,
+                top[n].flags, top[n].filter, top[n].wbucket, top[n].lastW, top[n].lastH);
+    }
     pvfb->state->renderedFrames = 0;
     gpuCopyAttempts = gpuCopyOffloads = 0;
     exaCopyAttempts = exaCopyOffloads = exaCopyFallbackRects = 0;
+    exaSolidPrepare = exaSolidGpu = exaSolidFallback = exaSolidRects = exaSolidCpuRects = 0;
+    xrenderOps = 0;
+    memset(xrenderHist, 0, sizeof(xrenderHist));
     return 5000;
 }
 
@@ -756,6 +868,8 @@ static Bool lorieScreenInit(ScreenPtr pScreen, unused int argc, unused char **ar
           || !fbCreateDefColormap(pScreen)
           || !present_screen_init(pScreen, &loriePresentInfo))
         return FALSE;
+
+    lorieInstallXRenderProbe(pScreen);
 
     pvfb->CloseScreen = pScreen->CloseScreen;
     pvfb->SetWindowPixmap = pScreenPtr->SetWindowPixmap;
@@ -974,6 +1088,9 @@ Bool lorieTryScheduleGpuCopy(PixmapPtr pixmap, PixmapPtr dst, RegionPtr update, 
     entry->xOff = x_off;
     entry->yOff = y_off;
     entry->numRects = (uint16_t) numRects;
+    entry->op = LORIE_GPU_OP_COPY;
+    entry->dstIsRgba = 0;
+    entry->color = 0;
     for (i = 0; i < numRects; i++)
         entry->rects[i] = (LorieGpuCopyRect) { box[i].x1, box[i].y1, box[i].x2, box[i].y2 };
 
@@ -1029,8 +1146,167 @@ static struct {
     void *dstBuf;
 } exaGpuCopy;
 
+static struct {
+    PixmapPtr dst;
+    Pixel fg;
+    uint64_t lastSerial;
+    int scheduled;
+    void *dstBuf;
+} exaGpuSolid;
+
 Bool loriePrepareAccess(PixmapPtr pPix, int index);
 void lorieFinishAccess(PixmapPtr pPix, int index);
+
+static Bool lorieGpuExaDisabled(void) {
+    const char *e;
+    if (pvfb->gpuExaDisabled)
+        return TRUE;
+    e = getenv("TERMUX_X11_DISABLE_EXA_GPU");
+    return e && e[0] && e[0] != '0';
+}
+
+static Bool lorieTryScheduleGpuSolid(PixmapPtr dst, int x1, int y1, int x2, int y2, Pixel fg,
+                                     uint64_t *out_serial, void **out_dst_buffer) {
+    LorieBuffer *dstBuffer;
+    const LorieBuffer_Desc *dstDesc;
+    LorieGpuCopyEntry *entry;
+    uint32_t writeIndex, readIndex;
+    Bool dstIsRoot;
+
+    if (x2 <= x1 || y2 <= y1)
+        return FALSE;
+    if (pvfb->root.legacyDrawing || !lorieConnectionAlive() || !lorieRendererAvailable())
+        return FALSE;
+    if (!(dstBuffer = lorieEnsureGpuSampleable(dst, LORIEBUFFER_AHARDWAREBUFFER)))
+        return FALSE;
+
+    writeIndex = pvfb->state->gpuCopyQueue.writeIndex;
+    readIndex = pvfb->state->gpuCopyQueue.readIndex;
+    if (writeIndex - readIndex >= LORIE_GPU_COPY_QUEUE_CAPACITY)
+        return FALSE;
+
+    dstDesc = LorieBuffer_description(dstBuffer);
+    dstIsRoot = dst == pScreenPtr->devPrivate;
+    if (!dstIsRoot) {
+        lorieRegisterBuffer(dstBuffer);
+        LorieBuffer_acquire(dstBuffer);
+        LorieBuffer_gpuCopyPendingInc(dstBuffer);
+    } else {
+        pvfb->rootGpuCopyPending++;
+    }
+    *out_dst_buffer = dstIsRoot ? NULL : dstBuffer;
+
+    entry = &pvfb->state->gpuCopyQueue.entries[writeIndex % LORIE_GPU_COPY_QUEUE_CAPACITY];
+    entry->serial = ++pvfb->gpuCopySerialCounter;
+    entry->srcBufferId = 0;
+    entry->dstBufferId = dstDesc->id;
+    entry->xOff = 0;
+    entry->yOff = 0;
+    entry->numRects = 1;
+    entry->op = LORIE_GPU_OP_SOLID;
+    entry->dstIsRgba = LorieBuffer_isRgba(dstBuffer) ? 1 : 0;
+    entry->color = (uint32_t) (fg & 0x00ffffffu);
+    entry->rects[0] = (LorieGpuCopyRect) { (int16_t) x1, (int16_t) y1, (int16_t) x2, (int16_t) y2 };
+
+    __sync_synchronize();
+    pvfb->state->gpuCopyQueue.writeIndex = writeIndex + 1;
+    pthread_cond_signal(rendererCond);
+
+    *out_serial = entry->serial;
+    return TRUE;
+}
+
+static void lorieExaCpuSolidRect(PixmapPtr dst, int x1, int y1, int x2, int y2, Pixel fg) {
+    int bpp, dstride, y, w;
+    char *d;
+
+    if (x2 <= x1 || y2 <= y1)
+        return;
+    if (!loriePrepareAccess(dst, EXA_PREPARE_DEST))
+        return;
+    d = dst->devPrivate.ptr;
+    dstride = dst->devKind;
+    bpp = dst->drawable.bitsPerPixel / 8;
+    w = x2 - x1;
+    if (d && bpp == 4) {
+        for (y = y1; y < y2; y++) {
+            uint32_t *row = (uint32_t *) (d + y * dstride + x1 * 4);
+            int x;
+            for (x = 0; x < w; x++)
+                row[x] = (uint32_t) fg;
+        }
+    }
+    lorieFinishAccess(dst, EXA_PREPARE_DEST);
+}
+
+static Bool lorieExaPrepareSolid(PixmapPtr dst, int alu, Pixel planemask, Pixel fg) {
+    Pixel fullmask;
+
+    memset(&exaGpuSolid, 0, sizeof(exaGpuSolid));
+    exaSolidPrepare++;
+    if (lorieGpuExaDisabled() || pvfb->root.legacyDrawing || !lorieConnectionAlive() || !lorieRendererAvailable()) {
+        exaSolidFallback++;
+        return FALSE;
+    }
+    if (alu != GXcopy) {
+        exaSolidFallback++;
+        return FALSE;
+    }
+    if (dst->drawable.bitsPerPixel != 32) {
+        exaSolidFallback++;
+        return FALSE;
+    }
+    fullmask = dst->drawable.depth >= 32 ? ~((Pixel) 0) : ((((Pixel) 1) << dst->drawable.depth) - 1);
+    if (planemask != fullmask && planemask != ~((Pixel) 0)) {
+        exaSolidFallback++;
+        return FALSE;
+    }
+    if (!lorieEnsureGpuSampleable(dst, LORIEBUFFER_AHARDWAREBUFFER)) {
+        exaSolidFallback++;
+        return FALSE;
+    }
+    exaGpuSolid.dst = dst;
+    exaGpuSolid.fg = fg;
+    exaSolidGpu++;
+    return TRUE;
+}
+
+static void lorieExaSolid(PixmapPtr dst, int x1, int y1, int x2, int y2) {
+    uint64_t serial = 0;
+    void *dstBuf = NULL;
+    Bool scheduled = FALSE;
+
+    if (x2 <= x1 || y2 <= y1 || !exaGpuSolid.dst)
+        return;
+    scheduled = lorieTryScheduleGpuSolid(dst, x1, y1, x2, y2, exaGpuSolid.fg, &serial, &dstBuf);
+    if (!scheduled && exaGpuSolid.scheduled) {
+        lorieGpuCopyWait(exaGpuSolid.lastSerial, 2000);
+        scheduled = lorieTryScheduleGpuSolid(dst, x1, y1, x2, y2, exaGpuSolid.fg, &serial, &dstBuf);
+    }
+    if (scheduled) {
+        exaGpuSolid.lastSerial = serial;
+        exaGpuSolid.scheduled++;
+        exaGpuSolid.dstBuf = dstBuf;
+        exaSolidRects++;
+        return;
+    }
+    if (exaGpuSolid.scheduled)
+        lorieGpuCopyWait(exaGpuSolid.lastSerial, 2000);
+    lorieExaCpuSolidRect(dst, x1, y1, x2, y2, exaGpuSolid.fg);
+    exaSolidCpuRects++;
+}
+
+static void lorieExaDoneSolid(unused PixmapPtr dst) {
+    int i;
+    if (exaGpuSolid.scheduled) {
+        if (!lorieGpuCopyWait(exaGpuSolid.lastSerial, 2000))
+            log(ERROR, "EXA GPU solid wait timeout serial=%llu scheduled=%d",
+                (unsigned long long) exaGpuSolid.lastSerial, exaGpuSolid.scheduled);
+        for (i = 0; i < exaGpuSolid.scheduled; i++)
+            lorieGpuCopyAck(NULL, exaGpuSolid.dstBuf);
+    }
+    memset(&exaGpuSolid, 0, sizeof(exaGpuSolid));
+}
 
 static void lorieExaCpuCopyRect(PixmapPtr src, PixmapPtr dst, int srcX, int srcY, int dstX, int dstY, int w, int h) {
     int bpp, sstride, dstride, i;
@@ -1063,7 +1339,7 @@ static Bool lorieExaPrepareCopy(PixmapPtr src, PixmapPtr dst, unused int dx, unu
     Pixel fullmask;
 
     memset(&exaGpuCopy, 0, sizeof(exaGpuCopy));
-    if (pvfb->root.legacyDrawing || !lorieConnectionAlive() || !lorieRendererAvailable())
+    if (lorieGpuExaDisabled() || pvfb->root.legacyDrawing || !lorieConnectionAlive() || !lorieRendererAvailable())
         return FALSE;
     if (alu != GXcopy || src == dst)
         return FALSE;
@@ -1264,7 +1540,8 @@ void lorieFinishAccess(PixmapPtr pPix, int index) {
 static ExaDriverRec lorieExa = {
         .exa_major = EXA_VERSION_MAJOR, .exa_minor = EXA_VERSION_MINOR, .maxX = 32767, .maxY = 32767,
         .flags = EXA_OFFSCREEN_PIXMAPS | EXA_HANDLES_PIXMAPS, .pixmapPitchAlign = 32,
-        .PrepareSolid = FalseNoop, .PrepareCopy = lorieExaPrepareCopy, .Copy = lorieExaCopy, .DoneCopy = lorieExaDoneCopy,
+        .PrepareSolid = lorieExaPrepareSolid, .Solid = lorieExaSolid, .DoneSolid = lorieExaDoneSolid,
+        .PrepareCopy = lorieExaPrepareCopy, .Copy = lorieExaCopy, .DoneCopy = lorieExaDoneCopy,
         .PrepareComposite = FalseNoop,
         .PixmapIsOffscreen = TrueNoop, .WaitMarker = VoidNoop,
         .PrepareAccess = loriePrepareAccess, .FinishAccess = lorieFinishAccess,

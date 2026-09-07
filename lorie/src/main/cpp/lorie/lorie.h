@@ -170,12 +170,19 @@ typedef struct { int16_t x1, y1, x2, y2; } LorieGpuCopyRect;
 #define LORIE_GPU_COPY_MAX_RECTS 16
 #define LORIE_GPU_COPY_QUEUE_CAPACITY 8
 
+#define LORIE_GPU_OP_COPY      0
+#define LORIE_GPU_OP_SOLID     1
+#define LORIE_GPU_OP_COMPOSITE 2
+
 typedef struct {
     uint64_t serial;
     uint64_t srcBufferId;
     uint64_t dstBufferId;
     int16_t xOff, yOff;
     uint16_t numRects;
+    uint8_t op;
+    uint8_t dstIsRgba;
+    uint32_t color; /* X11 0x00RRGGBB for SOLID */
     LorieGpuCopyRect rects[LORIE_GPU_COPY_MAX_RECTS];
 } LorieGpuCopyEntry;
 
@@ -239,6 +246,9 @@ struct lorie_shared_server_state {
         // Signals to renderer to update cursor's texture or its coordinates
         volatile uint8_t updated, moved;
     } cursor;
+
+    volatile uint64_t rendererSolidSubmits;
+    volatile uint64_t rendererSolidComplete;
 };
 
 #ifdef __cplusplus
@@ -293,6 +303,7 @@ struct Renderer {
 
     GLuint g_texture_program = 0, gv_pos = 0, gv_coords = 0;
     GLuint g_texture_program_bgra = 0, gv_pos_bgra = 0, gv_coords_bgra = 0;
+    GLuint g_solid_program = 0, gv_solid_pos = 0, g_solid_color = 0;
 
     EGLint configAttribs[13] = {
         EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
@@ -332,6 +343,7 @@ struct Renderer {
     void bindTexture(GLuint id) const;
     void reportViewport(int dstX, int dstY, int dstW, int dstH, float left, float top, float width, float height);
     void drawRegion(GLuint id, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1, uint8_t flip);
+    void drawSolid(float x0, float y0, float x1, float y1, float r, float g, float b, float a);
     void drawCursor(float displayWidth, float displayHeight, float sourceLeft, float sourceTop);
 };
 #endif
