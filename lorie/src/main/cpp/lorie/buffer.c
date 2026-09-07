@@ -289,6 +289,7 @@ __LIBC_HIDDEN__ void LorieBuffer_convert(LorieBuffer* buffer, int8_t type, int8_
                             buffer->desc.width, buffer->desc.height, buffer->desc.stride,
                             desc.stride, desc.format, src_px, dst_px, hash);
                 }
+#endif
                 pixman_blt(buffer->desc.data, data, buffer->desc.stride, desc.stride, 32, 32, 0, 0, 0, 0, buffer->desc.width, buffer->desc.height);
 #ifdef __ANDROID__
                 {
