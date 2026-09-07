@@ -344,7 +344,7 @@ struct Renderer {
     void threadLoop();
     void bindTexture(GLuint id) const;
     void reportViewport(int dstX, int dstY, int dstW, int dstH, float left, float top, float width, float height);
-    void drawRegion(GLuint id, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1, uint8_t flip);
+    void drawRegion(GLuint id, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1, uint8_t flip, uint8_t forceNearest = 0);
     void drawSolid(float x0, float y0, float x1, float y1, float r, float g, float b, float a);
     void drawCursor(float displayWidth, float displayHeight, float sourceLeft, float sourceTop);
 };

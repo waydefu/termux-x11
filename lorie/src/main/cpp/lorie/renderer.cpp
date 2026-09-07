@@ -808,6 +808,7 @@ uint64_t Renderer::applyPendingGpuCopiesLocked() {
                 }
             } else {
                 const LorieBuffer_Desc *srcDesc = LorieBuffer_description(src);
+                uint8_t composite = entry.op == LORIE_GPU_OP_COMPOSITE;
                 LorieBuffer_bindTexture(src);
                 {
                     if (lorieDebugEnabled && (srcSizeLogCount++ & 15) == 0 && srcDesc->buffer) {
@@ -817,6 +818,13 @@ uint64_t Renderer::applyPendingGpuCopiesLocked() {
                              LorieBuffer_getGLTextureId(src), realSrcDesc.width, realSrcDesc.height,
                              realSrcDesc.stride, srcDesc->width, srcDesc->height, srcDesc->stride);
                     }
+                }
+                if (composite) {
+                    /* XRender ARGB is premultiplied: Cout = Cs + Cd*(1-As) */
+                    glEnable(GL_BLEND);
+                    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+                } else {
+                    glDisable(GL_BLEND);
                 }
                 for (i = 0; i < entry.numRects; i++) {
                     LorieGpuCopyRect rec = entry.rects[i];
@@ -834,11 +842,13 @@ uint64_t Renderer::applyPendingGpuCopiesLocked() {
                     float v1 = (float) rec.y2 / (float) srcDesc->height;
                     // Only swap channels if src/dst storage formats actually differ.
                     uint8_t needsSwizzle = LorieBuffer_isRgba(src) != LorieBuffer_isRgba(dst);
-                    log("rendererApplyPendingGpuCopies: rect (%d,%d)-(%d,%d) off=(%d,%d) -> ndc=(%.3f,%.3f)-(%.3f,%.3f) uv=(%.3f,%.3f)-(%.3f,%.3f) srcTex=%u dstTex=%u swizzle=%d\n",
+                    log("rendererApplyPendingGpuCopies: rect (%d,%d)-(%d,%d) off=(%d,%d) -> ndc=(%.3f,%.3f)-(%.3f,%.3f) uv=(%.3f,%.3f)-(%.3f,%.3f) srcTex=%u dstTex=%u swizzle=%d op=%u\n",
                         rec.x1, rec.y1, rec.x2, rec.y2, entry.xOff, entry.yOff, x0, y0, x1, y1, u0, v0, u1, v1,
-                        LorieBuffer_getGLTextureId(src), LorieBuffer_getGLTextureId(dst), needsSwizzle);
-                    drawRegion(0, x0, y0, x1, y1, u0, v0, u1, v1, needsSwizzle);
+                        LorieBuffer_getGLTextureId(src), LorieBuffer_getGLTextureId(dst), needsSwizzle, entry.op);
+                    drawRegion(0, x0, y0, x1, y1, u0, v0, u1, v1, needsSwizzle, composite);
                 }
+                if (composite)
+                    glDisable(GL_BLEND);
             }
         }
 
@@ -1222,7 +1232,7 @@ void Renderer::drawSolid(float x0, float y0, float x1, float y1, float r, float 
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4); checkGlError();
 }
 
-void Renderer::drawRegion(GLuint id, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1, uint8_t flip) {
+void Renderer::drawRegion(GLuint id, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1, uint8_t flip, uint8_t forceNearest) {
     float coords[16] = {
         x0, -y0, u0, v0,
         x1, -y0, u1, v0,
@@ -1231,14 +1241,15 @@ void Renderer::drawRegion(GLuint id, float x0, float y0, float x1, float y1, flo
     };
 
     GLuint p = flip ? gv_pos_bgra : gv_pos, c = flip ? gv_coords_bgra : gv_coords;
+    GLint filt = forceNearest ? GL_NEAREST : filtering;
 
     glActiveTexture(GL_TEXTURE0);
     glUseProgram(flip ? g_texture_program_bgra : g_texture_program);
     if (id)
         glBindTexture(GL_TEXTURE_2D, id);
 
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filtering);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filtering);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filt);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filt);
     glVertexAttribPointer(p, 2, GL_FLOAT, GL_FALSE, 16, coords);
     glVertexAttribPointer(c, 2, GL_FLOAT, GL_FALSE, 16, &coords[2]);
     glEnableVertexAttribArray(p);
