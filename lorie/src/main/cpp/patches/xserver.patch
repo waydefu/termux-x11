@@ -930,3 +930,220 @@
  
  #endif
  #endif
+--- ./miext/damage/damage.c	2026-09-08 03:22:57.141992247 +0800
++++ ./miext/damage/damage.c	2026-09-08 03:22:57.249992247 +0800
+@@ -25,6 +25,7 @@
+ #endif
+ 
+ #include <stdlib.h>
++#include <stdio.h>
+ 
+ #include    <X11/X.h>
+ #include    "scrnintstr.h"
+@@ -50,6 +51,10 @@
+     real->mem = priv->mem; \
+ }
+ 
++#ifdef __ANDROID__
++static int p2a3_damage_depth;
++#endif
++
+ #define BOX_SAME(a,b) \
+     ((a)->x1 == (b)->x1 && \
+      (a)->y1 == (b)->y1 && \
+@@ -488,6 +493,25 @@
+     PictureScreenPtr ps = GetPictureScreen(pScreen);
+ 
+     damageScrPriv(pScreen);
++#ifdef __ANDROID__
++    p2a3_damage_depth++;
++    {
++        char msg[768];
++
++        snprintf(msg, sizeof(msg),
++                 "D0 damageComposite ENTER depth=%d op=%u pSrc=%p pMask=%p pDst=%p "
++                 "srcDraw=%p maskDraw=%p dstDraw=%p current=%p saved=%p "
++                 "saved_is_self=%d",
++                 p2a3_damage_depth, (unsigned) op, (void *) pSrc, (void *) pMask,
++                 (void *) pDst,
++                 pSrc ? (void *) pSrc->pDrawable : NULL,
++                 pMask ? (void *) pMask->pDrawable : NULL,
++                 pDst ? (void *) pDst->pDrawable : NULL,
++                 (void *) ps->Composite, (void *) pScrPriv->Composite,
++                 pScrPriv->Composite == damageComposite);
++        p2a2_emit(msg);
++    }
++#endif
+ 
+     if (checkPictureDamage(pDst)) {
+         BoxRec box;
+@@ -509,14 +533,52 @@
+         miCompositeSourceValidate(pSrc);
+     if (pMask && pMask->pDrawable && WindowDrawable(pMask->pDrawable->type))
+         miCompositeSourceValidate(pMask);
++#ifdef __ANDROID__
++    {
++        char msg[256];
++
++        snprintf(msg, sizeof(msg),
++                 "D1 BEFORE_UNWRAP depth=%d current=%p saved=%p",
++                 p2a3_damage_depth, (void *) ps->Composite,
++                 (void *) pScrPriv->Composite);
++        p2a2_emit(msg);
++    }
++#endif
+     unwrap(pScrPriv, ps, Composite);
++#ifdef __ANDROID__
++    {
++        char msg[256];
++
++        snprintf(msg, sizeof(msg),
++                 "D2 AFTER_UNWRAP/BEFORE_CALL depth=%d current=%p saved=%p callee=%p callee_is_self=%d",
++                 p2a3_damage_depth, (void *) ps->Composite,
++                 (void *) pScrPriv->Composite, (void *) ps->Composite,
++                 ps->Composite == damageComposite);
++        p2a2_emit(msg);
++    }
++#endif
+     (*ps->Composite) (op,
+                       pSrc,
+                       pMask,
+                       pDst,
+                       xSrc, ySrc, xMask, yMask, xDst, yDst, width, height);
++#ifdef __ANDROID__
++    {
++        char msg[256];
++
++        snprintf(msg, sizeof(msg),
++                 "D3 AFTER_CALL depth=%d current=%p saved=%p",
++                 p2a3_damage_depth, (void *) ps->Composite,
++                 (void *) pScrPriv->Composite);
++        p2a2_emit(msg);
++    }
++#endif
+     damageRegionProcessPending(pDst->pDrawable);
+     wrap(pScrPriv, ps, Composite, damageComposite);
++#ifdef __ANDROID__
++    if (p2a3_damage_depth > 0)
++        p2a3_damage_depth--;
++#endif
+ }
+ 
+ static void
+--- ./exa/exa_unaccel.c	2026-09-08 03:22:57.149992247 +0800
++++ ./exa/exa_unaccel.c	2026-09-08 03:22:57.249992247 +0800
+@@ -23,6 +23,7 @@
+ 
+ #include "exa_priv.h"
+ 
++#include <stdio.h>
+ #include "mipict.h"
+ 
+ /*
+@@ -598,6 +599,34 @@
+ {
+     ScreenPtr pScreen = pDst->pDrawable->pScreen;
+     PictureScreenPtr ps = GetPictureScreen(pScreen);
++#ifdef __ANDROID__
++    {
++        char msg[768];
++        DrawablePtr sd = pSrc && pSrc->pDrawable ? pSrc->pDrawable : NULL;
++        DrawablePtr md = pMask && pMask->pDrawable ? pMask->pDrawable : NULL;
++        DrawablePtr dd = pDst && pDst->pDrawable ? pDst->pDrawable : NULL;
++        PixmapPtr sp = (sd && sd->type == DRAWABLE_PIXMAP) ? (PixmapPtr) sd : NULL;
++        PixmapPtr mp = (md && md->type == DRAWABLE_PIXMAP) ? (PixmapPtr) md : NULL;
++        PixmapPtr dp = (dd && dd->type == DRAWABLE_PIXMAP) ? (PixmapPtr) dd : NULL;
++
++        snprintf(msg, sizeof(msg),
++                 "E0u EXA_UNACCEL_ENTER op=%u pSrc=%p pMask=%p pDst=%p xywh=%d,%d,%u,%u "
++                 "srcDraw=%p maskDraw=%p dstDraw=%p srcPix=%p maskPix=%p dstPix=%p "
++                 "src_ptr=%p src_kind=%d mask_ptr=%p mask_kind=%d dst_ptr=%p dst_kind=%d "
++                 "src_whbpp=%d,%d,%d dst_whbpp=%d,%d,%d mask_whbpp=%d,%d,%d",
++                 (unsigned) op, (void *) pSrc, (void *) pMask, (void *) pDst,
++                 (int) xDst, (int) yDst, (unsigned) width, (unsigned) height,
++                 (void *) sd, (void *) md, (void *) dd,
++                 (void *) sp, (void *) mp, (void *) dp,
++                 sp ? sp->devPrivate.ptr : NULL, sp ? sp->devKind : -1,
++                 mp ? mp->devPrivate.ptr : NULL, mp ? mp->devKind : -1,
++                 dp ? dp->devPrivate.ptr : NULL, dp ? dp->devKind : -1,
++                 sd ? sd->width : -1, sd ? sd->height : -1, sd ? sd->bitsPerPixel : -1,
++                 dd ? dd->width : -1, dd ? dd->height : -1, dd ? dd->bitsPerPixel : -1,
++                 md ? md->width : -1, md ? md->height : -1, md ? md->bitsPerPixel : -1);
++        p2a2_emit(msg);
++    }
++#endif
+ 
+     EXA_PRE_FALLBACK(pScreen);
+ 
+@@ -631,7 +660,38 @@
+             exaPrepareAccess(pMask->pDrawable, EXA_PREPARE_MASK);
+     }
+ 
++#ifdef __ANDROID__
++    {
++        char msg[768];
++        DrawablePtr sd = pSrc && pSrc->pDrawable ? pSrc->pDrawable : NULL;
++        DrawablePtr md = pMask && pMask->pDrawable ? pMask->pDrawable : NULL;
++        DrawablePtr dd = pDst && pDst->pDrawable ? pDst->pDrawable : NULL;
++        PixmapPtr sp = (sd && sd->type == DRAWABLE_PIXMAP) ? (PixmapPtr) sd : NULL;
++        PixmapPtr mp = (md && md->type == DRAWABLE_PIXMAP) ? (PixmapPtr) md : NULL;
++        PixmapPtr dp = (dd && dd->type == DRAWABLE_PIXMAP) ? (PixmapPtr) dd : NULL;
++
++        snprintf(msg, sizeof(msg),
++                 "E1 PRE_SWAP op=%u src_ptr=%p src_kind=%d mask_ptr=%p mask_kind=%d "
++                 "dst_ptr=%p dst_kind=%d current=%p saved=%p",
++                 (unsigned) op,
++                 sp ? sp->devPrivate.ptr : NULL, sp ? sp->devKind : -1,
++                 mp ? mp->devPrivate.ptr : NULL, mp ? mp->devKind : -1,
++                 dp ? dp->devPrivate.ptr : NULL, dp ? dp->devKind : -1,
++                 (void *) ps->Composite, (void *) pExaScr->SavedComposite);
++        p2a2_emit(msg);
++    }
++#endif
+     swap(pExaScr, ps, Composite);
++#ifdef __ANDROID__
++    {
++        char msg[256];
++
++        snprintf(msg, sizeof(msg),
++                 "E1 PRE_FB_COMPOSITE callee=%p saved=%p",
++                 (void *) ps->Composite, (void *) pExaScr->SavedComposite);
++        p2a2_emit(msg);
++    }
++#endif
+     ps->Composite(op,
+                   pSrc,
+                   pMask,
+--- ./exa/exa_render.c	2026-09-08 03:22:57.153992247 +0800
++++ ./exa/exa_render.c	2026-09-08 03:22:57.249992247 +0800
+@@ -27,6 +27,7 @@
+ #endif
+ 
+ #include <stdlib.h>
++#include <stdio.h>
+ 
+ #include "exa_priv.h"
+ 
+@@ -880,6 +881,22 @@
+     Bool saveSrcRepeat = pSrc->repeat;
+     Bool saveMaskRepeat = pMask ? pMask->repeat : 0;
+     RegionRec region;
++#ifdef __ANDROID__
++    {
++        char msg[512];
++
++        snprintf(msg, sizeof(msg),
++                 "E0 EXA_COMPOSITE_ENTER op=%u pSrc=%p pMask=%p pDst=%p xywh=%d,%d,%u,%u "
++                 "srcDraw=%p maskDraw=%p dstDraw=%p swappedOut=%d",
++                 (unsigned) op, (void *) pSrc, (void *) pMask, (void *) pDst,
++                 (int) xDst, (int) yDst, (unsigned) width, (unsigned) height,
++                 pSrc ? (void *) pSrc->pDrawable : NULL,
++                 pMask ? (void *) pMask->pDrawable : NULL,
++                 pDst ? (void *) pDst->pDrawable : NULL,
++                 pExaScr->swappedOut);
++        p2a2_emit(msg);
++    }
++#endif
+ 
+     if (pExaScr->swappedOut)
+         goto fallback;

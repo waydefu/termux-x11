@@ -30,6 +30,8 @@
 #include <dlfcn.h>
 #include <signal.h>
 #include <sys/syscall.h>
+#include <fcntl.h>
+#include <ucontext.h>
 #include "fb.h"
 #include "mipointer.h"
 #include "micmap.h"
@@ -147,13 +149,127 @@ static Bool lorieServerDebugEnabled = FALSE;
 extern void xorg_backtrace(void);
 
 static char p2a2AltStack[64 * 1024];
+static int p2a3SnapFd = -1;
 
-static void p2a2CrashHandler(int signo, siginfo_t *si, unused void *uctx) {
-    char msg[256];
-    snprintf(msg, sizeof(msg), "Ssig signo=%d code=%d addr=%p (rt_sigaction)",
-             signo, si ? si->si_code : -1, si ? si->si_addr : NULL);
-    p2a2_emit(msg);
-    lorieDumpFlightRecorder("P2-A.2 Ssig");
+/* Async-signal-safe helpers: no malloc, snprintf, or logcat. */
+static char *p2a3PutStr(char *p, char *e, const char *s) {
+    while (s && *s && p < e)
+        *p++ = *s++;
+    return p;
+}
+
+static char *p2a3PutDec(char *p, char *e, long v) {
+    char tmp[24];
+    int n = 0;
+    unsigned long u;
+
+    if (v < 0) {
+        if (p < e)
+            *p++ = '-';
+        u = (unsigned long) (-v);
+    } else {
+        u = (unsigned long) v;
+    }
+    if (u == 0)
+        tmp[n++] = '0';
+    while (u && n < (int) sizeof(tmp)) {
+        tmp[n++] = (char) ('0' + (u % 10));
+        u /= 10;
+    }
+    while (n && p < e)
+        *p++ = tmp[--n];
+    return p;
+}
+
+static char *p2a3PutHex(char *p, char *e, unsigned long v) {
+    static const char H[] = "0123456789abcdef";
+    int i;
+
+    p = p2a3PutStr(p, e, "0x");
+    for (i = (int) (sizeof(unsigned long) * 2) - 1; i >= 0 && p < e; i--)
+        *p++ = H[(v >> (i * 4)) & 0xf];
+    return p;
+}
+
+static void p2a3WriteLine(const char *buf, size_t n) {
+    if (!buf || n == 0)
+        return;
+    (void) write(2, buf, n);
+    (void) write(2, "\n", 1);
+    if (p2a3SnapFd >= 0) {
+        (void) write(p2a3SnapFd, buf, n);
+        (void) write(p2a3SnapFd, "\n", 1);
+        (void) fsync(p2a3SnapFd);
+    }
+}
+
+static void p2a3CrashHandler(int signo, siginfo_t *si, void *uctx) {
+    char buf[768];
+    char *p = buf;
+    char *e = buf + sizeof(buf) - 1;
+    ucontext_t *uc = (ucontext_t *) uctx;
+    unsigned long pc = 0, lr = 0, sp = 0, fp = 0;
+    unsigned long x[9];
+    int i;
+
+    memset(x, 0, sizeof(x));
+#if defined(__aarch64__)
+    if (uc) {
+        pc = (unsigned long) uc->uc_mcontext.pc;
+        sp = (unsigned long) uc->uc_mcontext.sp;
+        lr = (unsigned long) uc->uc_mcontext.regs[30];
+        fp = (unsigned long) uc->uc_mcontext.regs[29];
+        for (i = 0; i < 9; i++)
+            x[i] = (unsigned long) uc->uc_mcontext.regs[i];
+    }
+#endif
+    p = p2a3PutStr(p, e, "Uctx signo=");
+    p = p2a3PutDec(p, e, signo);
+    p = p2a3PutStr(p, e, " si_code=");
+    p = p2a3PutDec(p, e, si ? si->si_code : -1);
+    p = p2a3PutStr(p, e, " si_addr=");
+    p = p2a3PutHex(p, e, (unsigned long) (si ? si->si_addr : 0));
+    p = p2a3PutStr(p, e, " PC=");
+    p = p2a3PutHex(p, e, pc);
+    p = p2a3PutStr(p, e, " LR=");
+    p = p2a3PutHex(p, e, lr);
+    p = p2a3PutStr(p, e, " SP=");
+    p = p2a3PutHex(p, e, sp);
+    p = p2a3PutStr(p, e, " FP=");
+    p = p2a3PutHex(p, e, fp);
+    p = p2a3PutStr(p, e, " x0=");
+    p = p2a3PutHex(p, e, x[0]);
+    p = p2a3PutStr(p, e, " x1=");
+    p = p2a3PutHex(p, e, x[1]);
+    p = p2a3PutStr(p, e, " x2=");
+    p = p2a3PutHex(p, e, x[2]);
+    p = p2a3PutStr(p, e, " x3=");
+    p = p2a3PutHex(p, e, x[3]);
+    p = p2a3PutStr(p, e, " x4=");
+    p = p2a3PutHex(p, e, x[4]);
+    p = p2a3PutStr(p, e, " x5=");
+    p = p2a3PutHex(p, e, x[5]);
+    p = p2a3PutStr(p, e, " x6=");
+    p = p2a3PutHex(p, e, x[6]);
+    p = p2a3PutStr(p, e, " x7=");
+    p = p2a3PutHex(p, e, x[7]);
+    p = p2a3PutStr(p, e, " x8=");
+    p = p2a3PutHex(p, e, x[8]);
+    *p = 0;
+    p2a3WriteLine(buf, (size_t) (p - buf));
+
+    p = buf;
+    p = p2a3PutStr(p, e, "Ssig signo=");
+    p = p2a3PutDec(p, e, signo);
+    p = p2a3PutStr(p, e, " code=");
+    p = p2a3PutDec(p, e, si ? si->si_code : -1);
+    p = p2a3PutStr(p, e, " addr=");
+    p = p2a3PutHex(p, e, (unsigned long) (si ? si->si_addr : 0));
+    p = p2a3PutStr(p, e, " (rt_sigaction+ucontext)");
+    *p = 0;
+    p2a3WriteLine(buf, (size_t) (p - buf));
+
+    /* Auxiliary: not async-signal-safe. Uctx line above is the primary evidence. */
     xorg_backtrace();
     _exit(128 + signo);
 }
@@ -166,11 +282,13 @@ static void p2a2InstallCrashProbe(void) {
         return;
     installed = 1;
 
+    p2a3SnapFd = open("/tmp/x11gpu-p2a3.snap", O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0666);
+
     memset(&ss, 0, sizeof(ss));
     ss.ss_sp = p2a2AltStack;
     ss.ss_size = sizeof(p2a2AltStack);
     if (sigaltstack(&ss, NULL) != 0)
-        log(ERROR, "P2-A.2 sigaltstack failed: %s", strerror(errno));
+        log(ERROR, "P2-A.3 sigaltstack failed: %s", strerror(errno));
 
 #if defined(__aarch64__) || defined(__x86_64__)
     {
@@ -183,30 +301,30 @@ static void p2a2InstallCrashProbe(void) {
         } kact;
 
         memset(&kact, 0, sizeof(kact));
-        kact.handler = p2a2CrashHandler;
+        kact.handler = p2a3CrashHandler;
         kact.flags = SA_SIGINFO | SA_ONSTACK;
-        /* Kernel rt_sigaction bypasses ART libsigchain so Ssig/Sbt reach logcat
-         * before debuggerd wins the ~110ms attach race. Rendering path unchanged. */
+        /* Kernel rt_sigaction bypasses ART libsigchain so Uctx/Ssig reach
+         * stderr+snap before debuggerd wins the ~110ms attach race. */
         if (syscall(SYS_rt_sigaction, SIGSEGV, &kact, NULL, 8) != 0)
-            log(ERROR, "P2-A.2 rt_sigaction SIGSEGV failed: %s", strerror(errno));
+            log(ERROR, "P2-A.3 rt_sigaction SIGSEGV failed: %s", strerror(errno));
         if (syscall(SYS_rt_sigaction, SIGBUS, &kact, NULL, 8) != 0)
-            log(ERROR, "P2-A.2 rt_sigaction SIGBUS failed: %s", strerror(errno));
+            log(ERROR, "P2-A.3 rt_sigaction SIGBUS failed: %s", strerror(errno));
     }
 #else
     {
         struct sigaction act;
 
         memset(&act, 0, sizeof(act));
-        act.sa_sigaction = p2a2CrashHandler;
+        act.sa_sigaction = p2a3CrashHandler;
         act.sa_flags = SA_SIGINFO | SA_ONSTACK;
         sigemptyset(&act.sa_mask);
         if (sigaction(SIGSEGV, &act, NULL) != 0)
-            log(ERROR, "P2-A.2 sigaction SIGSEGV failed: %s", strerror(errno));
+            log(ERROR, "P2-A.3 sigaction SIGSEGV failed: %s", strerror(errno));
         if (sigaction(SIGBUS, &act, NULL) != 0)
-            log(ERROR, "P2-A.2 sigaction SIGBUS failed: %s", strerror(errno));
+            log(ERROR, "P2-A.3 sigaction SIGBUS failed: %s", strerror(errno));
     }
 #endif
-    log(INFO, "P2-A.2 diagnostic: Sprep/Sfb/Ssig enabled; GWP-ASan always; miss does not exclude heap overflow");
+    log(INFO, "P2-A.3 diagnostic: D0-D3/E0/E1/Uctx; observe-only; GWP-ASan miss does not exclude heap overflow");
 }
 
 void OsVendorInit(void) {
