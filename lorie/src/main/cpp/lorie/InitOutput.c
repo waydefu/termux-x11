@@ -209,6 +209,7 @@ static Bool FalseNoop() { return FALSE; }
 static void VoidNoop() {}
 
 void ddxGiveUp(unused enum ExitCode error) {
+    lorieDumpFlightRecorder("ddxGiveUp");
     log(ERROR, "Server stopped (%d)", error);
     CloseWellKnownConnections();
     UnlockServer();
@@ -287,6 +288,7 @@ Bool drawSquares() {
 }
 
 void ddxReady(void) {
+    lorieInstallFlightRecorder();
     CursorVisible = TRUE;
     pScreenPtr->DisplayCursor(lorieMouse, pScreenPtr, rootCursor);
     if (NoListenAll)
@@ -305,6 +307,7 @@ void ddxReady(void) {
 }
 
 void OsVendorFatalError(unused const char *f, unused va_list args) {
+    lorieDumpFlightRecorder("OsVendorFatalError");
     log(ERROR, f, args);
 }
 
