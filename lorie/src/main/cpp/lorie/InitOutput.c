@@ -1205,7 +1205,7 @@ static Bool lorieTryScheduleGpuSolid(PixmapPtr dst, int x1, int y1, int x2, int 
     entry->numRects = 1;
     entry->op = LORIE_GPU_OP_SOLID;
     entry->dstIsRgba = LorieBuffer_isRgba(dstBuffer) ? 1 : 0;
-    entry->color = (uint32_t) (fg & 0x00ffffffu);
+    entry->color = (uint32_t) fg;
     entry->rects[0] = (LorieGpuCopyRect) { (int16_t) x1, (int16_t) y1, (int16_t) x2, (int16_t) y2 };
 
     __sync_synchronize();

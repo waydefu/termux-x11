@@ -788,9 +788,11 @@ uint64_t Renderer::applyPendingGpuCopiesLocked() {
                 float xr = ((entry.color >> 16) & 0xff) / 255.f;
                 float xg = ((entry.color >> 8) & 0xff) / 255.f;
                 float xb = (entry.color & 0xff) / 255.f;
-                // CPU stores X11 0x00RRGGBB as LE bytes B,G,R. An RGBA FBO's byte0 is GL R,
-                // so pass B,G,R to match GetImage of a software fill. BGRA AHB attachments
-                // already swap on write, so pass R,G,B there.
+                float xa = ((entry.color >> 24) & 0xff) / 255.f;
+                // CPU stores X11 0x00RRGGBB as LE bytes B,G,R,A. An RGBA FBO's byte0 is GL R,
+                // so pass B,G,R to match GetImage/mmap of a software fill. BGRA AHB attachments
+                // already swap on write, so pass R,G,B there. Alpha follows the X11 pixel
+                // (0 for 24bpp) rather than forcing 1.0, which broke DRI3 mmap round-trip.
                 float r = entry.dstIsRgba ? xb : xr;
                 float g = xg;
                 float b = entry.dstIsRgba ? xr : xb;
@@ -802,7 +804,7 @@ uint64_t Renderer::applyPendingGpuCopiesLocked() {
                     float x1 = 2.f * (float) (rec.x2 + entry.xOff) / (float) dstDesc->width - 1.f;
                     float y0 = 1.f - 2.f * (float) (rec.y1 + entry.yOff) / (float) dstDesc->height;
                     float y1 = 1.f - 2.f * (float) (rec.y2 + entry.yOff) / (float) dstDesc->height;
-                    drawSolid(x0, y0, x1, y1, r, g, b, 1.f);
+                    drawSolid(x0, y0, x1, y1, r, g, b, xa);
                 }
             } else {
                 const LorieBuffer_Desc *srcDesc = LorieBuffer_description(src);
