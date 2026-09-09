@@ -1,0 +1,158 @@
+name: S3 Q1 x86_64 APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Canonical standalone APK (x86_64)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout exact snapshot
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Verify x86_64 runner and source pins
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'runner.arch=%s\n' '${{ runner.arch }}'
+          test '${{ runner.arch }}' = 'X64'
+          test "$(uname -m)" = x86_64
+          printf 'source_sha='; git rev-parse HEAD
+          git diff --check
+          git submodule status --recursive
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Verify exact SDK toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?ANDROID_HOME is required}}"
+          test -d "$SDK_ROOT/platforms/android-34"
+          test -d "$SDK_ROOT/build-tools/36.0.0"
+          test -d "$SDK_ROOT/ndk/29.0.14206865"
+          test -d "$SDK_ROOT/cmake/3.22.1"
+          printf '%s\n' '---build-tools---'
+          cat "$SDK_ROOT/build-tools/36.0.0/source.properties"
+          printf '%s\n' '---ndk---'
+          cat "$SDK_ROOT/ndk/29.0.14206865/source.properties"
+          printf '%s\n' '---cmake---'
+          cat "$SDK_ROOT/cmake/3.22.1/source.properties"
+          printf '%s\n' '---java---'
+          java -version
+          printf '%s\n' '---gradle---'
+          ./gradlew --version
+
+      - name: Build standalone qualification APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon --no-build-cache \
+            ':lorie-app:assembleStandaloneDebug' \
+            2>&1 | tee s3-q1-gradle.log
+
+      - name: Verify APK and embedded native candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?ANDROID_HOME is required}}"
+          APK="lorie-app/build/outputs/apk/standalone/debug/termux-x11-universal-standalone-debug.apk"
+          AAPT2="$SDK_ROOT/build-tools/36.0.0/aapt2"
+          test -f "$APK"
+          test -x "$AAPT2"
+          mkdir -p s3-q1-artifacts
+          cp "$APK" s3-q1-artifacts/
+          sha256sum "$APK" | tee s3-q1-artifacts/apk.sha256
+          "$AAPT2" dump badging "$APK" > s3-q1-artifacts/apk-badging.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          badging = Path('s3-q1-artifacts/apk-badging.txt').read_text()
+          required = [
+              "package: name='com.waydefu.x11gpu'",
+              "versionCode='15'",
+          ]
+          missing = [item for item in required if item not in badging]
+          if missing:
+              raise SystemExit(f'APK identity mismatch: {missing}')
+          PY
+          unzip -p "$APK" 'lib/arm64-v8a/libXlorie.so' > s3-q1-artifacts/libXlorie.so
+          test -s s3-q1-artifacts/libXlorie.so
+          sha256sum s3-q1-artifacts/libXlorie.so | tee s3-q1-artifacts/libXlorie.sha256
+          readelf -d s3-q1-artifacts/libXlorie.so > s3-q1-artifacts/libXlorie.readelf-d.txt
+          nm -D -u s3-q1-artifacts/libXlorie.so > s3-q1-artifacts/libXlorie.nm-D-u.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import re
+          nm = Path('s3-q1-artifacts/libXlorie.nm-D-u.txt').read_text()
+          symbols = {line.split()[-1] for line in nm.splitlines() if line.strip()}
+          forbidden = {
+              'eglCreateImageKHR', 'eglDestroyImageKHR', 'eglCreateSyncKHR',
+              'eglDestroySyncKHR', 'eglClientWaitSyncKHR',
+              'glEGLImageTargetTexture2DOES', 'XGetKeyboardMapping',
+              'XGetModifierMapping', 'XFreeModifiermap', '_XFreeMutex_fn',
+              '_XkbInitReadBuffer', '_XkbGetReadBufferCountedString',
+              '_XkbGetReadBufferPtr', '_XkbSkipReadBufferData',
+              '_XkbCopyFromReadBuffer', '_XkbFreeReadBuffer',
+              'XkbUseExtension', '_XGetRequest', '_XReply',
+          }
+          present = sorted(forbidden & symbols)
+          if present:
+              raise SystemExit(f'forbidden undefined symbols: {present}')
+          readelf = Path('s3-q1-artifacts/libXlorie.readelf-d.txt').read_text()
+          if 'libX11' in readelf:
+              raise SystemExit('full libX11 DT_NEEDED present')
+          expected = 'e6317851a1d020d3c0a4eeb7a4d48e50d05744e9d40a643580b6201a415eeab7'
+          actual = hashlib.sha256(Path('s3-q1-artifacts/libXlorie.so').read_bytes()).hexdigest()
+          Path('s3-q1-artifacts/native-hash-comparison.txt').write_text(
+              f'expected_local_candidate={expected}\n'
+              f'actual_ci_embedded_lib={actual}\n'
+              f'exact_match={actual == expected}\n'
+          )
+          PY
+
+      - name: Write packaging provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf 'source_sha='; git rev-parse HEAD
+            printf 'runner_arch=${{ runner.arch }}\n'
+            printf 'runner_os=${{ runner.os }}\n'
+            printf 'runner_uname='; uname -a
+            printf 'java='; java -version 2>&1 | tr '\n' ' '; printf '\n'
+            printf 'gradle_wrapper=9.7.0\n'
+            printf 'agp=9.3.1\n'
+            printf 'ndk=29.0.14206865\n'
+            printf 'build_tools=36.0.0\n'
+            printf 'compile_sdk=34\n'
+            printf 'min_sdk=24\n'
+            printf 'abi=arm64-v8a\n'
+            printf 'apk_sha256='; cut -d' ' -f1 s3-q1-artifacts/apk.sha256
+            printf 'embedded_libXlorie_sha256='; cut -d' ' -f1 s3-q1-artifacts/libXlorie.sha256
+            cat s3-q1-artifacts/native-hash-comparison.txt
+          } > s3-q1-artifacts/provenance.txt
+
+      - name: Upload S3-Q1 packaging evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s3-q1-apk-${{ github.sha }}
+          path: |
+            s3-q1-gradle.log
+            s3-q1-artifacts/
+          if-no-files-found: warn
