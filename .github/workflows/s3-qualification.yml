@@ -96,7 +96,7 @@ jobs:
         run: |
           set -euo pipefail
           SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?ANDROID_HOME is required}}"
-          APK="lorie-app/build/outputs/apk/standalone/debug/termux-x11-universal-standalone-debug.apk"
+          APK="lorie-app/build/outputs/apk/standalone/debug/termux-x11-universal-debug.apk"
           AAPT2="$SDK_ROOT/build-tools/36.0.0/aapt2"
           test -f "$APK"
           test -x "$AAPT2"
