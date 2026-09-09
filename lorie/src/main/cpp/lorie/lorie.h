@@ -14,6 +14,7 @@
 #include <sys/socket.h>
 #include "linux/input-event-codes.h"
 #include "buffer.h"
+#include "b3a_telemetry.h"
 
 #define PORT 7892
 #define MAGIC "0xDEADBEEF"
@@ -180,6 +181,7 @@ typedef struct {
     uint64_t serial;
     uint64_t srcBufferId;
     uint64_t dstBufferId;
+    uint32_t telemetryIndex;
     int16_t xOff, yOff;
     uint16_t numRects;
     uint8_t op;
@@ -251,6 +253,9 @@ struct lorie_shared_server_state {
 
     volatile uint64_t rendererSolidSubmits;
     volatile uint64_t rendererSolidComplete;
+
+    /* Optional P2-B.3a records. Zero overhead apart from a disabled branch when off. */
+    LorieB3aTelemetry b3aTelemetry;
 };
 
 #ifdef __cplusplus

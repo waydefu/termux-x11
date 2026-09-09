@@ -19,7 +19,7 @@
 #include <ctype.h>
 
 #define __u32 uint32_t
-#ifdef ANDROID
+#if defined(ANDROID) || defined(__ANDROID__)
 #include <linux/ashmem.h>
 #include <libgen.h>
 

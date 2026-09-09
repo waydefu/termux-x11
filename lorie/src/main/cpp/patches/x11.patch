@@ -43,3 +43,76 @@ index a8ebf883..d716fdb0 100644
      }
      return db;
  }
+--- a/src/KeyBind.c
++++ b/src/KeyBind.c
+@@ -70,2 +70,4 @@
++#ifndef XKBCOMP_NO_XLIB_PROTOCOL
++
+ static void
+ ComputeMaskFromKeytrans(
+@@ -288,2 +288,4 @@
++#endif /* XKBCOMP_NO_XLIB_PROTOCOL */
++
+ static void
+ UCSConvertCase( register unsigned code,
+@@ -788,2 +788,4 @@
++#ifndef XKBCOMP_NO_XLIB_PROTOCOL
++
+ int
+ _XTranslateKey(	register Display *dpy,
+@@ -1040,1 +1040,3 @@
+ }
++
++#endif /* XKBCOMP_NO_XLIB_PROTOCOL */
+--- a/src/xkb/XKBGeom.c
++++ b/src/xkb/XKBGeom.c
+@@ -251,2 +251,4 @@
++#ifndef XKBCOMP_NO_XLIB_PROTOCOL
++
+ static Status
+ _XkbReadGeomProperties(XkbReadBufferPtr buf,
+@@ -722,1 +722,3 @@
+ }
++
++#endif /* XKBCOMP_NO_XLIB_PROTOCOL */
+--- a/src/Xrm.c
++++ b/src/Xrm.c
+@@ -337,2 +337,4 @@
++#ifndef XKBCOMP_NO_XLIB_PROTOCOL
++
+ XrmDatabase XrmGetDatabase(
+     Display *display)
+@@ -361,2 +361,4 @@
++#endif /* XKBCOMP_NO_XLIB_PROTOCOL */
++
+ void
+ XrmStringToQuarkList(
+@@ -759,2 +759,4 @@
++#ifndef XKBCOMP_NO_XLIB_PROTOCOL
++
+ void XrmCombineDatabase(
+     XrmDatabase	from, XrmDatabase *into,
+@@ -815,2 +815,4 @@
++#endif /* XKBCOMP_NO_XLIB_PROTOCOL */
++
+ /* store a value in the database, overriding any existing entry */
+ static void PutEntry(
+@@ -1671,2 +1671,4 @@
++#ifndef XKBCOMP_NO_XLIB_PROTOCOL
++
+ Status
+ XrmCombineFileDatabase(
+@@ -1697,2 +1697,4 @@
++#endif /* XKBCOMP_NO_XLIB_PROTOCOL */
++
+ /* call the user proc for every value in the table, arbitrary order.
+  * stop if user proc returns True.  level is current depth in database.
+@@ -2632,2 +2632,4 @@
++#ifndef XKBCOMP_NO_XLIB_PROTOCOL
++
+ void XrmDestroyDatabase(
+     XrmDatabase   db)
+@@ -2656,1 +2656,3 @@
+ }
++
++#endif /* XKBCOMP_NO_XLIB_PROTOCOL */

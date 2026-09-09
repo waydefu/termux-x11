@@ -8,8 +8,6 @@
 #pragma ide diagnostic ignored "misc-no-recursion"
 #pragma ide diagnostic ignored "readability-redundant-declaration"
 #pragma clang diagnostic ignored "-Wincompatible-pointer-types-discards-qualifiers"
-#define EGL_EGLEXT_PROTOTYPES
-#define GL_GLEXT_PROTOTYPES
 #define __ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__
 
 #define CVT_H_GRANULARITY 8
@@ -29,6 +27,7 @@
 #include <unistd.h>
 #include "list.h"
 #include "lorie.h"
+#include "egl_dispatch.h"
 
 // libEGL exports this only since API 26, weak so the library still loads below that.
 __attribute__((weak)) EGLClientBuffer eglGetNativeClientBufferANDROID(const struct AHardwareBuffer* buffer);
@@ -142,6 +141,21 @@ static void notifyGpuCopyDone() {
         lorieEvent e = { .type = EVENT_GPU_COPY_DONE };
         write(conn_fd, &e, sizeof(e));
     }
+}
+
+/* The renderer drains one ring batch at a time. Keep its record indices local
+ * to the renderer thread so one fence measurement can be attributed to every
+ * entry without scanning the shared telemetry ring. */
+static uint32_t b3aBatchRecords[LORIE_GPU_COPY_QUEUE_CAPACITY];
+static uint32_t b3aBatchRecordCount;
+
+static void b3aMarkBatchFence(struct lorie_shared_server_state *state, uint64_t wait_ns) {
+    uint32_t i;
+    if (!state || !lorieB3aEnabled())
+        return;
+    for (i = 0; i < b3aBatchRecordCount; i++)
+        lorieB3aAddNs(&state->b3aTelemetry, b3aBatchRecords[i], LORIE_B3A_VALID_FENCE, wait_ns);
+    b3aBatchRecordCount = 0;
 }
 
 void Renderer::bindTexture(GLuint id) const {
@@ -281,6 +295,9 @@ void* Renderer::initThread() {
     eglMakeCurrent(egl_display, sfc, sfc, ctx);
     eglSwapInterval(egl_display, 0);
 
+    lorieEglDispatchInit(egl_display);
+    lorieGlesDispatchInit();
+
     g_texture_program = createProgram(vertexShaderSrc, fragmentShaderSrc);
     if (!g_texture_program)
         log("Xlorie: GLESv2: Unable to create shader program.\n");
@@ -381,6 +398,8 @@ void Renderer::testCapabilities(int* legacy_drawing, int* gpu_present_disabled) 
     if (eglInitialize(egl_display, &major, &minor) != EGL_TRUE)
         return vprintEglError("Unable to initialize EGL", __LINE__);
 
+    lorieEglDispatchInit(egl_display);
+
     loge("Xlorie: Initialized EGL version %d.%d\n", major, minor);
     eglBindAPI(EGL_OPENGL_ES_API);
 
@@ -465,7 +484,16 @@ void Renderer::testCapabilities(int* legacy_drawing, int* gpu_present_disabled) 
         return vprintEglError("Failed to obtain EGLClientBuffer from AHardwareBuffer, forcing legacy drawing", __LINE__);
     }
 
-    if (!(img = eglCreateImageKHR(egl_display, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, clientBuffer, imageAttributes))) {
+    if (!*gpu_present_disabled && !lorieEglHasFence()) {
+        loge("EGL fence sync unavailable, disabling Present GPU offload");
+        *gpu_present_disabled = 1;
+    }
+
+    if (!lorieEglHasImage()) {
+        loge("EGL image entrypoints unavailable, forcing legacy drawing");
+        *legacy_drawing = 1;
+        AHardwareBuffer_release(new_);
+    } else if (!(img = lorieEglCreateImageKHR(egl_display, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, clientBuffer, imageAttributes))) {
         loge("Failed to obtain EGLImageKHR from EGLClientBuffer");
         loge("Forcing legacy drawing");
         *legacy_drawing = 1;
@@ -497,22 +525,27 @@ void Renderer::testCapabilities(int* legacy_drawing, int* gpu_present_disabled) 
         if (eglMakeCurrent(egl_display, checksfc, checksfc, testctx) != EGL_TRUE)
             return vprintEglError("check eglMakeCurrent failed", __LINE__);
 
+        lorieGlesDispatchInit();
+
         glActiveTexture(GL_TEXTURE0); checkGlError();
         glGenTextures(1, &texture); checkGlError();
         bindTexture(texture);
-        glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, img); checkGlError();
+        bool imageBound = lorieGlesHasEglImage();
+        if (imageBound)
+            lorieGlEGLImageTargetTexture2DOES(GL_TEXTURE_2D, img);
+        checkGlError();
         glGenFramebuffers(1, &fbo); checkGlError();
         glBindFramebuffer(GL_FRAMEBUFFER, fbo); checkGlError();
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0); checkGlError();
         uint32_t pixel[64*64];
         glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, &pixel); checkGlError();
-        if (pixel[0] != 0xAABBCCDD && pixel[0] != 0xFFBBCCDD) {
+        if (!imageBound || (pixel[0] != 0xAABBCCDD && pixel[0] != 0xFFBBCCDD)) {
             log("Xlorie: GLES receives broken pixels. Forcing legacy drawing. 0x%X\n", pixel[0]);
             *legacy_drawing = 1;
         }
         eglMakeCurrent(egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
         eglDestroyContext(egl_display, testctx);
-        eglDestroyImageKHR(egl_display, img);
+        lorieEglDestroyImageKHR(egl_display, img);
         eglDestroySurface(egl_display, checksfc);
         AHardwareBuffer_release(new_);
     }
@@ -740,8 +773,15 @@ uint64_t Renderer::applyPendingGpuCopiesLocked() {
     if (!state || state->gpuCopyQueue.readIndex == state->gpuCopyQueue.writeIndex)
         return 0;
 
+    b3aBatchRecordCount = 0;
+
     while (state->gpuCopyQueue.readIndex != state->gpuCopyQueue.writeIndex) {
         LorieGpuCopyEntry entry = state->gpuCopyQueue.entries[state->gpuCopyQueue.readIndex % LORIE_GPU_COPY_QUEUE_CAPACITY];
+        if (lorieB3aEnabled() && entry.telemetryIndex != LORIE_B3A_INVALID_INDEX) {
+            lorieB3aMarkQueueDequeued(&state->b3aTelemetry, entry.telemetryIndex, lorieB3aNowNs());
+            if (b3aBatchRecordCount < LORIE_GPU_COPY_QUEUE_CAPACITY)
+                b3aBatchRecords[b3aBatchRecordCount++] = entry.telemetryIndex;
+        }
         LorieBuffer *dst = findBufferWithRetry(entry.dstBufferId);
         LorieBuffer *src = NULL;
 
@@ -796,6 +836,7 @@ uint64_t Renderer::applyPendingGpuCopiesLocked() {
                 float r = entry.dstIsRgba ? xb : xr;
                 float g = xg;
                 float b = entry.dstIsRgba ? xr : xb;
+                uint64_t draw_start = lorieB3aEnabled() ? lorieB3aNowNs() : 0;
                 glDisable(GL_BLEND);
                 state->rendererSolidSubmits++;
                 for (i = 0; i < entry.numRects; i++) {
@@ -806,10 +847,21 @@ uint64_t Renderer::applyPendingGpuCopiesLocked() {
                     float y1 = 1.f - 2.f * (float) (rec.y2 + entry.yOff) / (float) dstDesc->height;
                     drawSolid(x0, y0, x1, y1, r, g, b, xa);
                 }
+                if (draw_start)
+                    lorieB3aAddNs(&state->b3aTelemetry, entry.telemetryIndex, LORIE_B3A_VALID_DRAW_SUBMIT,
+                                  lorieB3aNowNs() - draw_start);
             } else {
                 const LorieBuffer_Desc *srcDesc = LorieBuffer_description(src);
                 uint8_t composite = entry.op == LORIE_GPU_OP_COMPOSITE;
+                uint64_t upload_start = lorieB3aEnabled() ? lorieB3aNowNs() : 0;
                 LorieBuffer_bindTexture(src);
+                if (upload_start)
+                    lorieB3aAddUploadBytes(&state->b3aTelemetry, entry.telemetryIndex,
+                                           (uint64_t) srcDesc->width * (uint64_t) srcDesc->height * 4ull,
+                                           (uint64_t) srcDesc->stride * (uint64_t) srcDesc->height * 4ull);
+                if (upload_start)
+                    lorieB3aAddNs(&state->b3aTelemetry, entry.telemetryIndex, LORIE_B3A_VALID_UPLOAD,
+                                  lorieB3aNowNs() - upload_start);
                 {
                     if (lorieDebugEnabled && (srcSizeLogCount++ & 15) == 0 && srcDesc->buffer) {
                         AHardwareBuffer_Desc realSrcDesc;
@@ -826,6 +878,7 @@ uint64_t Renderer::applyPendingGpuCopiesLocked() {
                 } else {
                     glDisable(GL_BLEND);
                 }
+                uint64_t draw_start = lorieB3aEnabled() ? lorieB3aNowNs() : 0;
                 for (i = 0; i < entry.numRects; i++) {
                     LorieGpuCopyRect rec = entry.rects[i];
                     float x0 = 2.f * (float) (rec.x1 + entry.xOff) / (float) dstDesc->width - 1.f;
@@ -850,6 +903,9 @@ uint64_t Renderer::applyPendingGpuCopiesLocked() {
                         LorieBuffer_getGLTextureId(src), LorieBuffer_getGLTextureId(dst), needsSwizzle, entry.op);
                     drawRegion(0, x0, y0, x1, y1, u0, v0, u1, v1, needsSwizzle, composite);
                 }
+                if (draw_start)
+                    lorieB3aAddNs(&state->b3aTelemetry, entry.telemetryIndex, LORIE_B3A_VALID_DRAW_SUBMIT,
+                                  lorieB3aNowNs() - draw_start);
                 if (composite)
                     glDisable(GL_BLEND);
             }
@@ -876,10 +932,13 @@ void Renderer::applyPendingGpuCopies() {
     lorie_mutex_lock(&state->lock, &state->lockingPid);
     serial = applyPendingGpuCopiesLocked();
     if (serial) {
-        EGLSync fence = eglCreateSyncKHR(egl_display, EGL_SYNC_FENCE_KHR, nullptr);
+        EGLSync fence = lorieEglCreateSyncKHR(egl_display, EGL_SYNC_FENCE_KHR, nullptr);
         glFlush();
-        eglClientWaitSyncKHR(egl_display, fence, 0, EGL_FOREVER);
-        eglDestroySyncKHR(egl_display, fence);
+        uint64_t fence_start = lorieB3aEnabled() ? lorieB3aNowNs() : 0;
+        lorieEglClientWaitSyncKHR(egl_display, fence, 0, EGL_FOREVER);
+        if (fence_start)
+            b3aMarkBatchFence(state, lorieB3aNowNs() - fence_start);
+        lorieEglDestroySyncKHR(egl_display, fence);
         // Only now that the GPU has actually finished (not just been told to start) is it safe to
         // let present_execute_copy release/idle the source pixmap back to the client.
         state->gpuCopyQueue.completedSerial = serial;
@@ -1026,7 +1085,7 @@ void Renderer::redrawLocked(bool* waitingForBuffers) {
                (sourceLeft + sourceWidth) / (float) desc->width * xfactor,
                (sourceTop + sourceHeight) / (float) desc->height,
                LorieBuffer_isRgba(buffer));
-    fence = eglCreateSyncKHR(egl_display, EGL_SYNC_FENCE_KHR, nullptr);
+    fence = lorieEglCreateSyncKHR(egl_display, EGL_SYNC_FENCE_KHR, nullptr);
     glFlush();
 
     if (state->cursor.updated) {
@@ -1043,8 +1102,11 @@ void Renderer::redrawLocked(bool* waitingForBuffers) {
     glFlush();
 
     // Wait until root window drawing is finished before giving control back to X server
-    eglClientWaitSyncKHR(egl_display, fence, 0, EGL_FOREVER);
-    eglDestroySyncKHR(egl_display, fence);
+    uint64_t fence_start = lorieB3aEnabled() ? lorieB3aNowNs() : 0;
+    lorieEglClientWaitSyncKHR(egl_display, fence, 0, EGL_FOREVER);
+    if (fence_start)
+        b3aMarkBatchFence(state, lorieB3aNowNs() - fence_start);
+    lorieEglDestroySyncKHR(egl_display, fence);
     if (gpuCopySerial) {
         state->gpuCopyQueue.completedSerial = gpuCopySerial;
         state->rendererSolidComplete = state->rendererSolidSubmits;
@@ -1062,9 +1124,9 @@ void Renderer::redrawLocked(bool* waitingForBuffers) {
     glClearColor(0, 0, 0, 0);
     glClear(GL_COLOR_BUFFER_BIT);
     glDisable(GL_SCISSOR_TEST);
-    fence = eglCreateSyncKHR(egl_display, EGL_SYNC_FENCE_KHR, nullptr);
-    eglClientWaitSyncKHR(egl_display, fence, EGL_SYNC_FLUSH_COMMANDS_BIT_KHR, EGL_FOREVER);
-    eglDestroySyncKHR(egl_display, fence);
+    fence = lorieEglCreateSyncKHR(egl_display, EGL_SYNC_FENCE_KHR, nullptr);
+    lorieEglClientWaitSyncKHR(egl_display, fence, EGL_SYNC_FLUSH_COMMANDS_BIT_KHR, EGL_FOREVER);
+    lorieEglDestroySyncKHR(egl_display, fence);
 
     state->renderedFrames++;
 }
@@ -1120,12 +1182,18 @@ void Renderer::threadLoop() {
             stateChanged = false;
             waitingForBuffers = false;
 
-            if (state)
+            if (state) {
+                if (!state->b3aTelemetry.renderer_rss_start_bytes)
+                    lorieB3aCaptureProcessStart(&state->b3aTelemetry, true);
                 state->surfaceAvailable = win != defaultWin;
-            else if (win != defaultWin) {
-                glClearColor(0, 0, 0, 0);
-                glClear(GL_COLOR_BUFFER_BIT);
-                eglSwapBuffers(egl_display, sfc);
+            } else {
+                if (oldState)
+                    lorieB3aCaptureProcessEnd(&oldState->b3aTelemetry, true);
+                if (win != defaultWin) {
+                    glClearColor(0, 0, 0, 0);
+                    glClear(GL_COLOR_BUFFER_BIT);
+                    eglSwapBuffers(egl_display, sfc);
+                }
             }
 
             if (oldState)
