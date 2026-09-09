@@ -45,10 +45,33 @@ jobs:
         run: |
           set -euo pipefail
           SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:?ANDROID_HOME is required}}"
-          test -d "$SDK_ROOT/platforms/android-34"
-          test -d "$SDK_ROOT/build-tools/36.0.0"
-          test -d "$SDK_ROOT/ndk/29.0.14206865"
-          test -d "$SDK_ROOT/cmake/3.22.1"
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$SDKMANAGER"
+          specs=(
+            "platforms;android-34:$SDK_ROOT/platforms/android-34"
+            "build-tools;36.0.0:$SDK_ROOT/build-tools/36.0.0"
+            "ndk;29.0.14206865:$SDK_ROOT/ndk/29.0.14206865"
+            "cmake;3.22.1:$SDK_ROOT/cmake/3.22.1"
+          )
+          missing=()
+          for item in "${specs[@]}"; do
+            spec="${item%%:*}"
+            path="${item#*:}"
+            if test -d "$path"; then
+              printf 'present %s\n' "$spec"
+            else
+              printf 'missing %s\n' "$spec"
+              missing+=("$spec")
+            fi
+          done
+          if ((${#missing[@]})); then
+            printf 'installing only approved exact packages: %s\n' "${missing[*]}"
+            "$SDKMANAGER" --sdk_root="$SDK_ROOT" "${missing[@]}"
+          fi
+          for item in "${specs[@]}"; do
+            path="${item#*:}"
+            test -d "$path"
+          done
           printf '%s\n' '---build-tools---'
           cat "$SDK_ROOT/build-tools/36.0.0/source.properties"
           printf '%s\n' '---ndk---'
