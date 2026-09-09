@@ -4,6 +4,7 @@
 
 PFNEGLCREATEIMAGEKHRPROC lorieEglCreateImageKHR = NULL;
 PFNEGLDESTROYIMAGEKHRPROC lorieEglDestroyImageKHR = NULL;
+PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC lorieEglGetNativeClientBufferANDROID = NULL;
 PFNEGLCREATESYNCKHRPROC lorieEglCreateSyncKHR = NULL;
 PFNEGLDESTROYSYNCKHRPROC lorieEglDestroySyncKHR = NULL;
 PFNEGLCLIENTWAITSYNCKHRPROC lorieEglClientWaitSyncKHR = NULL;
@@ -12,6 +13,7 @@ PFNGLEGLIMAGETARGETTEXTURE2DOESPROC lorieGlEGLImageTargetTexture2DOES = NULL;
 static bool eglInitDone = false;
 static bool glesInitDone = false;
 static bool hasImage = false;
+static bool hasNativeClientBuffer = false;
 static bool hasFence = false;
 static bool hasOesImage = false;
 
@@ -52,6 +54,10 @@ void lorieEglDispatchInit(EGLDisplay dpy) {
         (PFNEGLCREATEIMAGEKHRPROC) eglGetProcAddress("eglCreateImageKHR");
     lorieEglDestroyImageKHR =
         (PFNEGLDESTROYIMAGEKHRPROC) eglGetProcAddress("eglDestroyImageKHR");
+    if (hasExtToken(exts, "EGL_ANDROID_get_native_client_buffer"))
+        lorieEglGetNativeClientBufferANDROID =
+            (PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC) eglGetProcAddress(
+                "eglGetNativeClientBufferANDROID");
     lorieEglCreateSyncKHR =
         (PFNEGLCREATESYNCKHRPROC) eglGetProcAddress("eglCreateSyncKHR");
     lorieEglDestroySyncKHR =
@@ -61,6 +67,7 @@ void lorieEglDispatchInit(EGLDisplay dpy) {
 
     hasImage = lorieEglCreateImageKHR && lorieEglDestroyImageKHR &&
                hasExtToken(exts, "EGL_KHR_image_base");
+    hasNativeClientBuffer = lorieEglGetNativeClientBufferANDROID != NULL;
     hasFence = lorieEglCreateSyncKHR && lorieEglDestroySyncKHR &&
                lorieEglClientWaitSyncKHR &&
                hasExtToken(exts, "EGL_KHR_fence_sync");
@@ -86,6 +93,10 @@ void lorieGlesDispatchInit(void) {
 
 bool lorieEglHasImage(void) {
     return hasImage;
+}
+
+bool lorieEglHasNativeClientBuffer(void) {
+    return hasNativeClientBuffer;
 }
 
 bool lorieEglHasFence(void) {

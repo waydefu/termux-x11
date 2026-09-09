@@ -27,6 +27,7 @@ extern "C" {
 
 extern PFNEGLCREATEIMAGEKHRPROC lorieEglCreateImageKHR;
 extern PFNEGLDESTROYIMAGEKHRPROC lorieEglDestroyImageKHR;
+extern PFNEGLGETNATIVECLIENTBUFFERANDROIDPROC lorieEglGetNativeClientBufferANDROID;
 extern PFNEGLCREATESYNCKHRPROC lorieEglCreateSyncKHR;
 extern PFNEGLDESTROYSYNCKHRPROC lorieEglDestroySyncKHR;
 extern PFNEGLCLIENTWAITSYNCKHRPROC lorieEglClientWaitSyncKHR;
@@ -44,6 +45,7 @@ void lorieGlesDispatchInit(void);
 
 /* Capability queries for the testCapabilities-style gates. */
 bool lorieEglHasImage(void);   /* create+destroy Image procs + image capability */
+bool lorieEglHasNativeClientBuffer(void); /* EGL_ANDROID_get_native_client_buffer */
 bool lorieEglHasFence(void);   /* all three fence procs + EGL_KHR_fence_sync */
 bool lorieGlesHasEglImage(void); /* OES proc + GL_OES_EGL_image capability */
 

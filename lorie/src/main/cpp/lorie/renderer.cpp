@@ -29,9 +29,6 @@
 #include "lorie.h"
 #include "egl_dispatch.h"
 
-// libEGL exports this only since API 26, weak so the library still loads below that.
-__attribute__((weak)) EGLClientBuffer eglGetNativeClientBufferANDROID(const struct AHardwareBuffer* buffer);
-
 #define log(...) __android_log_print(ANDROID_LOG_DEBUG, "gles-renderer", __VA_ARGS__)
 #define loge(...) __android_log_print(ANDROID_LOG_ERROR, "gles-renderer", __VA_ARGS__)
 
@@ -477,7 +474,13 @@ void Renderer::testCapabilities(int* legacy_drawing, int* gpu_present_disabled) 
         }
     }
 
-    clientBuffer = eglGetNativeClientBufferANDROID(new_);
+    if (!lorieEglHasNativeClientBuffer()) {
+        loge("EGL_ANDROID_get_native_client_buffer unavailable, forcing legacy drawing");
+        *legacy_drawing = 1;
+        AHardwareBuffer_release(new_);
+        return;
+    }
+    clientBuffer = lorieEglGetNativeClientBufferANDROID(new_);
     if (!clientBuffer) {
         *legacy_drawing = 1;
         AHardwareBuffer_release(new_);

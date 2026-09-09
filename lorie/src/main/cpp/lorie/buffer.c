@@ -25,9 +25,6 @@
 #include "b3a_telemetry.h"
 #include "egl_dispatch.h"
 
-// libEGL exports this only since API 26, weak so the library still loads below that.
-__attribute__((weak)) EGLClientBuffer eglGetNativeClientBufferANDROID(const struct AHardwareBuffer* buffer);
-
 struct LorieBuffer {
     int16_t refcount;
     LorieBuffer_Desc desc;
@@ -593,9 +590,9 @@ __LIBC_HIDDEN__ void LorieBuffer_attachToGL(LorieBuffer* buffer) {
     bgraAhb = buffer->desc.format == AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM && buffer->desc.buffer;
 
     /* Do not EGLImage BGRA: sampling it in the composite FBO path is black. */
-    if (!bgraAhb && buffer->image == NULL && buffer->desc.buffer && eglGetNativeClientBufferANDROID)
+    if (!bgraAhb && buffer->image == NULL && buffer->desc.buffer && lorieEglHasNativeClientBuffer())
         buffer->image = lorieEglHasImage()
-            ? lorieEglCreateImageKHR(eglGetCurrentDisplay(), EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, eglGetNativeClientBufferANDROID(buffer->desc.buffer), imageAttributes)
+            ? lorieEglCreateImageKHR(eglGetCurrentDisplay(), EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, lorieEglGetNativeClientBufferANDROID(buffer->desc.buffer), imageAttributes)
             : NULL;
 
     glGenTextures(1, &buffer->id);
