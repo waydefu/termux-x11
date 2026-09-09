@@ -142,11 +142,7 @@ list(TRANSFORM OS_SOURCES PREPEND "xserver/os/")
 add_library(xserver_os STATIC ${OS_SOURCES})
 target_include_directories(xserver_os PRIVATE ${inc})
 target_link_libraries(xserver_os PRIVATE md Xdmcp Xau tirpc)
-target_compile_options(xserver_os PRIVATE ${c_only_compile_options} ${compile_options} "-DCLIENTIDS"
-        # Portability: tirpc headers need the BSD quad types bionic lacks; mirror the
-        # definitions the tirpc target itself builds with (see recipes/tirpc.cmake).
-        # Only consumer is xserver/os/rpcauth.c. No semantic effect.
-        "-Dquad_t=long long" "-Du_quad_t=unsigned long long")
+target_compile_options(xserver_os PRIVATE ${c_only_compile_options} ${compile_options} "-DCLIENTIDS")
 
 set(COMPOSITE_SOURCES compalloc.c compext.c compinit.c compoverlay.c compwindow.c)
 list(TRANSFORM COMPOSITE_SOURCES PREPEND "xserver/composite/")

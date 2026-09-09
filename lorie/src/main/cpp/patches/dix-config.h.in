@@ -170,7 +170,7 @@
 #undef XSERVER_LIBPCIACCESS
 #undef XSERVER_PLATFORM_BUS
 
-#ifdef ANDROID
+#if defined(ANDROID) || defined(__ANDROID__)
 typedef long long quad_t;
 typedef unsigned long long u_quad_t;
 
