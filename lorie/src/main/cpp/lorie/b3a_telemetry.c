@@ -481,7 +481,15 @@ void lorieB3aDump(LorieB3aTelemetry *telemetry, const char *reason) {
     if (!lorieB3aEnabled() || !telemetry)
         return;
     base = getenv("TERMUX_X11_B3A_OUTPUT");
-    if (!base || !base[0] || __sync_lock_test_and_set(&telemetry->dumped, 1))
+    if (!base || !base[0])
+        return;
+    /* A CloseScreen/ddxGiveUp can fire before any Composite ran (screen
+     * lifecycle, not benchmark end). Do not let an empty dump consume the
+     * one-shot flag: dump-once means the first call WITH data, not the
+     * first call. */
+    if (telemetry->next_record == 0)
+        return;
+    if (__sync_lock_test_and_set(&telemetry->dumped, 1))
         return;
     telemetry->schema_version = LORIE_B3A_SCHEMA_VERSION;
     lorieB3aCaptureProcessEnd(telemetry, false);
