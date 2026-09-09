@@ -1,6 +1,9 @@
 name: S3 Q1 x86_64 APK
 
 on:
+  push:
+    branches:
+      - qualification/s3-runtime-20260909
   workflow_dispatch:
 
 permissions:
