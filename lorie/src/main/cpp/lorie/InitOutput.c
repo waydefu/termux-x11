@@ -1423,6 +1423,103 @@ Bool lorieTryScheduleGpuCopy(PixmapPtr pixmap, PixmapPtr dst, RegionPtr update, 
  * RGBA. Renderer-side AHardwareBuffer_lock of the live AHB fails while X holds it. */
 static LorieBuffer *exaCompSrcUpload;
 
+/* D0a: one-slot persistent FD staging. Default off; opt in with
+ * TERMUX_X11_D0A=1 (Experimental only). When on, Prepare reuses one cached FD
+ * allocation across transactions (full clone + full upload are unchanged), so
+ * the renderer keeps one GL texture instead of recreating it per transaction.
+ * Rollback: unset the variable. */
+static LorieBuffer *d0aStagingCache = NULL;
+
+static Bool lorieD0aEnabled(void) {
+    const char *e = getenv("TERMUX_X11_D0A");
+    return e && e[0] == '1' && e[1] == '\0';
+}
+
+static Bool d0aCacheMatches(const LorieBuffer_Desc *d) {
+    const LorieBuffer_Desc *cd;
+    if (!d0aStagingCache || !d)
+        return FALSE;
+    cd = LorieBuffer_description(d0aStagingCache);
+    return cd->type == LORIEBUFFER_FD &&
+           cd->format == AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM &&
+           cd->width == d->width && cd->height == d->height &&
+           cd->stride == d->width;
+}
+
+/* D0a cached path. Returns a caller-owned reference exactly like the one-shot
+ * path: Prepare stores it in exaCompSrcUpload and Done releases it. The cache
+ * keeps its own reference, so the allocation (and the renderer's GL texture
+ * for its id) survives across transactions. Replacement only happens with no
+ * pending use: Done always waits for lastSerial and releases every per-entry
+ * reference before the next Prepare runs. */
+static LorieBuffer *lorieCloneBgraAhbToFdCached(PixmapPtr pixmap, const LorieBuffer_Desc *d,
+                                                uint8_t *src, uint32_t b3aRecord) {
+    LorieBuffer *fd;
+    const LorieBuffer_Desc *dd;
+    uint8_t *dst;
+    int32_t y, w, h, ss, ds;
+    Bool hit;
+    uint64_t clone_start = lorieB3aEnabled() ? lorieB3aNowNs() : 0;
+
+    (void) pixmap;
+    if (clone_start)
+        lorieB3aSetCurrent(pvfb->state ? &pvfb->state->b3aTelemetry : NULL, b3aRecord);
+    hit = d0aCacheMatches(d);
+    if (hit) {
+        fd = d0aStagingCache;
+        LorieBuffer_acquire(fd);
+    } else {
+        fd = LorieBuffer_allocate(d->width, d->height, AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM, LORIEBUFFER_FD);
+        if (clone_start)
+            lorieB3aClearCurrent();
+        if (!fd)
+            return NULL;
+        /* Install only after a successful allocate: a transient failure keeps
+         * the old entry usable for a future descriptor. */
+        if (d0aStagingCache) {
+            lorieUnregisterBuffer(d0aStagingCache);
+            LorieBuffer_release(d0aStagingCache);
+        }
+        d0aStagingCache = fd;
+        LorieBuffer_acquire(fd);
+    }
+    if (clone_start)
+        lorieB3aClearCurrent();
+    dd = LorieBuffer_description(fd);
+    dst = dd->data;
+    if (!dst) {
+        LorieBuffer_release(fd);
+        return NULL;
+    }
+    w = d->width;
+    h = d->height;
+    ss = d->stride;
+    ds = dd->stride;
+    if (w <= 0 || h <= 0 || ss < w || ds < w) {
+        LorieBuffer_release(fd);
+        return NULL;
+    }
+    {
+        uint64_t clone_copy_start = lorieB3aEnabled() ? lorieB3aNowNs() : 0;
+        for (y = 0; y < h; y++)
+            memcpy(dst + (size_t) y * ds * 4, src + (size_t) y * ss * 4, (size_t) w * 4);
+        if (clone_copy_start && pvfb->state)
+            lorieB3aAddNs(&pvfb->state->b3aTelemetry, b3aRecord,
+                          LORIE_B3A_VALID_CLONE_COPY,
+                          lorieB3aNowNs() - clone_copy_start);
+    }
+    if (clone_start && pvfb->state) {
+        lorieB3aAddCloneBytes(&pvfb->state->b3aTelemetry, b3aRecord,
+                              (uint64_t) w * (uint64_t) h * 4ull,
+                              (uint64_t) ds * (uint64_t) h * 4ull);
+        lorieB3aAddNs(&pvfb->state->b3aTelemetry, b3aRecord, LORIE_B3A_VALID_CLONE,
+                      lorieB3aNowNs() - clone_start);
+        lorieB3aMarkStaging(&pvfb->state->b3aTelemetry, b3aRecord, hit,
+                            LorieBuffer_description(fd)->id);
+    }
+    return fd;
+}
+
 static LorieBuffer *lorieCloneBgraAhbToFd(PixmapPtr pixmap) {
     LoriePixmapPriv *priv = LORIE_PIXMAP_PRIV_FROM_PIXMAP(pixmap);
     const LorieBuffer_Desc *d, *dd;
@@ -1438,6 +1535,8 @@ static LorieBuffer *lorieCloneBgraAhbToFd(PixmapPtr pixmap) {
     if (d->type != LORIEBUFFER_AHARDWAREBUFFER ||
         d->format != AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM)
         return NULL;
+    if (lorieD0aEnabled())
+        return lorieCloneBgraAhbToFdCached(pixmap, d, priv->locked, b3aRecord);
     if (clone_start)
         lorieB3aSetCurrent(pvfb->state ? &pvfb->state->b3aTelemetry : NULL, b3aRecord);
     fd = LorieBuffer_allocate(d->width, d->height, AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM, LORIEBUFFER_FD);

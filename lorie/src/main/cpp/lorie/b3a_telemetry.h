@@ -14,7 +14,7 @@ extern "C" {
  * process-local current context. No per-pixel logging and no fsync are done
  * on the hot path.
  */
-#define LORIE_B3A_SCHEMA_VERSION 1u
+#define LORIE_B3A_SCHEMA_VERSION 2u
 #define LORIE_B3A_MAX_RECORDS 16384u
 #define LORIE_B3A_INVALID_INDEX UINT32_MAX
 
@@ -47,6 +47,7 @@ enum LorieB3aPhase {
     LORIE_B3A_VALID_FD_MMAP = 1ull << 19,
     LORIE_B3A_VALID_CLONE_COPY = 1ull << 20,
     LORIE_B3A_VALID_CORRECTNESS = 1ull << 21,
+    LORIE_B3A_VALID_STAGING = 1ull << 22,
 };
 
 /* The layout intentionally mirrors the JSON/CSV record documented by Gate B3a. */
@@ -98,6 +99,12 @@ typedef struct {
     uint64_t exact_fail;
     uint64_t max_delta;
     uint64_t x_nz;
+
+    /* D0a persistent-staging observability. hit/miss are 0/1 per record;
+     * buffer_id is the reused FD staging allocation id (0 when D0a is off). */
+    uint64_t staging_cache_hit;
+    uint64_t staging_cache_miss;
+    uint64_t staging_buffer_id;
 
     /* Process-local timestamps used to derive queue latency and wall time. */
     uint64_t start_ns;
@@ -154,6 +161,8 @@ void lorieB3aFinish(LorieB3aTelemetry *telemetry, uint32_t index, uint64_t wall_
 void lorieB3aMarkRepair(LorieB3aTelemetry *telemetry, uint32_t index, uint64_t bytes, uint64_t ns);
 void lorieB3aMarkCorrectness(LorieB3aTelemetry *telemetry, uint32_t index,
                              uint64_t exact_fail, uint64_t max_delta, uint64_t x_nz);
+void lorieB3aMarkStaging(LorieB3aTelemetry *telemetry, uint32_t index,
+                         bool hit, uint64_t buffer_id);
 
 /* Writes <base>.json and <base>.csv once when TERMUX_X11_B3A_OUTPUT is set. */
 void lorieB3aDump(LorieB3aTelemetry *telemetry, const char *reason);

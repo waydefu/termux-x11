@@ -303,6 +303,19 @@ void lorieB3aMarkCorrectness(LorieB3aTelemetry *telemetry, uint32_t index,
     b3a_valid(record, LORIE_B3A_VALID_CORRECTNESS);
 }
 
+void lorieB3aMarkStaging(LorieB3aTelemetry *telemetry, uint32_t index,
+                         bool hit, uint64_t buffer_id) {
+    LorieB3aRecord *record = b3a_record(telemetry, index);
+    if (!record)
+        return;
+    if (hit)
+        record->staging_cache_hit = 1;
+    else
+        record->staging_cache_miss = 1;
+    record->staging_buffer_id = buffer_id;
+    b3a_valid(record, LORIE_B3A_VALID_STAGING);
+}
+
 static const char *b3a_candidate_name(uint8_t candidate) {
     switch (candidate) {
         case LORIE_B3A_CANDIDATE_CPU: return "cpu";
@@ -408,6 +421,9 @@ static void json_record(FILE *fp, const LorieB3aRecord *record) {
     fprintf(fp, ",\"exact_fail\":"); json_u64(fp, record, LORIE_B3A_VALID_CORRECTNESS, record->exact_fail);
     fprintf(fp, ",\"max_delta\":"); json_u64(fp, record, LORIE_B3A_VALID_CORRECTNESS, record->max_delta);
     fprintf(fp, ",\"x_nz\":"); json_u64(fp, record, LORIE_B3A_VALID_CORRECTNESS, record->x_nz);
+    fprintf(fp, ",\"staging_cache_hit\":"); json_u64(fp, record, LORIE_B3A_VALID_STAGING, record->staging_cache_hit);
+    fprintf(fp, ",\"staging_cache_miss\":"); json_u64(fp, record, LORIE_B3A_VALID_STAGING, record->staging_cache_miss);
+    fprintf(fp, ",\"staging_buffer_id\":"); json_u64(fp, record, LORIE_B3A_VALID_STAGING, record->staging_buffer_id);
     fputc('}', fp);
 }
 
@@ -470,7 +486,10 @@ static void csv_record(FILE *fp, const LorieB3aRecord *record) {
     csv_u64(fp, record, LORIE_B3A_VALID_FALLBACK, record->fallback); fputc(',', fp);
     csv_u64(fp, record, LORIE_B3A_VALID_CORRECTNESS, record->exact_fail); fputc(',', fp);
     csv_u64(fp, record, LORIE_B3A_VALID_CORRECTNESS, record->max_delta); fputc(',', fp);
-    csv_u64(fp, record, LORIE_B3A_VALID_CORRECTNESS, record->x_nz); fputc('\n', fp);
+    csv_u64(fp, record, LORIE_B3A_VALID_CORRECTNESS, record->x_nz); fputc(',', fp);
+    csv_u64(fp, record, LORIE_B3A_VALID_STAGING, record->staging_cache_hit); fputc(',', fp);
+    csv_u64(fp, record, LORIE_B3A_VALID_STAGING, record->staging_cache_miss); fputc(',', fp);
+    csv_u64(fp, record, LORIE_B3A_VALID_STAGING, record->staging_buffer_id); fputc('\n', fp);
 }
 
 void lorieB3aDump(LorieB3aTelemetry *telemetry, const char *reason) {
@@ -517,7 +536,7 @@ void lorieB3aDump(LorieB3aTelemetry *telemetry, const char *reason) {
         json_record(json, &telemetry->records[i]);
     }
     fputs("]}\n", json);
-    fputs("candidate,serial,rect_w,rect_h,src_w,src_h,src_stride,dst_w,dst_h,dst_stride,rect_area,src_area,src_rect_ratio,batch_rects,requested_bytes,clone_bytes,clone_logical_bytes,clone_physical_bytes,clone_amplification,prepare_ns,promotion_ns,ahb_allocate_ns,ahb_lock_ns,buffer_copy_ns,ahb_unlock_ns,fd_allocate_ns,fd_mmap_ns,clone_ns,clone_copy_ns,upload_bytes,upload_logical_bytes,upload_physical_bytes,upload_amplification,upload_ns,queue_ns,draw_submit_ns,gpu_exec_ns,fence_wait_ns,done_composite_ns,repair_bytes,repair_ns,wall_ns,fallback,exact_fail,max_delta,x_nz\n", csv);
+    fputs("candidate,serial,rect_w,rect_h,src_w,src_h,src_stride,dst_w,dst_h,dst_stride,rect_area,src_area,src_rect_ratio,batch_rects,requested_bytes,clone_bytes,clone_logical_bytes,clone_physical_bytes,clone_amplification,prepare_ns,promotion_ns,ahb_allocate_ns,ahb_lock_ns,buffer_copy_ns,ahb_unlock_ns,fd_allocate_ns,fd_mmap_ns,clone_ns,clone_copy_ns,upload_bytes,upload_logical_bytes,upload_physical_bytes,upload_amplification,upload_ns,queue_ns,draw_submit_ns,gpu_exec_ns,fence_wait_ns,done_composite_ns,repair_bytes,repair_ns,wall_ns,fallback,exact_fail,max_delta,x_nz,staging_cache_hit,staging_cache_miss,staging_buffer_id\n", csv);
     for (i = 0; i < count; i++)
         csv_record(csv, &telemetry->records[i]);
     fclose(json);
