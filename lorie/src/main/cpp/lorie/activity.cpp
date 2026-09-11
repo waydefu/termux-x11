@@ -212,6 +212,10 @@ static int xcallback(int fd, int events, __unused void* data) {
                     static LorieBuffer* buffer = NULL;
                     const LorieBuffer_Desc* desc;
                     LorieBuffer_recvHandleFromUnixSocket(conn_fd, &buffer);
+                    if (!buffer) {
+                        log(ERROR, "Failed to receive shared buffer");
+                        break;
+                    }
                     desc = LorieBuffer_description(buffer);
                     log(INFO, "Received shared buffer width %d stride %d height %d format %d type %d id %llu", desc->width, desc->stride, desc->height, desc->format, desc->type, desc->id);
                     g_renderer.addBuffer(buffer);

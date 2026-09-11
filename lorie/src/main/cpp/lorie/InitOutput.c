@@ -58,6 +58,7 @@ extern void android_shmem_sysv_shm_force(uint8_t enable);
 #define log(prio, ...) __android_log_print(ANDROID_LOG_ ## prio, "LorieNative", __VA_ARGS__)
 
 extern DeviceIntPtr lorieMouse, lorieKeyboard;
+extern bool lorieEglHasFence(void);
 
 #define CREATE_PIXMAP_USAGE_LORIEBUFFER_BACKED 5
 
@@ -194,6 +195,8 @@ static void lorieP2b2Stamp(const char *stage, PixmapPtr pixmap, LoriePixmapPriv 
 }
 #endif
 
+static inline uint32_t lorieB3aCurrentRecord(void);
+
 static LorieBuffer *lorieEnsureGpuSampleable(PixmapPtr pixmap, int8_t type) {
     LoriePixmapPriv *priv = LORIE_PIXMAP_PRIV_FROM_PIXMAP(pixmap);
     const LorieBuffer_Desc *desc;
@@ -205,10 +208,20 @@ static LorieBuffer *lorieEnsureGpuSampleable(PixmapPtr pixmap, int8_t type) {
         int8_t format = pixmap->drawable.depth >= 32
             ? AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM
             : AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM;
+        uint64_t promotion_start = lorieB3aEnabled() ? lorieB3aNowNs() : 0;
+        uint32_t b3aRecord = lorieB3aCurrentRecord();
 #ifdef __ANDROID__
         lorieP2b2Stamp("S0_REGULAR", pixmap, priv, desc, desc->data, type, 0, 0, 1, 1);
 #endif
+        if (promotion_start)
+            lorieB3aSetCurrent(pvfb->state ? &pvfb->state->b3aTelemetry : NULL, b3aRecord);
         LorieBuffer_convert(priv->buffer, type, format);
+        if (promotion_start)
+            lorieB3aClearCurrent();
+        if (promotion_start)
+            lorieB3aAddNs(pvfb->state ? &pvfb->state->b3aTelemetry : NULL,
+                          lorieB3aCurrentRecord(), LORIE_B3A_VALID_PROMOTION,
+                          lorieB3aNowNs() - promotion_start);
         if (desc->type != LORIEBUFFER_REGULAR) {
             // LorieBuffer_convert does not report status but it does not let the type change in the case of error.
             pScreenPtr->ModifyPixmapHeader(pixmap, 0, 0, 0, 0, desc->stride * 4, NULL);
@@ -420,10 +433,15 @@ void OsVendorInit(void) {
         _exit(1);
     }
 
-    if (!(lorieScreen.state = mmap(NULL, sizeof(*lorieScreen.state), PROT_READ|PROT_WRITE, MAP_SHARED, lorieScreen.stateFd, 0))) {
+    if ((lorieScreen.state = mmap(NULL, sizeof(*lorieScreen.state), PROT_READ|PROT_WRITE, MAP_SHARED, lorieScreen.stateFd, 0)) == MAP_FAILED) {
+        lorieScreen.state = NULL;
         dprintf(2, "FATAL: Failed to map server state.\n");
         _exit(1);
     }
+
+    memset(lorieScreen.state, 0, sizeof(*lorieScreen.state));
+    lorieScreen.state->b3aTelemetry.schema_version = LORIE_B3A_SCHEMA_VERSION;
+    lorieB3aCaptureProcessStart(&lorieScreen.state->b3aTelemetry, false);
 
     pthread_mutexattr_init(&mutex_attr);
     pthread_mutexattr_setpshared(&mutex_attr, PTHREAD_PROCESS_SHARED);
@@ -475,6 +493,8 @@ static Bool FalseNoop() { return FALSE; }
 static void VoidNoop() {}
 
 void ddxGiveUp(unused enum ExitCode error) {
+    if (pvfb->state)
+        lorieB3aDump(&pvfb->state->b3aTelemetry, "ddxGiveUp");
     lorieDumpFlightRecorder("ddxGiveUp");
     log(ERROR, "Server stopped (%d)", error);
     CloseWellKnownConnections();
@@ -817,6 +837,15 @@ static uint64_t exaSolidPrepare = 0, exaSolidGpu = 0, exaSolidFallback = 0, exaS
 static uint64_t exaCompCheckTrue = 0, exaCompCheckFalse = 0, exaCompPrepareTrue = 0, exaCompPrepareFalse = 0;
 static uint64_t exaCompGpuRects = 0, exaCompCpuRects = 0, exaCompDone = 0;
 
+/* P2-B.3a transaction context. X is single-threaded for Composite, but keep a
+ * small stack because the XRender probe can observe nested operations. */
+static uint32_t b3aRecordStack[16];
+static unsigned b3aRecordDepth;
+
+static inline uint32_t lorieB3aCurrentRecord(void) {
+    return b3aRecordDepth ? b3aRecordStack[b3aRecordDepth - 1] : LORIE_B3A_INVALID_INDEX;
+}
+
 #define XRENDER_HIST_SLOTS 64
 typedef struct {
     uint8_t op, flags, filter, wbucket;
@@ -885,6 +914,28 @@ static void lorieCompositeProbe(CARD8 op, PicturePtr pSrc, PicturePtr pMask, Pic
                                 INT16 xSrc, INT16 ySrc, INT16 xMask, INT16 yMask,
                                 INT16 xDst, INT16 yDst, CARD16 width, CARD16 height) {
     CompositeProcPtr saved = pvfb->xrenderSavedComposite;
+    uint32_t b3aRecord = LORIE_B3A_INVALID_INDEX;
+    uint64_t b3aStart = 0;
+    Bool b3aPushed = FALSE;
+
+    if (lorieB3aEnabled() && pvfb->state) {
+        b3aRecord = lorieB3aBegin(&pvfb->state->b3aTelemetry,
+                                  lorieB3aCandidateFromEnv(), (uint8_t) op,
+                                  pSrc ? pSrc->format : 0,
+                                  pMask ? pMask->format : 0,
+                                  pDst ? pDst->format : 0,
+                                  width, height);
+        b3aStart = lorieB3aNowNs();
+        if (pSrc && pDst && pSrc->pDrawable && pDst->pDrawable)
+            lorieB3aSetGeometry(&pvfb->state->b3aTelemetry, b3aRecord,
+                                pSrc->pDrawable->width, pSrc->pDrawable->height, 0,
+                                pDst->pDrawable->width, pDst->pDrawable->height, 0,
+                                width, height);
+        if (b3aRecordDepth < sizeof(b3aRecordStack) / sizeof(b3aRecordStack[0])) {
+            b3aRecordStack[b3aRecordDepth++] = b3aRecord;
+            b3aPushed = TRUE;
+        }
+    }
 #ifdef __ANDROID__
     {
         char msg[256];
@@ -904,6 +955,13 @@ static void lorieCompositeProbe(CARD8 op, PicturePtr pSrc, PicturePtr pMask, Pic
     xrenderHistRecord(op, pSrc, pMask, pDst, width, height);
     if (saved)
         saved(op, pSrc, pMask, pDst, xSrc, ySrc, xMask, yMask, xDst, yDst, width, height);
+    if (b3aRecord != LORIE_B3A_INVALID_INDEX && pvfb->state) {
+        uint64_t end = lorieB3aNowNs();
+        if (b3aStart && end >= b3aStart)
+            lorieB3aFinish(&pvfb->state->b3aTelemetry, b3aRecord, end - b3aStart);
+        if (b3aPushed)
+            b3aRecordDepth--;
+    }
 #ifdef __ANDROID__
     {
         char msg[256];
@@ -1021,6 +1079,9 @@ static Bool lorieCreateScreenResources(ScreenPtr pScreen) {
 
 static Bool lorieCloseScreen(ScreenPtr pScreen) {
     PictureScreenPtr ps = GetPictureScreenIfSet(pScreen);
+
+    if (pvfb->state)
+        lorieB3aDump(&pvfb->state->b3aTelemetry, "CloseScreen");
 
     if (pvfb->xrenderProbeInstalled && ps &&
         ps->Composite == lorieCompositeProbe && pvfb->xrenderSavedComposite)
@@ -1368,6 +1429,8 @@ static LorieBuffer *lorieCloneBgraAhbToFd(PixmapPtr pixmap) {
     LorieBuffer *fd;
     uint8_t *src, *dst;
     int32_t y, w, h, ss, ds;
+    uint64_t clone_start = lorieB3aEnabled() ? lorieB3aNowNs() : 0;
+    uint32_t b3aRecord = lorieB3aCurrentRecord();
 
     if (!priv || !priv->buffer || !priv->locked)
         return NULL;
@@ -1375,7 +1438,11 @@ static LorieBuffer *lorieCloneBgraAhbToFd(PixmapPtr pixmap) {
     if (d->type != LORIEBUFFER_AHARDWAREBUFFER ||
         d->format != AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM)
         return NULL;
+    if (clone_start)
+        lorieB3aSetCurrent(pvfb->state ? &pvfb->state->b3aTelemetry : NULL, b3aRecord);
     fd = LorieBuffer_allocate(d->width, d->height, AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM, LORIEBUFFER_FD);
+    if (clone_start)
+        lorieB3aClearCurrent();
     if (!fd)
         return NULL;
     dd = LorieBuffer_description(fd);
@@ -1393,8 +1460,22 @@ static LorieBuffer *lorieCloneBgraAhbToFd(PixmapPtr pixmap) {
         LorieBuffer_release(fd);
         return NULL;
     }
-    for (y = 0; y < h; y++)
-        memcpy(dst + (size_t) y * ds * 4, src + (size_t) y * ss * 4, (size_t) w * 4);
+    {
+        uint64_t clone_copy_start = lorieB3aEnabled() ? lorieB3aNowNs() : 0;
+        for (y = 0; y < h; y++)
+            memcpy(dst + (size_t) y * ds * 4, src + (size_t) y * ss * 4, (size_t) w * 4);
+        if (clone_copy_start && pvfb->state)
+            lorieB3aAddNs(&pvfb->state->b3aTelemetry, b3aRecord,
+                          LORIE_B3A_VALID_CLONE_COPY,
+                          lorieB3aNowNs() - clone_copy_start);
+    }
+    if (clone_start && pvfb->state) {
+        lorieB3aAddCloneBytes(&pvfb->state->b3aTelemetry, b3aRecord,
+                              (uint64_t) w * (uint64_t) h * 4ull,
+                              (uint64_t) ds * (uint64_t) h * 4ull);
+        lorieB3aAddNs(&pvfb->state->b3aTelemetry, b3aRecord, LORIE_B3A_VALID_CLONE,
+                      lorieB3aNowNs() - clone_start);
+    }
     return fd;
 }
 
@@ -1408,6 +1489,9 @@ static Bool lorieTryScheduleGpuBlit(PixmapPtr pixmap, PixmapPtr dst, RegionPtr u
     BoxPtr box;
     int numRects, i;
     uint32_t writeIndex, readIndex;
+
+    if (gpuOp == LORIE_GPU_OP_COMPOSITE && !lorieEglHasFence())
+        return FALSE;
 
     if (pvfb->root.legacyDrawing || (gpuOp == LORIE_GPU_OP_COPY && pvfb->gpuPresentDisabled)) {
         if (gpuOp == LORIE_GPU_OP_COPY)
@@ -1491,6 +1575,7 @@ static Bool lorieTryScheduleGpuBlit(PixmapPtr pixmap, PixmapPtr dst, RegionPtr u
     entry->serial = ++pvfb->gpuCopySerialCounter;
     entry->srcBufferId = desc->id;
     entry->dstBufferId = dstDesc->id;
+    entry->telemetryIndex = lorieB3aCurrentRecord();
     entry->xOff = x_off;
     entry->yOff = y_off;
     entry->numRects = (uint16_t) numRects;
@@ -1501,6 +1586,11 @@ static Bool lorieTryScheduleGpuBlit(PixmapPtr pixmap, PixmapPtr dst, RegionPtr u
         entry->rects[i] = (LorieGpuCopyRect) { box[i].x1, box[i].y1, box[i].x2, box[i].y2 };
 
     __sync_synchronize(); // publish entry contents before the renderer can see the new writeIndex
+    if (pvfb->state && entry->telemetryIndex != LORIE_B3A_INVALID_INDEX) {
+        lorieB3aSetSerial(&pvfb->state->b3aTelemetry, entry->telemetryIndex, entry->serial);
+        lorieB3aSetBatch(&pvfb->state->b3aTelemetry, entry->telemetryIndex, (uint32_t) numRects);
+        lorieB3aMarkQueuePublished(&pvfb->state->b3aTelemetry, entry->telemetryIndex, lorieB3aNowNs());
+    }
     pvfb->state->gpuCopyQueue.writeIndex = writeIndex + 1;
     pthread_cond_signal(rendererCond);
 
@@ -1586,6 +1676,8 @@ static Bool lorieTryScheduleGpuSolid(PixmapPtr dst, int x1, int y1, int x2, int 
 
     if (x2 <= x1 || y2 <= y1)
         return FALSE;
+    if (!lorieEglHasFence())
+        return FALSE;
     if (pvfb->root.legacyDrawing || !lorieConnectionAlive() || !lorieRendererAvailable())
         return FALSE;
     if (!(dstBuffer = lorieEnsureGpuSampleable(dst, LORIEBUFFER_AHARDWAREBUFFER)))
@@ -1611,6 +1703,7 @@ static Bool lorieTryScheduleGpuSolid(PixmapPtr dst, int x1, int y1, int x2, int 
     entry->serial = ++pvfb->gpuCopySerialCounter;
     entry->srcBufferId = 0;
     entry->dstBufferId = dstDesc->id;
+    entry->telemetryIndex = lorieB3aCurrentRecord();
     entry->xOff = 0;
     entry->yOff = 0;
     entry->numRects = 1;
@@ -1935,21 +2028,32 @@ static Bool lorieExaCheckComposite(int op, PicturePtr pSrc, PicturePtr pMask, Pi
     if (lorieGpuExaDisabled() || pvfb->root.legacyDrawing ||
         !lorieConnectionAlive() || !lorieRendererAvailable()) {
         exaCompCheckFalse++;
+        lorieB3aSetFallback(pvfb->state ? &pvfb->state->b3aTelemetry : NULL,
+                            lorieB3aCurrentRecord(), true);
         return FALSE;
     }
     ok = lorieCanAccelCompositePictures(op, pSrc, pMask, pDst);
     if (ok)
         exaCompCheckTrue++;
-    else
+    else {
         exaCompCheckFalse++;
+        lorieB3aSetFallback(pvfb->state ? &pvfb->state->b3aTelemetry : NULL,
+                            lorieB3aCurrentRecord(), true);
+    }
     return ok;
 }
 
 static Bool lorieExaPrepareComposite(int op, PicturePtr pSrc, PicturePtr pMask, PicturePtr pDst,
                                     PixmapPtr pSrcPix, PixmapPtr pMaskPix, PixmapPtr pDstPix) {
+    uint64_t prepare_start = lorieB3aEnabled() ? lorieB3aNowNs() : 0;
+    uint32_t b3aRecord = lorieB3aCurrentRecord();
     memset(&exaGpuComp, 0, sizeof(exaGpuComp));
     if (!lorieCanAccelComposite(op, pSrc, pMask, pDst, pSrcPix, pMaskPix, pDstPix)) {
         exaCompPrepareFalse++;
+        lorieB3aSetFallback(pvfb->state ? &pvfb->state->b3aTelemetry : NULL, b3aRecord, true);
+        if (prepare_start && pvfb->state)
+            lorieB3aAddNs(&pvfb->state->b3aTelemetry, b3aRecord, LORIE_B3A_VALID_PREPARE,
+                          lorieB3aNowNs() - prepare_start);
 #ifdef __ANDROID__
         p2a2_emit("Gcomp Prepare FALSE");
 #endif
@@ -1966,6 +2070,10 @@ static Bool lorieExaPrepareComposite(int op, PicturePtr pSrc, PicturePtr pMask, 
     exaCompSrcUpload = lorieCloneBgraAhbToFd(pSrcPix);
     if (!exaCompSrcUpload) {
         exaCompPrepareFalse++;
+        lorieB3aSetFallback(pvfb->state ? &pvfb->state->b3aTelemetry : NULL, b3aRecord, true);
+        if (prepare_start && pvfb->state)
+            lorieB3aAddNs(&pvfb->state->b3aTelemetry, b3aRecord, LORIE_B3A_VALID_PREPARE,
+                          lorieB3aNowNs() - prepare_start);
 #ifdef __ANDROID__
         p2a2_emit("Gcomp Prepare FALSE");
 #endif
@@ -1982,6 +2090,18 @@ static Bool lorieExaPrepareComposite(int op, PicturePtr pSrc, PicturePtr pMask, 
     }
 #endif
     exaCompPrepareTrue++;
+    lorieB3aSetFallback(pvfb->state ? &pvfb->state->b3aTelemetry : NULL, b3aRecord, false);
+    if (pSrcPix && pDstPix && pvfb->state) {
+        const LorieBuffer_Desc *sd = LorieBuffer_description(LORIE_BUFFER_FROM_PIXMAP(pSrcPix));
+        const LorieBuffer_Desc *dd = LorieBuffer_description(LORIE_BUFFER_FROM_PIXMAP(pDstPix));
+        lorieB3aSetGeometry(&pvfb->state->b3aTelemetry, b3aRecord,
+                            pSrcPix->drawable.width, pSrcPix->drawable.height, sd->stride,
+                            pDstPix->drawable.width, pDstPix->drawable.height, dd->stride,
+                            0, 0);
+    }
+    if (prepare_start && pvfb->state)
+        lorieB3aAddNs(&pvfb->state->b3aTelemetry, b3aRecord, LORIE_B3A_VALID_PREPARE,
+                      lorieB3aNowNs() - prepare_start);
 #ifdef __ANDROID__
     p2a2_emit("Gcomp Prepare TRUE");
 #endif
@@ -2016,6 +2136,9 @@ static void lorieExaCpuOverRect(PixmapPtr src, PixmapPtr dst, int srcX, int srcY
 static void lorieExaRepairDestXByteZero(PixmapPtr dst, BoxPtr boxes, int nbox) {
     int b, y, x, x1, y1, x2, y2, dstride;
     uint8_t *d;
+    uint64_t repair_start = lorieB3aEnabled() ? lorieB3aNowNs() : 0;
+    uint64_t repair_pixels = 0;
+    uint32_t b3aRecord = lorieB3aCurrentRecord();
 
     if (!dst || nbox <= 0 || dst->drawable.bitsPerPixel != 32)
         return;
@@ -2030,6 +2153,8 @@ static void lorieExaRepairDestXByteZero(PixmapPtr dst, BoxPtr boxes, int nbox) {
             if (y1 < 0) y1 = 0;
             if (x2 > dst->drawable.width) x2 = dst->drawable.width;
             if (y2 > dst->drawable.height) y2 = dst->drawable.height;
+            if (x2 > x1 && y2 > y1)
+                repair_pixels += (uint64_t) (x2 - x1) * (uint64_t) (y2 - y1);
             for (y = y1; y < y2; y++) {
                 uint8_t *row = d + y * dstride + x1 * 4;
                 for (x = 0; x < x2 - x1; x++)
@@ -2038,6 +2163,9 @@ static void lorieExaRepairDestXByteZero(PixmapPtr dst, BoxPtr boxes, int nbox) {
         }
     }
     lorieFinishAccess(dst, EXA_PREPARE_DEST);
+    if (repair_start && pvfb->state)
+        lorieB3aMarkRepair(&pvfb->state->b3aTelemetry, b3aRecord, repair_pixels,
+                           lorieB3aNowNs() - repair_start);
 }
 
 static void lorieExaComposite(PixmapPtr dst, int srcX, int srcY, unused int maskX, unused int maskY,
@@ -2050,6 +2178,14 @@ static void lorieExaComposite(PixmapPtr dst, int srcX, int srcY, unused int mask
 
     if (width <= 0 || height <= 0 || !exaGpuComp.src)
         return;
+    if (pvfb->state) {
+        const LorieBuffer_Desc *sd = LorieBuffer_description(LORIE_BUFFER_FROM_PIXMAP(exaGpuComp.src));
+        const LorieBuffer_Desc *dd = LorieBuffer_description(LORIE_BUFFER_FROM_PIXMAP(dst));
+        lorieB3aSetGeometry(&pvfb->state->b3aTelemetry, lorieB3aCurrentRecord(),
+                            exaGpuComp.src->drawable.width, exaGpuComp.src->drawable.height, sd->stride,
+                            dst->drawable.width, dst->drawable.height, dd->stride,
+                            width, height);
+    }
     box = (BoxRec) { (short) srcX, (short) srcY, (short) (srcX + width), (short) (srcY + height) };
     RegionInit(&region, &box, 1);
 #ifdef __ANDROID__
@@ -2101,6 +2237,8 @@ static void lorieExaComposite(PixmapPtr dst, int srcX, int srcY, unused int mask
 #endif
         return;
     }
+    lorieB3aSetFallback(pvfb->state ? &pvfb->state->b3aTelemetry : NULL,
+                        lorieB3aCurrentRecord(), true);
     if (exaGpuComp.scheduled)
         lorieGpuCopyWait(exaGpuComp.lastSerial, 2000);
     lorieExaCpuOverRect(exaGpuComp.src, dst, srcX, srcY, dstX, dstY, width, height);
@@ -2110,6 +2248,8 @@ static void lorieExaComposite(PixmapPtr dst, int srcX, int srcY, unused int mask
 static void lorieExaDoneComposite(PixmapPtr dst) {
     int i;
     LorieBuffer *upload = exaCompSrcUpload;
+    uint64_t done_start = lorieB3aEnabled() ? lorieB3aNowNs() : 0;
+    uint32_t b3aRecord = lorieB3aCurrentRecord();
 
     if (exaGpuComp.scheduled) {
         if (!lorieGpuCopyWait(exaGpuComp.lastSerial, 2000))
@@ -2139,6 +2279,9 @@ static void lorieExaDoneComposite(PixmapPtr dst) {
         LorieBuffer_release(upload);
         exaCompSrcUpload = NULL;
     }
+    if (done_start && pvfb->state)
+        lorieB3aAddNs(&pvfb->state->b3aTelemetry, b3aRecord, LORIE_B3A_VALID_DONE,
+                      lorieB3aNowNs() - done_start);
     exaCompDone++;
 #ifdef __ANDROID__
     p2a2_emit("Gcomp Done");
@@ -2254,13 +2397,16 @@ static inline __always_inline Bool lorieNeedsGpuLock(PixmapPtr pPix, LoriePixmap
 
 Bool loriePrepareAccess(PixmapPtr pPix, int index) {
     LoriePixmapPriv *priv = exaGetPixmapDriverPrivate(pPix);
-    if (lorieNeedsGpuLock(pPix, priv, index))
+    Bool needsGpuLock = lorieNeedsGpuLock(pPix, priv, index);
+    if (needsGpuLock)
         lorie_mutex_lock(&pvfb->state->lock, &pvfb->state->lockingPid);
 
     if (!priv->locked && !priv->mem) {
         int err = LorieBuffer_lock(priv->buffer, &priv->locked);
         if (err) {
             dprintf(2, "Failed to lock buffer, err %d\n", err);
+            if (needsGpuLock)
+                lorie_mutex_unlock(&pvfb->state->lock, &pvfb->state->lockingPid);
             return FALSE;
         }
         priv->wasLocked = FALSE;
