@@ -171,8 +171,12 @@
 #undef XSERVER_PLATFORM_BUS
 
 #ifdef ANDROID
+#ifndef quad_t
 typedef long long quad_t;
+#endif
+#ifndef u_quad_t
 typedef unsigned long long u_quad_t;
+#endif
 
 #include <unistd.h>
 
