@@ -1173,6 +1173,7 @@ static void gateaA1LogAggregate(const unsigned int counts[3][GATEA_A1_CLASSIFICA
 }
 
 extern "C" void gateaA1MicroprobeRun(EGLDisplay egl_display) {
+    GATEA_A1_LOG("GATEA_A1_ENTRY");
     GateaA1GlState savedState;
     unsigned int counts[3][GATEA_A1_CLASSIFICATION_COUNT] = {};
     bool glReady;

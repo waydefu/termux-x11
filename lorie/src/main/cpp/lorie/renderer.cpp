@@ -533,8 +533,10 @@ void Renderer::testCapabilities(int* legacy_drawing, int* gpu_present_disabled) 
         lorieGlesDispatchInit();
 
         if (const char *gateaA1 = getenv("TERMUX_X11_GATEA_A1");
-            gateaA1 && strcmp(gateaA1, "1") == 0)
+            gateaA1 && strcmp(gateaA1, "1") == 0) {
+            __android_log_print(ANDROID_LOG_INFO, "gatea-a1", "GATEA_A1_PRECALL");
             gateaA1MicroprobeRun(egl_display);
+        }
 
         glActiveTexture(GL_TEXTURE0); checkGlError();
         glGenTextures(1, &texture); checkGlError();
