@@ -389,6 +389,31 @@ static inline __always_inline uint32_t lorieGateAObserveFatal(const struct Lorie
     return __atomic_load_n(&p->generationFatal, __ATOMIC_ACQUIRE);
 }
 
+/* First-failure observers (P2 wiring). Acquire loads: the code word is only
+ * meaningful after acquiring a nonzero serial, which this pairs with. */
+static inline __always_inline uint64_t lorieGateAObserveFirstFailed(const struct LorieGateAProtocol *p) {
+    return __atomic_load_n(&p->firstFailedSerial, __ATOMIC_ACQUIRE);
+}
+
+static inline __always_inline uint32_t lorieGateAObserveFirstFailureCode(const struct LorieGateAProtocol *p) {
+    return __atomic_load_n(&p->firstFailureCode, __ATOMIC_ACQUIRE);
+}
+
+/* Gate A P2 finite fence budget (nanoseconds). Matches the 2000 ms Done-wait
+ * precedent. EGL_FOREVER is forbidden on every Gate A completion path: only
+ * EGL_CONDITION_SATISFIED_KHR within this budget may lead to normal
+ * completion; anything else is FATAL unless quiescence is proven separately. */
+#define LORIE_GATEA_FENCE_TIMEOUT_NS 2000000000ull
+
+/* Gate A P2 drain outcome. Returned by value from
+ * Renderer::applyPendingGpuCopiesLocked (renderer thread only). */
+struct LorieGateABatchOut {
+    uint64_t lastSerial;    /* highest consumed serial, 0 if none */
+    uint32_t gateASeen;     /* nonzero iff a Gate A entry was consumed */
+    uint32_t stopOnFailure; /* nonzero iff consumption halted on sticky failure */
+    uint32_t batchGlError;  /* first GL error observed after a Gate A draw (0 none) */
+};
+
 /* ---- Waiter foundation (dedicated condvars; fatal always wakes) ----
  *
  * Instances live process-locally (P1+). Signaled ONLY by the input/protocol
@@ -662,9 +687,12 @@ struct lorie_shared_server_state {
      * X server only ever advances writeIndex, renderer only ever advances readIndex and completedSerial.
      */
     struct {
-        volatile uint32_t writeIndex;
-        volatile uint32_t readIndex;
-        volatile uint64_t completedSerial;
+        /* P2: accessed ONLY via lorieGateA* release/acquire accessors (never
+         * plain or volatile-only). Non-volatile so the accessors instantiate
+         * without qualifier warnings; layout/offsets are unchanged. */
+        uint32_t writeIndex;
+        uint32_t readIndex;
+        uint64_t completedSerial;
         LorieGpuCopyEntry entries[LORIE_GPU_COPY_QUEUE_CAPACITY];
     } gpuCopyQueue;
 
@@ -804,7 +832,12 @@ struct Renderer {
     void releaseWinAndSurface(ANativeWindow** anw, EGLSurface* esfc);
     void refreshContext();
     LorieBuffer* findBufferWithRetry(uint64_t id);
-    uint64_t applyPendingGpuCopiesLocked();
+    struct LorieGateABatchOut applyPendingGpuCopiesLocked();
+    /* P2 Gate A direct consume: persistent READY textures only. Returns 0 on
+     * submit; nonzero on pre-draw setup failure (caller fail-stops). */
+    int consumeGateAComposite(const LorieGpuCopyEntry *entry, bool *fboSetUp,
+                              uint64_t *boundDstId, GLint prevViewport[4],
+                              GLenum *glErrorOut);
     void applyPendingGpuCopies();
     void redrawLocked(bool* waitingForBuffers);
     bool shouldWait(bool* waitingForBuffers);

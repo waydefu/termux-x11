@@ -140,8 +140,14 @@ static void gateAHandleRegister(int fd, uint64_t nonce, uint64_t generation) {
                                 LORIE_GATEA_FAIL_IMPORT);
         return;
     }
+    /* P2: the direct pair needs exactly BGRA (source) or RGBX (destination).
+     * Nothing else is importable; framing/fingerprint checks below are
+     * unchanged. Import while X still CPU-holds the lock is safe: EGLImage
+     * creation maps no CPU address, and the renderer never CPU-locks or
+     * samples before X unlocks at first publish. */
     if (body.width == 0 || body.height == 0 || (int32_t)body.stride < (int32_t)body.width
-        || body.format != AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM) {
+        || (body.format != AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM
+            && body.format != AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM)) {
         lorieGateAReleaseAhb(ahb);
         lorieGateAEnqueueImport(fr.bufferId, nonce, generation, 0, NULL,
                                 LORIE_GATEA_FAIL_PROTOCOL);

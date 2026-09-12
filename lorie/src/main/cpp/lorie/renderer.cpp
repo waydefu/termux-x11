@@ -299,9 +299,11 @@ static void gateAValidateImport(struct lorie_shared_server_state *st, uint64_t i
         return;
     }
     LorieBuffer_describeAHardwareBuffer(ahb, &desc);
-    /* P1 admits server-owned BGRA only; anything else is sender corruption. */
+    /* P2: server-owned BGRA source or RGBX destination only; anything else is
+     * sender corruption. (Same exact pair as the looper-thread gate above.) */
     if (desc.width <= 0 || desc.height <= 0 || desc.stride < desc.width
-        || desc.format != AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM
+        || (desc.format != AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM
+            && desc.format != AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM)
         || lorieGateAFingerprint((uint32_t)desc.width, (uint32_t)desc.height,
                                  (uint32_t)desc.stride, (uint32_t)desc.format) != fingerprint) {
         lorieGateAReleaseAhb(ahb);
@@ -446,6 +448,168 @@ static void gateADrainPendingImports(struct lorie_shared_server_state *st) {
         gateAValidateImport(st, work[i].id, work[i].nonce, work[i].generation,
                             work[i].fingerprint, work[i].ahb);
     }
+}
+
+/* ---- Gate A P2 direct-submit consume (GL thread only) ----
+ * A queue entry is Gate A iff op==COMPOSITE and its source id names a live
+ * READY import for the bound tuple. Anything else stays legacy.
+ * Post-publication lookup/bind failure is FATAL (never skip/continue): X has
+ * already transferred ownership and waits terminal. Legacy buffer lists,
+ * attach/bind, CPU lock/clone/upload are unreachable from this path. */
+
+static int gateAFenceCapable(void) {
+    return lorieEglHasFence() && lorieEglCreateSyncKHR != NULL
+        && lorieEglClientWaitSyncKHR != NULL && lorieEglDestroySyncKHR != NULL;
+}
+
+/* Nonzero iff id names a live READY import for the bound tuple. */
+static int gateAIsReady(uint64_t id) {
+    uint64_t bn = 0, bg = 0;
+    int i, found = 0;
+    if (id == 0 || !lorieGateABoundTuple(&bn, &bg))
+        return 0;
+    pthread_mutex_lock(&gateAImportMutex);
+    for (i = 0; i < LORIE_GATEA_MAX_READY; i++) {
+        if (gateAReady[i].occupied && gateAReady[i].id == id
+            && gateAReady[i].nonce == bn && gateAReady[i].generation == bg) {
+            found = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&gateAImportMutex);
+    return found;
+}
+
+/* Resolve both endpoint textures + dimensions under one mutex hold.
+ * Returns 0 on success; nonzero on any miss/mismatch (caller fail-stops). */
+static int gateALookupDirect(uint64_t srcId, uint64_t dstId, GLuint *srcTex,
+                             GLuint *dstTex, uint32_t *srcW, uint32_t *srcH,
+                             uint32_t *dstW, uint32_t *dstH) {
+    uint64_t bn = 0, bg = 0;
+    int i, haveSrc = 0, haveDst = 0;
+    if (srcId == 0 || dstId == 0 || srcId == dstId || !srcTex || !dstTex
+        || !srcW || !srcH || !dstW || !dstH)
+        return 1;
+    if (!lorieGateABoundTuple(&bn, &bg))
+        return 2;
+    pthread_mutex_lock(&gateAImportMutex);
+    for (i = 0; i < LORIE_GATEA_MAX_READY && (!haveSrc || !haveDst); i++) {
+        struct GateAReadyImport *e = &gateAReady[i];
+        AHardwareBuffer_Desc desc;
+        if (!e->occupied || e->nonce != bn || e->generation != bg
+            || e->ahb == NULL || e->texture == 0)
+            continue;
+        if (!haveSrc && e->id == srcId) {
+            LorieBuffer_describeAHardwareBuffer(e->ahb, &desc);
+            if (desc.width <= 0 || desc.height <= 0)
+                break;
+            *srcTex = e->texture;
+            *srcW = (uint32_t)desc.width;
+            *srcH = (uint32_t)desc.height;
+            haveSrc = 1;
+        } else if (!haveDst && e->id == dstId) {
+            LorieBuffer_describeAHardwareBuffer(e->ahb, &desc);
+            if (desc.width <= 0 || desc.height <= 0)
+                break;
+            *dstTex = e->texture;
+            *dstW = (uint32_t)desc.width;
+            *dstH = (uint32_t)desc.height;
+            haveDst = 1;
+        }
+    }
+    pthread_mutex_unlock(&gateAImportMutex);
+    return (haveSrc && haveDst) ? 0 : 3;
+}
+
+/* Draw one Gate A COMPOSITE entry through persistent READY textures.
+ * Returns 0 on submit. Nonzero = pre-draw setup failure (nothing submitted;
+ * caller fail-stops). Post-submit GL errors accumulate into *glErrorOut
+ * (first wins) for post-fence FAILED_QUIESCED classification. */
+int Renderer::consumeGateAComposite(const LorieGpuCopyEntry *entry, bool *fboSetUp,
+                                    uint64_t *boundDstId, GLint prevViewport[4],
+                                    GLenum *glErrorOut) {
+    GLuint srcTex = 0, dstTex = 0;
+    uint32_t srcW = 0, srcH = 0, dstW = 0, dstH = 0;
+    int i;
+    if (!entry || !fboSetUp || !boundDstId || !prevViewport)
+        return 1;
+    if (gateALookupDirect(entry->srcBufferId, entry->dstBufferId,
+                           &srcTex, &dstTex, &srcW, &srcH, &dstW, &dstH) != 0)
+        return 2;
+    if (!*fboSetUp) {
+        glGetIntegerv(GL_VIEWPORT, prevViewport);
+        if (!gpuCopyFbo)
+            glGenFramebuffers(1, &gpuCopyFbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, gpuCopyFbo);
+        *fboSetUp = true;
+    }
+    if (*boundDstId != entry->dstBufferId) {
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_2D, dstTex, 0);
+        glViewport(0, 0, (GLsizei)dstW, (GLsizei)dstH);
+        *boundDstId = entry->dstBufferId;
+    }
+    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        return 3;
+    /* XRender ARGB is premultiplied: Cout = Cs + Cd*(1-As) (same as legacy). */
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    for (i = 0; i < entry->numRects; i++) {
+        LorieGpuCopyRect rec = entry->rects[i];
+        float x0 = 2.f * (float)(rec.x1 + entry->xOff) / (float)dstW - 1.f;
+        float x1 = 2.f * (float)(rec.x2 + entry->xOff) / (float)dstW - 1.f;
+        float y0 = 1.f - 2.f * (float)(rec.y1 + entry->yOff) / (float)dstH;
+        float y1 = 1.f - 2.f * (float)(rec.y2 + entry->yOff) / (float)dstH;
+        /* AHB textures sample by logical width regardless of row stride;
+         * only the legacy CPU-uploaded FD texture is stride-wide. */
+        float u0 = (float)rec.x1 / (float)srcW;
+        float u1 = (float)rec.x2 / (float)srcW;
+        float v0 = (float)rec.y1 / (float)srcH;
+        float v1 = (float)rec.y2 / (float)srcH;
+        /* Direct BGRA EGLImage texture: .bgra program reorders B/G/R, keeps A.
+         * Predicate guarantees nearest filtering. */
+        drawRegion(srcTex, x0, y0, x1, y1, u0, v0, u1, v1, 1, 1);
+    }
+    glDisable(GL_BLEND);
+    if (glErrorOut != NULL && *glErrorOut == GL_NO_ERROR) {
+        GLenum e = glGetError();
+        if (e != GL_NO_ERROR)
+            *glErrorOut = e;
+    }
+    return 0;
+}
+
+/* Fence one drained batch containing Gate A work and publish its terminal
+ * watermark. FINITE wait only — EGL_FOREVER is forbidden here. Halts on any
+ * unproven completion. Returns silently (no publication) only when a sticky
+ * fatal is observed after a satisfied fence: X applies the same
+ * observation order and halts itself. Post-fence GL errors CAS
+ * firstFailedSerial so X derives FAILED_QUIESCED, never SUCCESS. */
+static void gateAFencePublishGateA(struct lorie_shared_server_state *st,
+                                   EGLDisplay dpy,
+                                   uint64_t lastSerial, uint32_t batchGlError) {
+    EGLSync fence;
+    EGLint wait_result;
+    if (st == NULL || lastSerial == 0)
+        return;
+    fence = lorieEglCreateSyncKHR(dpy, EGL_SYNC_FENCE_KHR, nullptr);
+    if (fence == EGL_NO_SYNC)
+        lorieGateAFatalHalt("r-gatea-fence-create", LORIE_GATEA_FAIL_FENCE);
+    glFlush();
+    wait_result = lorieEglClientWaitSyncKHR(dpy, fence, 0,
+                                            (EGLTimeKHR)LORIE_GATEA_FENCE_TIMEOUT_NS);
+    if (wait_result != EGL_CONDITION_SATISFIED_KHR) {
+        lorieEglDestroySyncKHR(dpy, fence);
+        lorieGateAFatalHalt("r-gatea-fence-wait", LORIE_GATEA_FAIL_FENCE);
+    }
+    lorieEglDestroySyncKHR(dpy, fence);
+    if (lorieGateAObserveFatal(&st->gateA) != 0)
+        return;
+    if (batchGlError != GL_NO_ERROR
+        && !lorieGateAFirstFailedCAS(&st->gateA, lastSerial, LORIE_GATEA_FAIL_DRAW))
+        lorieGateAFatalHalt("r-gatea-firstfailed-race", LORIE_GATEA_FAIL_PROTOCOL);
+    lorieGateAPublishCompleted(&st->gpuCopyQueue.completedSerial, lastSerial);
+    notifyGpuCopyDone();
 }
 
 void Renderer::bindTexture(GLuint id) const {
@@ -1066,19 +1230,52 @@ LorieBuffer *Renderer::findBufferWithRetry(uint64_t id) {
     return buf;
 }
 
-uint64_t Renderer::applyPendingGpuCopiesLocked() {
+struct LorieGateABatchOut Renderer::applyPendingGpuCopiesLocked() {
+    struct LorieGateABatchOut out;
     bool fboSetUp = false;
-    uint64_t lastSerial = 0;
     uint64_t boundDstId = 0;
     GLint prevViewport[4];
 
-    if (!state || state->gpuCopyQueue.readIndex == state->gpuCopyQueue.writeIndex)
-        return 0;
+    memset(&out, 0, sizeof(out));
+    if (!state
+        || lorieGateAObserveReadIndex(&state->gpuCopyQueue.readIndex)
+            == lorieGateAObserveWriteIndex(&state->gpuCopyQueue.writeIndex))
+        return out;
 
     b3aBatchRecordCount = 0;
 
-    while (state->gpuCopyQueue.readIndex != state->gpuCopyQueue.writeIndex) {
-        LorieGpuCopyEntry entry = state->gpuCopyQueue.entries[state->gpuCopyQueue.readIndex % LORIE_GPU_COPY_QUEUE_CAPACITY];
+    for (;;) {
+        /* Acquire-load the write index BEFORE copying the slot: X fully
+         * initialized the entry before its release-publish. */
+        uint32_t ri = lorieGateAObserveReadIndex(&state->gpuCopyQueue.readIndex);
+        uint32_t wi = lorieGateAObserveWriteIndex(&state->gpuCopyQueue.writeIndex);
+        LorieGpuCopyEntry entry;
+        if (ri == wi)
+            break;
+        entry = state->gpuCopyQueue.entries[ri % LORIE_GPU_COPY_QUEUE_CAPACITY];
+        /* P2: sticky failure stops ALL further consumption. Every remaining
+         * serial is poisoned or never-executed; consuming it as success
+         * would release X ownership while the GPU still touches it. */
+        if (lorieGateAProtoEnabled()
+            && (lorieGateAObserveFatal(&state->gateA) != 0
+                || lorieGateAObserveFirstFailed(&state->gateA) != 0)) {
+            out.stopOnFailure = 1;
+            break;
+        }
+        /* P2 Gate A direct path: COMPOSITE whose source is a live READY
+         * import. Consumed here, never as legacy success. */
+        if (lorieGateAProtoEnabled() && entry.op == LORIE_GPU_OP_COMPOSITE
+            && gateAIsReady(entry.srcBufferId)) {
+            GLenum entryGlError = GL_NO_ERROR;
+            out.gateASeen = 1;
+            if (!gateAFenceCapable())
+                lorieGateAFatalHalt("r-gatea-no-fence", LORIE_GATEA_FAIL_FENCE);
+            if (consumeGateAComposite(&entry, &fboSetUp, &boundDstId,
+                                      prevViewport, &entryGlError) != 0)
+                lorieGateAFatalHalt("r-gatea-consume", LORIE_GATEA_FAIL_DRAW);
+            if (entryGlError != GL_NO_ERROR && out.batchGlError == GL_NO_ERROR)
+                out.batchGlError = (uint32_t)entryGlError;
+        } else {
         if (lorieB3aEnabled() && entry.telemetryIndex != LORIE_B3A_INVALID_INDEX) {
             lorieB3aMarkQueueDequeued(&state->b3aTelemetry, entry.telemetryIndex, lorieB3aNowNs());
             if (b3aBatchRecordCount < LORIE_GPU_COPY_QUEUE_CAPACITY)
@@ -1213,32 +1410,41 @@ uint64_t Renderer::applyPendingGpuCopiesLocked() {
             }
         }
 
-        lastSerial = entry.serial;
-        state->gpuCopyQueue.readIndex++;
+        /* readIndex means slot copied/consumed ONLY — never GPU done,
+         * semantic success, or ownership returned. */
+        out.lastSerial = entry.serial;
+        lorieGateAPublishReadIndex(&state->gpuCopyQueue.readIndex, ri + 1);
+        } /* end legacy-entry else */
     }
 
     if (fboSetUp) {
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
         glViewport(prevViewport[0], prevViewport[1], prevViewport[2], prevViewport[3]);
     }
-    return lastSerial;
+    return out;
 }
 
 // Standalone entry point used by the renderer thread's main loop. Used when no redraw is going to
 // happen on this tick (rare for GPU copies in practice, since scheduling one also marks damage
 // non-empty - see lorieTryScheduleGpuCopy), so it has to take the lock and fence/unlock itself.
 void Renderer::applyPendingGpuCopies() {
-    uint64_t serial;
-    if (!state || state->gpuCopyQueue.readIndex == state->gpuCopyQueue.writeIndex)
+    struct LorieGateABatchOut out;
+    if (!state
+        || lorieGateAObserveReadIndex(&state->gpuCopyQueue.readIndex)
+            == lorieGateAObserveWriteIndex(&state->gpuCopyQueue.writeIndex))
         return;
-    if (!lorieEglHasFence() || !lorieEglCreateSyncKHR ||
-        !lorieEglClientWaitSyncKHR || !lorieEglDestroySyncKHR) {
+    if (!gateAFenceCapable()) {
         loge("GPU copy skipped: EGL fence capability is unavailable");
         return;
     }
     lorie_mutex_lock(&state->lock, &state->lockingPid);
-    serial = applyPendingGpuCopiesLocked();
-    if (serial) {
+    out = applyPendingGpuCopiesLocked();
+    if (out.lastSerial != 0 && !out.stopOnFailure) {
+        if (out.gateASeen) {
+            /* P2: finite wait only; halts on unproven completion. */
+            gateAFencePublishGateA(state, egl_display, out.lastSerial,
+                                   out.batchGlError);
+        } else {
         EGLSync fence = lorieEglCreateSyncKHR(egl_display, EGL_SYNC_FENCE_KHR, nullptr);
         if (fence == EGL_NO_SYNC) {
             loge("GPU copy completion fence creation failed; completion not published");
@@ -1259,9 +1465,10 @@ void Renderer::applyPendingGpuCopies() {
         lorieEglDestroySyncKHR(egl_display, fence);
         // Only now that the GPU has actually finished (not just been told to start) is it safe to
         // let present_execute_copy release/idle the source pixmap back to the client.
-        state->gpuCopyQueue.completedSerial = serial;
+        lorieGateAPublishCompleted(&state->gpuCopyQueue.completedSerial, out.lastSerial);
         state->rendererSolidComplete = state->rendererSolidSubmits;
         notifyGpuCopyDone();
+        }
     }
     lorie_mutex_unlock(&state->lock, &state->lockingPid);
 }
@@ -1292,7 +1499,9 @@ void Renderer::redrawLocked(bool* waitingForBuffers) {
 
     // Early returns below skip the applyPendingGpuCopiesLocked() call further down, which would
     // stall copies queued for windows unrelated to root while root itself isn't ready yet.
-    if (state->gpuCopyQueue.readIndex != state->gpuCopyQueue.writeIndex)
+    if (state
+        && lorieGateAObserveReadIndex(&state->gpuCopyQueue.readIndex)
+            != lorieGateAObserveWriteIndex(&state->gpuCopyQueue.writeIndex))
         applyPendingGpuCopies();
 
     // The buffer will not be released until this function ends, but main thread can modify buffer list
@@ -1400,7 +1609,8 @@ void Renderer::redrawLocked(bool* waitingForBuffers) {
     // We should signal X server to not use root window while we actively copy it
     lorie_mutex_lock(&state->lock, &state->lockingPid);
     // Share this draw's flush+fence below instead of a separate round trip per frame.
-    uint64_t gpuCopySerial = applyPendingGpuCopiesLocked();
+    struct LorieGateABatchOut gpuCopyOut = applyPendingGpuCopiesLocked();
+    uint64_t gpuCopySerial = gpuCopyOut.lastSerial;
     state->drawRequested = FALSE;
 
     LorieBuffer_bindTexture(buffer);
@@ -1435,21 +1645,47 @@ void Renderer::redrawLocked(bool* waitingForBuffers) {
 
     // Wait until root window drawing is finished before giving control back to X server
     uint64_t fence_start = lorieB3aEnabled() ? lorieB3aNowNs() : 0;
-    wait_result = lorieEglClientWaitSyncKHR(egl_display, fence, 0, EGL_FOREVER);
+    /* P2: a drained Gate A batch must never wait EGL_FOREVER. The finite wait
+     * covers the shared completion fence; a timeout fail-stops instead of
+     * hanging a dying generation. The post-swap next-buffer readiness wait
+     * below is NOT completion-gating (it publishes nothing) and stays as-is:
+     * hanging there stalls the renderer, which X bounds via its Done wait. */
+    EGLTimeKHR gateaTimeout = gpuCopyOut.gateASeen
+        ? (EGLTimeKHR)LORIE_GATEA_FENCE_TIMEOUT_NS : EGL_FOREVER;
+    wait_result = lorieEglClientWaitSyncKHR(egl_display, fence, 0, gateaTimeout);
     if (wait_result != EGL_CONDITION_SATISFIED_KHR) {
         loge("redraw completion fence wait failed: 0x%x; completion not published", wait_result);
         lorieEglDestroySyncKHR(egl_display, fence);
         lorie_mutex_unlock(&state->lock, &state->lockingPid);
+        if (gpuCopyOut.gateASeen)
+            lorieGateAFatalHalt("r-redraw-gatea-fence", LORIE_GATEA_FAIL_FENCE);
         *waitingForBuffers = true;
         return;
     }
     if (fence_start)
         b3aMarkBatchFence(state, lorieB3aNowNs() - fence_start);
     lorieEglDestroySyncKHR(egl_display, fence);
-    if (gpuCopySerial) {
-        state->gpuCopyQueue.completedSerial = gpuCopySerial;
+    if (gpuCopySerial && !gpuCopyOut.stopOnFailure) {
+        if (gpuCopyOut.gateASeen) {
+            /* Same terminal rules as the standalone path: fatal observed
+             * after a satisfied fence skips publication; post-fence GL errors
+             * become FAILED_QUIESCED, never SUCCESS. */
+            if (lorieGateAObserveFatal(&state->gateA) == 0) {
+                if (gpuCopyOut.batchGlError != GL_NO_ERROR
+                    && !lorieGateAFirstFailedCAS(&state->gateA, gpuCopySerial,
+                                                LORIE_GATEA_FAIL_DRAW))
+                    lorieGateAFatalHalt("r-redraw-firstfailed-race",
+                                        LORIE_GATEA_FAIL_PROTOCOL);
+                lorieGateAPublishCompleted(&state->gpuCopyQueue.completedSerial,
+                                           gpuCopySerial);
+                notifyGpuCopyDone();
+            }
+        } else {
+        lorieGateAPublishCompleted(&state->gpuCopyQueue.completedSerial, gpuCopySerial);
+        }
         state->rendererSolidComplete = state->rendererSolidSubmits;
-        notifyGpuCopyDone();
+        if (!gpuCopyOut.gateASeen)
+            notifyGpuCopyDone();
     }
     state->waitForNextFrame = true;
     lorie_mutex_unlock(&state->lock, &state->lockingPid);
@@ -1487,7 +1723,8 @@ bool Renderer::shouldWait(bool *waitingForBuffers) {
     pthread_spin_lock(&bufferLock);
     buffersChanged = !xorg_list_is_empty(&addedBuffers) || !xorg_list_is_empty(&removedBuffers);
     pthread_spin_unlock(&bufferLock);
-    gpuCopyPending = state && state->gpuCopyQueue.readIndex != state->gpuCopyQueue.writeIndex;
+    gpuCopyPending = state && lorieGateAObserveReadIndex(&state->gpuCopyQueue.readIndex)
+        != lorieGateAObserveWriteIndex(&state->gpuCopyQueue.writeIndex);
     if (stateChanged || windowChanged || buffersChanged || gpuCopyPending)
         // If there are pending changes we should process them immediately.
         return false;
@@ -1568,7 +1805,8 @@ void Renderer::threadLoop() {
 
         // Prefer a full redraw over the standalone apply below so a pending GPU copy shares one
         // lock+fence with the root/cursor draw, instead of two GPU round trips per frame.
-        bool gpuCopyPending = state && state->gpuCopyQueue.readIndex != state->gpuCopyQueue.writeIndex;
+        bool gpuCopyPending = state && lorieGateAObserveReadIndex(&state->gpuCopyQueue.readIndex)
+            != lorieGateAObserveWriteIndex(&state->gpuCopyQueue.writeIndex);
         if (state && state->surfaceAvailable && !state->waitForNextFrame &&
             (state->drawRequested || state->cursor.moved || state->cursor.updated || gpuCopyPending))
             redrawLocked(&waitingForBuffers);
