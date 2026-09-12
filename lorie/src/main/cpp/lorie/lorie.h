@@ -271,7 +271,13 @@ struct LorieGateAProtocol {
 };
 
 LORIE_GATEA_STATIC_ASSERT(sizeof(struct LorieGateAProtocol) == 40, "gatea sideband size");
-LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_ALIGNOF(struct LorieGateAProtocol) == 8, "gatea sideband align");
+/* Struct alignment is 8 on LP64 but 4 on LP32 (x86/armeabi-v7a); member offsets
+ * stay identical on both because every 64-bit member sits at a multiple of 8.
+ * The protocol needs 8-aligned 64-bit members (lock-free atomics), not struct
+ * align 8. CI 34705593764 proved == 8 wrong on i686. */
+LORIE_GATEA_STATIC_ASSERT((offsetof(struct LorieGateAProtocol, sessionNonce) % 8) == 0, "gatea nonce aligned");
+LORIE_GATEA_STATIC_ASSERT((offsetof(struct LorieGateAProtocol, generation) % 8) == 0, "gatea generation aligned");
+LORIE_GATEA_STATIC_ASSERT((offsetof(struct LorieGateAProtocol, firstFailedSerial) % 8) == 0, "gatea firstFailed aligned");
 LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateAProtocol, protocolVersion) == 0, "gatea version off");
 LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateAProtocol, generationFatal) == 4, "gatea fatal off");
 LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateAProtocol, sessionNonce) == 8, "gatea nonce off");
@@ -481,7 +487,11 @@ struct LorieGateAFrame {
 };
 
 LORIE_GATEA_STATIC_ASSERT(sizeof(struct LorieGateAFrame) == 40, "gatea frame size");
-LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_ALIGNOF(struct LorieGateAFrame) == 8, "gatea frame align");
+/* Same LP32 note as the sideband: frame member offsets are identical on LP32
+ * and LP64; 64-bit members are 8-aligned on both. */
+LORIE_GATEA_STATIC_ASSERT((offsetof(struct LorieGateAFrame, nonce) % 8) == 0, "gatea frame nonce aligned");
+LORIE_GATEA_STATIC_ASSERT((offsetof(struct LorieGateAFrame, generation) % 8) == 0, "gatea frame generation aligned");
+LORIE_GATEA_STATIC_ASSERT((offsetof(struct LorieGateAFrame, bufferId) % 8) == 0, "gatea frame bufferId aligned");
 LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateAFrame, magic) == 0, "gatea frame magic off");
 LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateAFrame, version) == 4, "gatea frame version off");
 LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateAFrame, type) == 6, "gatea frame type off");
