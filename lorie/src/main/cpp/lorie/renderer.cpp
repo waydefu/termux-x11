@@ -22,12 +22,14 @@
 #include <dlfcn.h>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #include "list.h"
 #include "lorie.h"
 #include "egl_dispatch.h"
+#include "gatea_a1_microprobe.h"
 
 #define log(...) __android_log_print(ANDROID_LOG_DEBUG, "gles-renderer", __VA_ARGS__)
 #define loge(...) __android_log_print(ANDROID_LOG_ERROR, "gles-renderer", __VA_ARGS__)
@@ -529,6 +531,10 @@ void Renderer::testCapabilities(int* legacy_drawing, int* gpu_present_disabled) 
             return vprintEglError("check eglMakeCurrent failed", __LINE__);
 
         lorieGlesDispatchInit();
+
+        if (const char *gateaA1 = getenv("TERMUX_X11_GATEA_A1");
+            gateaA1 && strcmp(gateaA1, "1") == 0)
+            gateaA1MicroprobeRun(egl_display);
 
         glActiveTexture(GL_TEXTURE0); checkGlError();
         glGenTextures(1, &texture); checkGlError();

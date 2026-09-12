@@ -291,6 +291,7 @@ add_library(Xlorie SHARED
         "lorie/InitInput.c"
         "lorie/InputXKB.c"
         "lorie/renderer.cpp"
+        "lorie/gatea_a1_microprobe.cpp"
         "lorie/buffer.c"
         "lorie/b3a_telemetry.c"
         "lorie/egl_dispatch.c"
