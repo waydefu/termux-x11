@@ -11,6 +11,12 @@
 #include <jni.h>
 #include <screenint.h>
 #include <errno.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <time.h>
+#include <unistd.h>
+#include <pthread.h>
 #include <sys/socket.h>
 #include "linux/input-event-codes.h"
 #include "buffer.h"
@@ -190,6 +196,389 @@ typedef struct {
     LorieGpuCopyRect rects[LORIE_GPU_COPY_MAX_RECTS];
 } LorieGpuCopyEntry;
 
+/* ==========================================================================
+ * Gate A P0 foundation — frozen protocol ABI, atomics, fatal/waiter framing.
+ * R3 authority: GATE-A-PROTOCOL-ABI-REVIEW-R3-20260912.md.
+ *
+ * ADDITIVE ONLY. No production call site uses anything below yet, so
+ * DEFAULT-OFF behavior is trivially == current D0a. P1+ wires call sites;
+ * P5 rewires queue publication/consumption to the accessors. Shared fields
+ * are NEVER touched directly (no volatile-only or ordinary load/store sync).
+ * ========================================================================== */
+
+#if defined(__cplusplus)
+#define LORIE_GATEA_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
+#define LORIE_GATEA_ALIGNOF(t) alignof(t)
+#else
+#define LORIE_GATEA_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
+#define LORIE_GATEA_ALIGNOF(t) _Alignof(t)
+#endif
+
+/* Prototype feature flag: exact "1" only. No call site yet (P3 admits later). */
+static inline __always_inline int lorieGateAProtoEnabled(void) {
+    const char *e = getenv("TERMUX_X11_GATEA_PROTO");
+    return e != NULL && e[0] == '1' && e[1] == '\0';
+}
+
+/* Terminal RESULT is always derived, never stored per entry. */
+typedef enum {
+    LORIE_GATEA_RESULT_NONE = 0,            /* not terminal for this serial */
+    LORIE_GATEA_RESULT_SUCCESS = 1,
+    LORIE_GATEA_RESULT_FAILED_QUIESCED = 2, /* quiesced; generation ends, no replay */
+    LORIE_GATEA_RESULT_FATAL = 3,           /* poisoned; terminate session */
+} LorieGateAResult;
+
+/* Failure/reason codes. 0 is reserved for "none"; every real code is nonzero
+ * so a single nonzero word doubles as the fatal flag (R3 §3 refinement:
+ * the CAS word carries flag+reason atomically, so concurrent racers cannot
+ * interleave a losing reason with a winning flag). */
+typedef enum {
+    LORIE_GATEA_FAIL_NONE = 0,
+    LORIE_GATEA_FAIL_IMPORT = 1,
+    LORIE_GATEA_FAIL_DRAW = 2,
+    LORIE_GATEA_FAIL_FENCE = 3,
+    LORIE_GATEA_FAIL_TIMEOUT = 4,
+    LORIE_GATEA_FAIL_PROTOCOL = 5,
+    LORIE_GATEA_FAIL_GENERATION = 6,
+    LORIE_GATEA_FAIL_UNREGISTER = 7,
+    LORIE_GATEA_FAIL_CLOSE = 8,
+} LorieGateAFailCode;
+
+/* Pure derivation from acquire-loaded (completed, firstFailed, fatal).
+ * Caller MUST load fatal first each waiter iteration (observation-order rule):
+ * a SUCCESS fully derived before fatal is observed stays credible. */
+static inline __always_inline LorieGateAResult lorieGateADeriveResult(uint64_t completed, uint64_t firstFailed, uint32_t fatal, uint64_t serial) {
+    if (fatal != 0)
+        return LORIE_GATEA_RESULT_FATAL;
+    if (firstFailed != 0 && serial > firstFailed)
+        return LORIE_GATEA_RESULT_FATAL; /* never executed; poisoned */
+    if (firstFailed != 0 && serial == firstFailed)
+        return completed >= serial ? LORIE_GATEA_RESULT_FAILED_QUIESCED : LORIE_GATEA_RESULT_NONE;
+    return completed >= serial ? LORIE_GATEA_RESULT_SUCCESS : LORIE_GATEA_RESULT_NONE;
+}
+
+/* Frozen 40-byte shared result sideband, appended to lorie_shared_server_state.
+ * Plain fields on purpose: every cross-process access MUST use the accessors
+ * below (release/acquire). Direct or volatile-only access is forbidden. */
+struct LorieGateAProtocol {
+    uint32_t protocolVersion;    /* +0  */
+    uint32_t generationFatal;    /* +4  sticky: 0 clean, else LorieGateAFailCode */
+    uint64_t sessionNonce;       /* +8  */
+    uint64_t generation;         /* +16 */
+    uint64_t firstFailedSerial;  /* +24 sticky, 0 = none */
+    uint32_t firstFailureCode;   /* +32 valid iff firstFailedSerial != 0 */
+    uint32_t fatalReason;        /* +36 diagnostic mirror of generationFatal */
+};
+
+LORIE_GATEA_STATIC_ASSERT(sizeof(struct LorieGateAProtocol) == 40, "gatea sideband size");
+LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_ALIGNOF(struct LorieGateAProtocol) == 8, "gatea sideband align");
+LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateAProtocol, protocolVersion) == 0, "gatea version off");
+LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateAProtocol, generationFatal) == 4, "gatea fatal off");
+LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateAProtocol, sessionNonce) == 8, "gatea nonce off");
+LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateAProtocol, generation) == 16, "gatea generation off");
+LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateAProtocol, firstFailedSerial) == 24, "gatea firstFailed off");
+LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateAProtocol, firstFailureCode) == 32, "gatea failCode off");
+LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateAProtocol, fatalReason) == 36, "gatea fatalReason off");
+LORIE_GATEA_STATIC_ASSERT(sizeof(LorieGpuCopyEntry) == 168, "queue entry ABI unchanged");
+LORIE_GATEA_STATIC_ASSERT(__atomic_always_lock_free(4, (const volatile void *)0)
+    && __atomic_always_lock_free(8, (const volatile void *)0), "gatea atomics lock-free");
+
+/* Called once by X before the mapping is shared; plain stores are safe here.
+ * nonce and generation MUST be nonzero (P1: getrandom nonce, 1-based generation). */
+static inline __always_inline void lorieGateAProtocolInit(struct LorieGateAProtocol *p, uint64_t nonce, uint64_t generation) {
+    p->protocolVersion = 1u;
+    p->generationFatal = 0u;
+    p->sessionNonce = nonce;
+    p->generation = generation;
+    p->firstFailedSerial = 0u;
+    p->firstFailureCode = 0u;
+    p->fatalReason = 0u;
+}
+
+/* Runtime gate before ACTIVE: every shared 32/64-bit field must be lock-free
+ * for its actual address in both processes. False disables Gate A pre-REGISTER. */
+static inline __always_inline bool lorieGateAAtomicsLockFree(const struct LorieGateAProtocol *p) {
+    return __atomic_is_lock_free(sizeof(p->protocolVersion), &p->protocolVersion)
+        && __atomic_is_lock_free(sizeof(p->generationFatal), &p->generationFatal)
+        && __atomic_is_lock_free(sizeof(p->sessionNonce), &p->sessionNonce)
+        && __atomic_is_lock_free(sizeof(p->generation), &p->generation)
+        && __atomic_is_lock_free(sizeof(p->firstFailedSerial), &p->firstFailedSerial)
+        && __atomic_is_lock_free(sizeof(p->firstFailureCode), &p->firstFailureCode)
+        && __atomic_is_lock_free(sizeof(p->fatalReason), &p->fatalReason);
+}
+
+/* ---- Centralized release/acquire accessors (P0 provides, P5 rewires) ---- */
+
+static inline __always_inline uint32_t lorieGateALoadU32Acquire(const uint32_t *p) {
+    return __atomic_load_n(p, __ATOMIC_ACQUIRE);
+}
+
+static inline __always_inline void lorieGateAStoreU32Release(uint32_t *p, uint32_t v) {
+    __atomic_store_n(p, v, __ATOMIC_RELEASE);
+}
+
+static inline __always_inline uint64_t lorieGateALoadU64Acquire(const uint64_t *p) {
+    return __atomic_load_n(p, __ATOMIC_ACQUIRE);
+}
+
+static inline __always_inline void lorieGateAStoreU64Release(uint64_t *p, uint64_t v) {
+    __atomic_store_n(p, v, __ATOMIC_RELEASE);
+}
+
+/* Queue indices: X release-stores writeIndex, renderer acquire-loads it;
+ * renderer release-stores readIndex (slot copied/dequeued only), X acquire-loads
+ * it for slot reuse. completedSerial: renderer release-stores after fence-proven
+ * quiescence, X acquire-loads it. completedSerial is quiescence, NOT success. */
+static inline __always_inline void lorieGateAPublishWriteIndex(uint32_t *p, uint32_t v) {
+    __atomic_store_n(p, v, __ATOMIC_RELEASE);
+}
+
+static inline __always_inline uint32_t lorieGateAObserveWriteIndex(const uint32_t *p) {
+    return __atomic_load_n(p, __ATOMIC_ACQUIRE);
+}
+
+static inline __always_inline void lorieGateAPublishReadIndex(uint32_t *p, uint32_t v) {
+    __atomic_store_n(p, v, __ATOMIC_RELEASE);
+}
+
+static inline __always_inline uint32_t lorieGateAObserveReadIndex(const uint32_t *p) {
+    return __atomic_load_n(p, __ATOMIC_ACQUIRE);
+}
+
+static inline __always_inline void lorieGateAPublishCompleted(uint64_t *p, uint64_t serial) {
+    __atomic_store_n(p, serial, __ATOMIC_RELEASE);
+}
+
+static inline __always_inline uint64_t lorieGateAObserveCompleted(const uint64_t *p) {
+    return __atomic_load_n(p, __ATOMIC_ACQUIRE);
+}
+
+/* First-failure edge. Single writer (renderer) by construction; the CAS still
+ * detects protocol corruption. Code is relaxed-stored before the release CAS,
+ * so the code is visible to anyone acquiring firstFailedSerial. */
+static inline __always_inline int lorieGateAFirstFailedCAS(struct LorieGateAProtocol *p, uint64_t serial, uint32_t code) {
+    __atomic_store_n(&p->firstFailureCode, code, __ATOMIC_RELAXED);
+    {
+        uint64_t expected = 0;
+        return __atomic_compare_exchange_n(&p->firstFailedSerial, &expected, serial,
+                                           false, __ATOMIC_RELEASE, __ATOMIC_ACQUIRE);
+    }
+}
+
+/* Fatal edge: THE single atomic authority. reason MUST be a nonzero
+ * LorieGateAFailCode. First detail wins; concurrent losers observe the sticky
+ * word and stop. fatalReason is a diagnostic mirror only — decisions MUST read
+ * generationFatal itself (the mirror store is sequenced after the winning CAS
+ * and carries no synchronization). */
+static inline __always_inline int lorieGateAPublishFatal(struct LorieGateAProtocol *p, uint32_t reason) {
+    uint32_t expected = 0u;
+    if (!__atomic_compare_exchange_n(&p->generationFatal, &expected, reason,
+                                     false, __ATOMIC_RELEASE, __ATOMIC_ACQUIRE))
+        return 0;
+    p->fatalReason = reason;
+    return 1;
+}
+
+static inline __always_inline uint32_t lorieGateAObserveFatal(const struct LorieGateAProtocol *p) {
+    return __atomic_load_n(&p->generationFatal, __ATOMIC_ACQUIRE);
+}
+
+/* ---- Waiter foundation (dedicated condvars; fatal always wakes) ----
+ *
+ * Instances live process-locally (P1+). Signaled ONLY by the input/protocol
+ * thread that owns the registry update — never via an X-thread WorkProc the
+ * waiter would need, and never while holding state->lock. Fatal wake uses the
+ * same signal path with FAILED state. */
+
+typedef enum {
+    LORIE_GATEA_WAIT_IDLE = 0,
+    LORIE_GATEA_WAIT_ARMED = 1,
+    LORIE_GATEA_WAIT_DONE = 2,
+    LORIE_GATEA_WAIT_FAILED = 3,
+} LorieGateAWaiterState;
+
+struct LorieGateAWaiter {
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    uint32_t state;
+    uint32_t reserved;
+};
+
+static inline __always_inline void lorieGateAWaiterInit(struct LorieGateAWaiter *w) {
+    pthread_mutex_init(&w->lock, NULL);
+    pthread_cond_init(&w->cond, NULL);
+    w->state = LORIE_GATEA_WAIT_IDLE;
+    w->reserved = 0u;
+}
+
+static inline __always_inline void lorieGateAWaiterDestroy(struct LorieGateAWaiter *w) {
+    pthread_cond_destroy(&w->cond);
+    pthread_mutex_destroy(&w->lock);
+}
+
+static inline __always_inline void lorieGateAWaiterArm(struct LorieGateAWaiter *w) {
+    pthread_mutex_lock(&w->lock);
+    w->state = LORIE_GATEA_WAIT_ARMED;
+    pthread_mutex_unlock(&w->lock);
+}
+
+/* Terminal signal (DONE or FAILED). Late signals after leave-ARMED are dropped
+ * deterministically; re-arm is explicit. Broadcast wakes every waiter sharing
+ * this instance. */
+static inline __always_inline void lorieGateAWaiterSignal(struct LorieGateAWaiter *w, uint32_t terminal) {
+    pthread_mutex_lock(&w->lock);
+    if (w->state == LORIE_GATEA_WAIT_ARMED)
+        w->state = terminal;
+    pthread_cond_broadcast(&w->cond);
+    pthread_mutex_unlock(&w->lock);
+}
+
+/* One bounded wait quantum against an absolute deadline. Returns current state
+ * (callers loop: check shared fatal first, wait, recheck). ETIMEDOUT ends the
+ * quantum; the deadline keeps every waiter bounded. */
+static inline __always_inline uint32_t lorieGateAWaiterWaitUntil(struct LorieGateAWaiter *w, const struct timespec *deadline) {
+    uint32_t s;
+    pthread_mutex_lock(&w->lock);
+    while (w->state == LORIE_GATEA_WAIT_ARMED) {
+        if (pthread_cond_timedwait(&w->cond, &w->lock, deadline) == ETIMEDOUT)
+            break;
+    }
+    s = w->state;
+    pthread_mutex_unlock(&w->lock);
+    return s;
+}
+
+/* ---- Gate A control wire ABI (frozen, 40-byte header, fixed bodies) ----
+ *
+ * Separate framing from legacy lorieEvent traffic; Gate A frames are selected
+ * by header magic. No raw padded-struct writes: every multi-byte field is
+ * fixed-width and naturally aligned. AHB handles travel via the existing
+ * SCM_RIGHTS ancillary channel, never inside frames. */
+
+#define LORIE_GATEA_MAGIC 0x45544147u /* "GATE" little-endian */
+#define LORIE_GATEA_PROTOCOL_VERSION 1u
+
+typedef enum {
+    LORIE_GATEA_MSG_REGISTER = 1,
+    LORIE_GATEA_MSG_READY = 2,
+    LORIE_GATEA_MSG_REGISTER_FAILED = 3,
+    LORIE_GATEA_MSG_UNREGISTER = 4,
+    LORIE_GATEA_MSG_UNREGISTER_ACK = 5,
+    LORIE_GATEA_MSG_GENERATION_CLOSE = 6,
+    LORIE_GATEA_MSG_GENERATION_CLOSED = 7,
+    LORIE_GATEA_MSG_FATAL_NOTIFY = 8,
+} LorieGateAMsgType;
+
+struct LorieGateAFrame {
+    uint32_t magic;        /* +0  LORIE_GATEA_MAGIC */
+    uint16_t version;      /* +4  LORIE_GATEA_PROTOCOL_VERSION */
+    uint16_t type;         /* +6  LorieGateAMsgType */
+    uint32_t length;       /* +8  body bytes following this header */
+    uint32_t reserved;     /* +12 = 0 */
+    uint64_t nonce;        /* +16 sessionNonce */
+    uint64_t generation;   /* +24 */
+    uint64_t bufferId;     /* +32 0 when not applicable */
+};
+
+LORIE_GATEA_STATIC_ASSERT(sizeof(struct LorieGateAFrame) == 40, "gatea frame size");
+LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_ALIGNOF(struct LorieGateAFrame) == 8, "gatea frame align");
+LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateAFrame, magic) == 0, "gatea frame magic off");
+LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateAFrame, version) == 4, "gatea frame version off");
+LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateAFrame, type) == 6, "gatea frame type off");
+LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateAFrame, length) == 8, "gatea frame length off");
+LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateAFrame, reserved) == 12, "gatea frame reserved off");
+LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateAFrame, nonce) == 16, "gatea frame nonce off");
+LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateAFrame, generation) == 24, "gatea frame generation off");
+LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateAFrame, bufferId) == 32, "gatea frame bufferId off");
+
+struct LorieGateARegisterBody { uint32_t width, height, stride, format; };     /* 16 */
+struct LorieGateAReadyBody { uint64_t fingerprint; };                          /* 8 */
+struct LorieGateARegisterFailedBody { uint32_t code, reserved; };              /* 8 */
+struct LorieGateAUnregisterBody { uint64_t lastSubmittedSerial; };             /* 8 */
+struct LorieGateAGenerationCloseBody { uint64_t lastPublishedSerial; };        /* 8 */
+struct LorieGateAFatalNotifyBody { uint32_t reason, reserved; };               /* 8 */
+/* UNREGISTER_ACK and GENERATION_CLOSED carry empty bodies (length 0). */
+
+LORIE_GATEA_STATIC_ASSERT(sizeof(struct LorieGateARegisterBody) == 16, "gatea register body");
+LORIE_GATEA_STATIC_ASSERT(sizeof(struct LorieGateAReadyBody) == 8, "gatea ready body");
+LORIE_GATEA_STATIC_ASSERT(sizeof(struct LorieGateARegisterFailedBody) == 8, "gatea regfail body");
+LORIE_GATEA_STATIC_ASSERT(sizeof(struct LorieGateAUnregisterBody) == 8, "gatea unregister body");
+LORIE_GATEA_STATIC_ASSERT(sizeof(struct LorieGateAGenerationCloseBody) == 8, "gatea genclose body");
+LORIE_GATEA_STATIC_ASSERT(sizeof(struct LorieGateAFatalNotifyBody) == 8, "gatea fatalnotify body");
+
+/* Exact-length transfer. Returns bytes moved, or -1 with errno preserved
+ * (EINTR retried internally). A short result means EOF/HUP or error: Gate A
+ * callers treat any short frame while a generation is ACTIVE as FATAL. */
+static inline __always_inline ssize_t lorieGateAWriteFull(int fd, const void *buf, size_t len) {
+    size_t done = 0;
+    while (done < len) {
+        ssize_t n = write(fd, (const char *)buf + done, len - done);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (n == 0) {
+            errno = EIO;
+            return -1;
+        }
+        done += (size_t)n;
+    }
+    return (ssize_t)done;
+}
+
+static inline __always_inline ssize_t lorieGateAReadFull(int fd, void *buf, size_t len) {
+    size_t done = 0;
+    while (done < len) {
+        ssize_t n = read(fd, (char *)buf + done, len - done);
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        if (n == 0)
+            break; /* EOF/HUP: caller sees short count */
+        done += (size_t)n;
+    }
+    return (ssize_t)done;
+}
+
+/* ---- Buffer retirement metadata (process-local registries, never shared) ---- */
+
+typedef enum {
+    LORIE_GATEA_REG_UNREGISTERED = 0,
+    LORIE_GATEA_REG_REGISTERING = 1,
+    LORIE_GATEA_REG_READY = 2,
+    LORIE_GATEA_REG_RETIRING = 3,
+    LORIE_GATEA_REG_DEAD = 4,
+} LorieGateARegState;
+
+/* X-side per registered buffer. lastSubmittedSerial is updated on every source
+ * AND destination use; admission requires it terminal (R3 §2). */
+struct LorieGateABufferMeta {
+    uint64_t nonce, generation, bufferId, fingerprint, lastSubmittedSerial;
+    uint32_t state, pendingCount, cpuLocked, unregisterAcked;
+    void *ownerRef; /* X wrapper reference; process-local only, never shared */
+};
+
+/* Renderer-side per import identity. AHB/EGL/texture handles are added by the
+ * P2 registry; the identity + ready/tombstone discipline is frozen here. */
+struct LorieGateAImportEntry {
+    uint64_t id, nonce, generation, fingerprint;
+    uint32_t ready, tombstone;
+};
+
+/* Descriptor fingerprint for REGISTER/READY matching and duplicate detection:
+ * same ID with different fingerprint/generation is FATAL. */
+static inline __always_inline uint64_t lorieGateAFingerprint(uint32_t w, uint32_t h, uint32_t stride, uint32_t format) {
+    uint64_t f = 1469598103934665603ull;
+    f ^= w; f *= 1099511628211ull;
+    f ^= h; f *= 1099511628211ull;
+    f ^= stride; f *= 1099511628211ull;
+    f ^= format; f *= 1099511628211ull;
+    return f;
+}
+
 struct lorie_shared_server_state {
     /*
      * Renderer and X server are separated into 2 different processes.
@@ -256,6 +645,12 @@ struct lorie_shared_server_state {
 
     /* Optional P2-B.3a records. Zero overhead apart from a disabled branch when off. */
     LorieB3aTelemetry b3aTelemetry;
+
+    /* Gate A P0 result sideband. Appended last: existing offsets unchanged.
+     * Zeroed with the mapping at creation; X initializes identity via
+     * lorieGateAProtocolInit before sharing. All cross-process access uses
+     * the centralized accessors above. */
+    struct LorieGateAProtocol gateA;
 };
 
 #ifdef __cplusplus
