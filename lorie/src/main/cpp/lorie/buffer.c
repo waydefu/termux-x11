@@ -729,6 +729,37 @@ void LorieBuffer_describeAHardwareBuffer(AHardwareBuffer* buffer, AHardwareBuffe
         AHardwareBuffer_describe(buffer, outDesc);
 }
 
+/**
+ * Release a raw AHardwareBuffer reference. Safe on any thread (refcounted, no
+ * GL needed). Uses the same availability guard as the other direct NDK calls
+ * in this file; NULL is a no-op so cleanup paths stay branch-light.
+ *
+ * @param buffer buffer to release (may be NULL)
+ */
+__LIBC_HIDDEN__ void LorieBuffer_releaseAHardwareBuffer(AHardwareBuffer* _Nullable buffer) {
+    if (buffer == NULL)
+        return;
+    if (__builtin_available(android 26, *))
+        AHardwareBuffer_release(buffer);
+}
+
+/**
+ * Send a raw AHardwareBuffer handle like
+ * LorieBuffer_sendRawAHardwareBufferHandleToUnixSocket, but report status so
+ * framed protocols can fail closed on transport errors.
+ *
+ * @param buffer buffer to send
+ * @param socketFd socket to send the handle over
+ * @return 0 on success, negative error otherwise
+ */
+__LIBC_HIDDEN__ int LorieBuffer_sendRawAHardwareBufferHandleChecked(AHardwareBuffer* _Nonnull buffer, int socketFd) {
+    if (!buffer || socketFd < 0)
+        return -EINVAL;
+    if (__builtin_available(android 26, *))
+        return AHardwareBuffer_sendHandleToUnixSocket(buffer, socketFd);
+    return -ENOSYS;
+}
+
 __LIBC_HIDDEN__ int ancil_send_fd(int sock, int fd) {
     char nothing = '!';
     struct iovec nothing_ptr = { .iov_base = &nothing, .iov_len = 1 };

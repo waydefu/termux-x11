@@ -29,6 +29,7 @@ extern "C" {
 #include <linux/in.h>
 #include <arpa/inet.h>
 #include <poll.h>
+#include <pthread.h>
 #include "lorie.h"
 
 #define log(prio, ...) __android_log_print(ANDROID_LOG_ ## prio, "LorieNative", __VA_ARGS__)
@@ -45,6 +46,170 @@ char *xtrans_unix_path_x11 = nullptr;
 char *xtrans_unix_dir_x11 = nullptr;
 
 struct xorg_list registeredBuffers;
+
+/* ---- Gate A P1 X-side registry (dormant unless flag + active generation) ----
+ * Fixed pool: FULL refuses new REGISTER locally (P3 falls back to D0a).
+ * gateARegistryMutex is a leaf: never held across socket I/O or waits.
+ * Pool-stable slots: waiter addresses stay valid for process lifetime, so
+ * input-thread signaling needs no refcounting. */
+#define LORIE_GATEA_XREGISTRY_SIZE 16
+struct LorieGateAXEntry {
+    struct LorieGateABufferMeta meta;
+    struct LorieGateAWaiter waiter;
+    int inUse;
+};
+static struct LorieGateAXEntry gateAXRegistry[LORIE_GATEA_XREGISTRY_SIZE];
+static pthread_mutex_t gateARegistryMutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t gateASendMutex = PTHREAD_MUTEX_INITIALIZER;
+
+static struct LorieGateAXEntry *gateAXFindLocked(uint64_t id) {
+    for (int i = 0; i < LORIE_GATEA_XREGISTRY_SIZE; i++) {
+        if (gateAXRegistry[i].inUse && gateAXRegistry[i].meta.bufferId == id)
+            return &gateAXRegistry[i];
+    }
+    return NULL;
+}
+
+static int gateAXWaiterArmedLocked(struct LorieGateAXEntry *e) {
+    int armed;
+    pthread_mutex_lock(&e->waiter.lock);
+    armed = (e->waiter.state == LORIE_GATEA_WAIT_ARMED);
+    pthread_mutex_unlock(&e->waiter.lock);
+    return armed;
+}
+
+int lorieGateARegistryInsert(uint64_t nonce, uint64_t generation, uint64_t id, uint64_t fingerprint) {
+    int i, rc = -1;
+    if (!lorieGateAProtoEnabled() || id == 0 || nonce == 0 || generation == 0)
+        return -1;
+    pthread_mutex_lock(&gateARegistryMutex);
+    {
+        struct LorieGateAXEntry *dup = gateAXFindLocked(id);
+        if (dup != NULL && dup->meta.nonce == nonce && dup->meta.generation == generation) {
+            pthread_mutex_unlock(&gateARegistryMutex);
+            return -1; /* strict double-insert; P3 never does this */
+        }
+        if (dup != NULL) {
+            /* Same ID, older generation: replace only if fully quiescent
+             * (no armed waiter, no pending, no submitted serial). Otherwise
+             * refuse; P3 treats refusal per its admission table. */
+            if (gateAXWaiterArmedLocked(dup) || dup->meta.pendingCount != 0
+                || dup->meta.lastSubmittedSerial != 0) {
+                pthread_mutex_unlock(&gateARegistryMutex);
+                return -1;
+            }
+            lorieGateAWaiterDestroy(&dup->waiter);
+            dup->inUse = 0;
+        }
+        for (i = 0; i < LORIE_GATEA_XREGISTRY_SIZE; i++) {
+            if (!gateAXRegistry[i].inUse) {
+                gateAXRegistry[i].inUse = 1;
+                gateAXRegistry[i].meta.nonce = nonce;
+                gateAXRegistry[i].meta.generation = generation;
+                gateAXRegistry[i].meta.bufferId = id;
+                gateAXRegistry[i].meta.fingerprint = fingerprint;
+                gateAXRegistry[i].meta.lastSubmittedSerial = 0;
+                gateAXRegistry[i].meta.state = LORIE_GATEA_REG_REGISTERING;
+                gateAXRegistry[i].meta.pendingCount = 0;
+                gateAXRegistry[i].meta.cpuLocked = 0;
+                gateAXRegistry[i].meta.unregisterAcked = 0;
+                gateAXRegistry[i].meta.ownerRef = NULL; /* P3 admission sets */
+                lorieGateAWaiterInit(&gateAXRegistry[i].waiter);
+                rc = 0;
+                break;
+            }
+        }
+    }
+    pthread_mutex_unlock(&gateARegistryMutex);
+    return rc;
+}
+
+int lorieGateARegistryFind(uint64_t id, struct LorieGateABufferMeta *out) {
+    struct LorieGateAXEntry *e;
+    if (out == NULL)
+        return -1;
+    pthread_mutex_lock(&gateARegistryMutex);
+    e = gateAXFindLocked(id);
+    if (e != NULL)
+        *out = e->meta;
+    pthread_mutex_unlock(&gateARegistryMutex);
+    return e != NULL ? 0 : -1;
+}
+
+struct LorieGateAWaiter *lorieGateARegistryWaiter(uint64_t id) {
+    struct LorieGateAWaiter *w = NULL;
+    pthread_mutex_lock(&gateARegistryMutex);
+    {
+        struct LorieGateAXEntry *e = gateAXFindLocked(id);
+        if (e != NULL)
+            w = &e->waiter;
+    }
+    pthread_mutex_unlock(&gateARegistryMutex);
+    return w;
+}
+
+/* Atomic find + tuple + fingerprint check + mark + signal under one lock hold
+ * (no TOCTOU between lookup and update). Returns 0 if marked, 1 if the id is
+ * unknown/stale for this tuple, 2 on fingerprint mismatch. The dispatcher
+ * halts on nonzero iff a generation is bound+active, else drops. */
+int lorieGateARegistryMarkChecked(uint64_t id, uint64_t nonce, uint64_t generation,
+                                  uint64_t fingerprint, int ready, uint32_t code) {
+    int rc = 1;
+    (void)code; /* P3 wires failure-code diagnostics; terminal state decides here */
+    pthread_mutex_lock(&gateARegistryMutex);
+    {
+        struct LorieGateAXEntry *e = gateAXFindLocked(id);
+        if (e != NULL && e->meta.nonce == nonce && e->meta.generation == generation) {
+            if (ready && e->meta.fingerprint != fingerprint) {
+                rc = 2;
+            } else {
+                e->meta.state = ready ? LORIE_GATEA_REG_READY : LORIE_GATEA_REG_DEAD;
+                lorieGateAWaiterSignal(&e->waiter,
+                    ready ? LORIE_GATEA_WAIT_DONE : LORIE_GATEA_WAIT_FAILED);
+                rc = 0;
+            }
+        }
+    }
+    pthread_mutex_unlock(&gateARegistryMutex);
+    return rc;
+}
+
+/* Signal every registered waiter FAILED. Used when shared fatal is observed or
+ * published; waiters then read the terminal state themselves. */
+static void gateABroadcastGateAFailed(void) {
+    int i;
+    pthread_mutex_lock(&gateARegistryMutex);
+    for (i = 0; i < LORIE_GATEA_XREGISTRY_SIZE; i++) {
+        if (gateAXRegistry[i].inUse)
+            lorieGateAWaiterSignal(&gateAXRegistry[i].waiter, LORIE_GATEA_WAIT_FAILED);
+    }
+    pthread_mutex_unlock(&gateARegistryMutex);
+}
+
+/* Tombstone one generation rotation step: every entry still carrying the old
+ * tuple wakes FAILED and can never admit again (insert-replace rules govern
+ * any same-ID reuse). Entries with unterminal P3 state (pending/submitted)
+ * cannot exist across rotation without proven quiescence — in P1 nothing ever
+ * submits, so reaching that branch is corruption. */
+void lorieGateARegistryCloseGeneration(uint64_t oldNonce, uint64_t oldGeneration) {
+    int i;
+    if (oldNonce == 0 || oldGeneration == 0)
+        return;
+    pthread_mutex_lock(&gateARegistryMutex);
+    for (i = 0; i < LORIE_GATEA_XREGISTRY_SIZE; i++) {
+        struct LorieGateAXEntry *e = &gateAXRegistry[i];
+        if (!e->inUse || e->meta.nonce != oldNonce || e->meta.generation != oldGeneration)
+            continue;
+        if (e->meta.pendingCount != 0 || e->meta.lastSubmittedSerial != 0) {
+            pthread_mutex_unlock(&gateARegistryMutex);
+            lorieGateAFatalHalt("x-bump-unterminal", LORIE_GATEA_FAIL_GENERATION);
+            return; /* unreachable; silences fallthrough analysis */
+        }
+        e->meta.state = LORIE_GATEA_REG_DEAD;
+        lorieGateAWaiterSignal(&e->waiter, LORIE_GATEA_WAIT_FAILED);
+    }
+    pthread_mutex_unlock(&gateARegistryMutex);
+}
 
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_termux_x11_CmdEntryPoint_start(JNIEnv *env, __unused jclass cls, jobjectArray args) {
@@ -243,6 +408,115 @@ static Bool handleTouchEvent(__unused ClientPtr pClient, void *closure) {
     return TRUE;
 }
 
+/* ---- Gate A P1 input-thread dispatch ----
+ * Peek for magic-gated frames before the legacy parse. Flag OFF (or no magic)
+ * → legacy path byte-identical (same blocking profile: peek blocks exactly
+ * where the legacy read below would). */
+static int gateAPeekIsGateA(int fd) {
+    uint32_t magic = 0;
+    return recv(fd, &magic, sizeof(magic), MSG_PEEK) == (ssize_t)sizeof(magic)
+        && magic == LORIE_GATEA_MAGIC;
+}
+
+/* Bound-tuple match for an inbound frame. Uses acquire loads; the generation
+ * can only advance under the share path, never backwards. */
+static int gateAFrameTupleMatch(const struct LorieGateAFrame *fr) {
+    struct LorieGateAProtocol *shared = lorieGateAShared();
+    if (shared == NULL)
+        return 0;
+    return fr->nonce == lorieGateALoadU64Acquire(&shared->sessionNonce)
+        && fr->nonce != 0
+        && fr->generation == lorieGateALoadU64Acquire(&shared->generation)
+        && fr->generation != 0;
+}
+
+/* Fatal from the input thread: poison shared state (best-effort containment
+ * for the renderer side, which may still hold the mapping), wake every Gate A
+ * waiter FAILED, then halt without normal cleanup. */
+static void gateAFatalFromInput(uint32_t reason, const char *what) {
+    struct LorieGateAProtocol *shared = lorieGateAShared();
+    if (shared != NULL)
+        lorieGateAPublishFatal(shared, reason);
+    gateABroadcastGateAFailed();
+    lorieGateAFatalHalt(what, reason);
+}
+
+/* Consume exactly one Gate A frame (caller verified magic via peek), or take
+ * the fatal path. Short reads mean stream desync: FATAL while a generation is
+ * bound, deterministic drop during teardown when nothing is bound. */
+static void handleGateAFrame(int fd) {
+    struct LorieGateAFrame fr;
+    int active = lorieGateAActive();
+    if (lorieGateAReadFull(fd, &fr, sizeof(fr)) != (ssize_t)sizeof(fr)) {
+        if (active)
+            gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL, "x-short-frame");
+        return;
+    }
+    if (fr.magic != LORIE_GATEA_MAGIC || fr.version != LORIE_GATEA_PROTOCOL_VERSION
+        || fr.reserved != 0) {
+        if (active)
+            gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL, "x-bad-frame");
+        return;
+    }
+    if (!gateAFrameTupleMatch(&fr)) {
+        if (active)
+            gateAFatalFromInput(LORIE_GATEA_FAIL_GENERATION, "x-wrong-generation");
+        return;
+    }
+    switch (fr.type) {
+    case LORIE_GATEA_MSG_READY:
+    case LORIE_GATEA_MSG_REGISTER_FAILED: {
+        /* Both bodies are fixed 8 bytes: READY carries the fingerprint,
+         * FAILED carries {code,reserved} (low 32 bits are the code). One
+         * atomic lookup+check+update: unsolicited or fingerprint-mismatched
+         * replies for the bound generation are corruption (P3 inserts before
+         * sending, so a legitimate reply always matches). */
+        uint64_t bodyWord = 0;
+        int mrc;
+        if (fr.length != sizeof(bodyWord)) {
+            if (active)
+                gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL, "x-bad-result-length");
+            return;
+        }
+        if (lorieGateAReadFull(fd, &bodyWord, sizeof(bodyWord)) != (ssize_t)sizeof(bodyWord)) {
+            if (active)
+                gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL, "x-short-result");
+            return;
+        }
+        mrc = lorieGateARegistryMarkChecked(fr.bufferId, fr.nonce, fr.generation,
+            bodyWord,
+            fr.type == LORIE_GATEA_MSG_READY,
+            fr.type == LORIE_GATEA_MSG_READY ? 0 : (uint32_t)(bodyWord & 0xffffffffu));
+        if (mrc != 0 && active)
+            gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL,
+                mrc == 2 ? "x-result-fingerprint" : "x-unsolicited-result");
+        return;
+    }
+    case LORIE_GATEA_MSG_FATAL_NOTIFY: {
+        struct LorieGateAFatalNotifyBody body;
+        struct LorieGateAProtocol *shared;
+        if (fr.length != sizeof(body))
+            { if (active) gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL, "x-bad-fatal-length"); return; }
+        if (lorieGateAReadFull(fd, &body, sizeof(body)) != (ssize_t)sizeof(body))
+            { if (active) gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL, "x-short-fatal"); return; }
+        /* Hint only: correctness comes from the shared atomic. Because the
+         * renderer CASes before notifying and the flag is sticky, observing a
+         * genuine hint with a clear flag is impossible — treat it as corrupt. */
+        shared = lorieGateAShared();
+        if (shared == NULL || lorieGateAObserveFatal(shared) == 0)
+            gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL, "x-spurious-fatal-hint");
+        gateABroadcastGateAFailed();
+        return;
+    }
+    default:
+        /* REGISTER/UNREGISTER/CLOSE/CLOSED inbound to X, or unknown type:
+         * corruption in P1 (no such flows exist yet). */
+        if (active)
+            gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL, "x-unexpected-msg");
+        return;
+    }
+}
+
 void handleLorieEvents(int fd, __unused int ready, __unused void *ignored) {
     ValuatorMask mask;
     lorieEvent e = {0};
@@ -256,7 +530,24 @@ void handleLorieEvents(int fd, __unused int ready, __unused void *ignored) {
         lorieEnableClipboardSync(FALSE);
         while ((buf = LorieBufferList_first(&registeredBuffers)))
             LorieBuffer_removeFromList(buf);
+        /* P1 Gate A supplement: an active generation cannot survive HUP.
+         * Poison shared state (best-effort containment for the renderer side),
+         * wake every waiter FAILED, then halt without normal cleanup. Legacy
+         * path above is unchanged. */
+        if (lorieGateAProtoEnabled() && lorieGateAActive()) {
+            struct LorieGateAProtocol *gp = lorieGateAShared();
+            if (gp != NULL)
+                lorieGateAPublishFatal(gp, LORIE_GATEA_FAIL_GENERATION);
+            gateABroadcastGateAFailed();
+            lorieGateAFatalHalt("x-hup", LORIE_GATEA_FAIL_GENERATION);
+        }
         return;
+    }
+
+    /* P1 Gate A magic gate. OFF (or no magic) → legacy path byte-identical. */
+    if (lorieGateAProtoEnabled() && gateAPeekIsGateA(fd)) {
+        handleGateAFrame(fd);
+        goto again;
     }
 
     again:
@@ -478,6 +769,45 @@ void lorieRegisterBuffer(LorieBuffer* buffer) {
         const LorieBuffer_Desc* desc = LorieBuffer_description(buffer);
         log(INFO, "Sent shared buffer width %d stride %d height %d format %d type %d id %llu", desc->width, desc->stride, desc->height, desc->format, desc->type, desc->id);
     }
+}
+
+/* ---- Gate A P1 framed REGISTER send ----
+ * X server thread is the sole X-side Gate A writer; gateASendMutex serializes
+ * the frame + AHB handle as one logical transaction. No callers in P1 (P3
+ * admission calls it). */
+int lorieGateASendRegister(uint64_t id, uint64_t nonce, uint64_t generation,
+                           uint32_t w, uint32_t h, uint32_t stride, uint32_t format,
+                           AHardwareBuffer *ahb) {
+    struct LorieGateAFrame fr;
+    struct LorieGateARegisterBody body;
+    int ok = 0;
+    if (!lorieGateAProtoEnabled() || conn_fd == -1 || ahb == NULL || id == 0)
+        return -1;
+    fr.magic = LORIE_GATEA_MAGIC;
+    fr.version = LORIE_GATEA_PROTOCOL_VERSION;
+    fr.type = LORIE_GATEA_MSG_REGISTER;
+    fr.length = sizeof(body);
+    fr.reserved = 0;
+    fr.nonce = nonce;
+    fr.generation = generation;
+    fr.bufferId = id;
+    body.width = w;
+    body.height = h;
+    body.stride = stride;
+    body.format = format;
+    pthread_mutex_lock(&gateASendMutex);
+    if (lorieGateAWriteFull(conn_fd, &fr, sizeof(fr)) != (ssize_t)sizeof(fr))
+        goto out;
+    if (lorieGateAWriteFull(conn_fd, &body, sizeof(body)) != (ssize_t)sizeof(body))
+        goto out;
+    /* Checked raw-handle send (buffer.c wrapper guards the API-26 symbol;
+     * direct NDK calls are forbidden outside buffer.c). */
+    if (LorieBuffer_sendRawAHardwareBufferHandleChecked(ahb, conn_fd) != 0)
+        goto out;
+    ok = 1;
+out:
+    pthread_mutex_unlock(&gateASendMutex);
+    return ok ? 0 : -1;
 }
 
 void lorieUnregisterBuffer(LorieBuffer* buffer) {

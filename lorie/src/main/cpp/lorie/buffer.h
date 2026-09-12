@@ -170,6 +170,22 @@ void LorieBuffer_sendHandleToUnixSocket(LorieBuffer* _Nonnull buffer, int socket
 void LorieBuffer_recvHandleFromUnixSocket(int socketFd, LorieBuffer* _Nullable * _Nullable outBuffer);
 
 /**
+ * Release a raw AHardwareBuffer reference on any thread (see buffer.c).
+ *
+ * @param buffer buffer to release (may be NULL)
+ */
+void LorieBuffer_releaseAHardwareBuffer(AHardwareBuffer* _Nullable buffer);
+
+/**
+ * Send a raw AHardwareBuffer handle with status (see buffer.c).
+ *
+ * @param buffer buffer to send
+ * @param socketFd socket to send the handle over
+ * @return 0 on success, negative error otherwise
+ */
+int LorieBuffer_sendRawAHardwareBufferHandleChecked(AHardwareBuffer* _Nonnull buffer, int socketFd);
+
+/**
  * Send a raw AHardwareBuffer handle (not wrapped into a LorieBuffer) to an AF_UNIX socket.
  * Unlike LorieBuffer_sendHandleToUnixSocket, this does not also transmit Lorie's own private
  * LorieBuffer framing, so it can be received by a plain AHardwareBuffer_recvHandleFromUnixSocket

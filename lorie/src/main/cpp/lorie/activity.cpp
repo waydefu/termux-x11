@@ -56,6 +56,125 @@ static JNIEnv *guienv = NULL; // Must be used only in GUI thread.
 static jobject globalThiz = NULL;
 static Renderer g_renderer;
 
+/* ---- Gate A P1 renderer-side binding (xcallback/looper thread) ----
+ * Bound tuple guards every inbound Gate A frame. This thread NEVER does GL
+ * and NEVER sends Gate A frames: REGISTER outcomes go to the GL thread via
+ * lorieGateAEnqueueImport, which owns all renderer-side sends. Fatal paths
+ * bypass blocking rendezvous (a renderer stuck in a fence wait would hang
+ * teardown instead of containing it). */
+static pthread_mutex_t gateABindMutex = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t gateABoundNonce = 0;
+static uint64_t gateABoundGeneration = 0;
+static int gateABound = 0;
+
+int lorieGateABoundTuple(uint64_t *nonce, uint64_t *generation) {
+    int bound;
+    pthread_mutex_lock(&gateABindMutex);
+    bound = gateABound;
+    if (bound) {
+        *nonce = gateABoundNonce;
+        *generation = gateABoundGeneration;
+    }
+    pthread_mutex_unlock(&gateABindMutex);
+    return bound;
+}
+
+/* Bind from a freshly mapped shared state (socket-recv ordered before these
+ * bytes). Exact version + nonzero tuple required; anything else leaves the
+ * previous binding untouched (P1: any live imports at rebind time are fatal,
+ * checked by the caller via lorieGateAImportBusy). */
+static void gateABindFromState(struct lorie_shared_server_state *state) {
+    uint32_t version;
+    uint64_t nonce, generation;
+    if (state == NULL)
+        return;
+    version = lorieGateALoadU32Acquire(&state->gateA.protocolVersion);
+    nonce = lorieGateALoadU64Acquire(&state->gateA.sessionNonce);
+    generation = lorieGateALoadU64Acquire(&state->gateA.generation);
+    pthread_mutex_lock(&gateABindMutex);
+    if (version == LORIE_GATEA_PROTOCOL_VERSION && nonce != 0 && generation != 0) {
+        /* Re-share over live imports would orphan renderer GL objects this
+         * thread cannot destroy: fail closed instead. Clean shares always
+         * arrive with empty registries (HUP halts otherwise). */
+        if (gateABound && (nonce != gateABoundNonce || generation != gateABoundGeneration)
+            && lorieGateAImportBusy())
+            lorieGateAFatalHalt("r-rebind-busy", LORIE_GATEA_FAIL_GENERATION);
+        gateABoundNonce = nonce;
+        gateABoundGeneration = generation;
+        gateABound = 1;
+    } else {
+        gateABound = 0;
+    }
+    pthread_mutex_unlock(&gateABindMutex);
+}
+
+static int gateAPeekIsGateA(int fd) {
+    uint32_t magic = 0;
+    return recv(fd, &magic, sizeof(magic), MSG_PEEK) == (ssize_t)sizeof(magic)
+        && magic == LORIE_GATEA_MAGIC;
+}
+
+/* Consume exactly one REGISTER (caller verified magic via peek). Validates the
+ * frame, consumes the AHB handle in all cases (leaving it would desync the
+ * stream), then hands ONE outcome node to the GL thread. Short reads with a
+ * bound generation are FATAL (desync); without a binding they drop. */
+static void gateAHandleRegister(int fd, uint64_t nonce, uint64_t generation) {
+    struct LorieGateAFrame fr;
+    struct LorieGateARegisterBody body;
+    AHardwareBuffer *ahb = NULL;
+    AHardwareBuffer_Desc desc = {};
+    uint64_t fingerprint;
+    /* NOTE: the frame header was already peeked, not consumed. */
+    if (lorieGateAReadFull(fd, &fr, sizeof(fr)) != (ssize_t)sizeof(fr))
+        lorieGateAFatalHalt("r-short-frame", LORIE_GATEA_FAIL_PROTOCOL);
+    if (fr.magic != LORIE_GATEA_MAGIC || fr.version != LORIE_GATEA_PROTOCOL_VERSION
+        || fr.reserved != 0 || fr.type != LORIE_GATEA_MSG_REGISTER
+        || fr.length != sizeof(body) || fr.bufferId == 0
+        || fr.nonce != nonce || fr.generation != generation)
+        lorieGateAFatalHalt("r-bad-register", LORIE_GATEA_FAIL_PROTOCOL);
+    if (lorieGateAReadFull(fd, &body, sizeof(body)) != (ssize_t)sizeof(body))
+        lorieGateAFatalHalt("r-short-register", LORIE_GATEA_FAIL_PROTOCOL);
+    if (LorieBuffer_recvAHardwareBufferHandleFromUnixSocket(fd, &ahb) != 0 || ahb == NULL) {
+        /* Handle transport failed: nothing retained, GL thread reports it. */
+        lorieGateAEnqueueImport(fr.bufferId, nonce, generation, 0, NULL,
+                                LORIE_GATEA_FAIL_IMPORT);
+        return;
+    }
+    if (body.width == 0 || body.height == 0 || (int32_t)body.stride < (int32_t)body.width
+        || body.format != AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM) {
+        lorieGateAReleaseAhb(ahb);
+        lorieGateAEnqueueImport(fr.bufferId, nonce, generation, 0, NULL,
+                                LORIE_GATEA_FAIL_PROTOCOL);
+        return;
+    }
+    LorieBuffer_describeAHardwareBuffer(ahb, &desc);
+    if (desc.width != (int32_t)body.width || desc.height != (int32_t)body.height
+        || desc.stride != (int32_t)body.stride || desc.format != (int32_t)body.format) {
+        lorieGateAReleaseAhb(ahb);
+        lorieGateAEnqueueImport(fr.bufferId, nonce, generation, 0, NULL,
+                                LORIE_GATEA_FAIL_PROTOCOL);
+        return;
+    }
+    fingerprint = lorieGateAFingerprint(body.width, body.height, body.stride, body.format);
+    if (lorieGateAEnqueueImport(fr.bufferId, nonce, generation, fingerprint, ahb,
+                                LORIE_GATEA_FAIL_NONE) != 0) {
+        /* Pool full: retain nothing, GL drain observes overflow and fatals. */
+        lorieGateAReleaseAhb(ahb);
+    }
+    /* On success the AHB reference transfers to the GL thread via the node. */
+}
+
+/* Consume exactly one Gate A frame after a magic peek. Any non-REGISTER inbound
+ * type is corruption in P1 (no such flows exist yet). */
+static void gateAHandleFrame(int fd) {
+    uint64_t nonce = 0, generation = 0;
+    if (!lorieGateABoundTuple(&nonce, &generation))
+        return; /* teardown race: drop, no state change */
+    /* P1 receives REGISTER only; anything else is stream corruption. The
+     * full header is re-read inside gateAHandleRegister (peek consumed nothing). */
+    gateAHandleRegister(fd, nonce, generation);
+}
+
 static jclass FindClassOrDie(JNIEnv *env, const char* name) {
     jclass clazz = env->FindClass(name);
     if (!clazz) {
@@ -153,6 +272,16 @@ static int xcallback(int fd, int events, __unused void* data) {
         if (instance)
             env->CallVoidMethod(instance, MainActivity.clientConnectedStateChanged);
 
+        /* P1 Gate A supplement: a bound generation cannot survive HUP. Bypass
+         * the blocking setSharedState/removeAllBuffers below: a renderer stuck
+         * in a fence wait would hang teardown instead of containing it. When
+         * unbound, the legacy path below is unchanged. */
+        if (lorieGateAProtoEnabled()) {
+            uint64_t bn = 0, bg = 0;
+            if (lorieGateABoundTuple(&bn, &bg))
+                lorieGateAFatalHalt("r-hup", LORIE_GATEA_FAIL_GENERATION);
+        }
+
         ALooper_removeFd(ALooper_forThread(), fd);
         close(conn_fd);
         conn_fd = -1;
@@ -166,6 +295,16 @@ static int xcallback(int fd, int events, __unused void* data) {
         lorieEvent e = {0};
 
         again:
+        /* P1 Gate A magic gate. Bound + magic → consume exactly one frame and
+         * re-peek. Otherwise the legacy path below is byte-identical (an
+         * unbound magic-looking stream keeps legacy behavior, pre-existing). */
+        if (lorieGateAProtoEnabled() && gateAPeekIsGateA(conn_fd)) {
+            uint64_t bn = 0, bg = 0;
+            if (lorieGateABoundTuple(&bn, &bg)) {
+                gateAHandleFrame(conn_fd);
+                goto again;
+            }
+        }
         if (read(conn_fd, &e, sizeof(e)) == sizeof(e)) {
             switch(e.type) {
                 case EVENT_CLIPBOARD_SEND: {
@@ -202,6 +341,12 @@ static int xcallback(int fd, int events, __unused void* data) {
                         log(ERROR, "Failed to map server state: %s", strerror(errno));
                         state = NULL;
                     }
+
+                    /* P1 Gate A bind: no imports can exist yet on a fresh share
+                     * (any prior live imports would have halted at HUP), so
+                     * bind directly. Same-thread with all other binding users. */
+                    if (lorieGateAProtoEnabled())
+                        gateABindFromState(state);
 
                     g_renderer.setSharedState(state);
 

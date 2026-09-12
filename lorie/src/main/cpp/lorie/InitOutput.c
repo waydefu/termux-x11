@@ -16,6 +16,7 @@
 #include <sys/errno.h>
 #include <sys/socket.h>
 #include <string.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <time.h>
 #include <unistd.h>
@@ -443,6 +444,22 @@ void OsVendorInit(void) {
     lorieScreen.state->b3aTelemetry.schema_version = LORIE_B3A_SCHEMA_VERSION;
     lorieB3aCaptureProcessStart(&lorieScreen.state->b3aTelemetry, false);
 
+    if (lorieGateAProtoEnabled()) {
+        /* P1 generation identity: exact-length randomness only. Raw syscall
+         * (InitOutput precedent for version-gated libc wrappers): the libc
+         * getrandom wrapper is hidden below API 28 headers. Any short read
+         * or error leaves sessionNonce zero, which permanently disables Gate A
+         * (a generation can never bind with nonce 0). No weak fallback.
+         * generation stays 0 (inactive) until the first share below. */
+        uint64_t gateaNonce = 0;
+        long gateaGot = syscall(SYS_getrandom, &gateaNonce, sizeof(gateaNonce), 0);
+        if (gateaGot == (long)sizeof(gateaNonce) && gateaNonce != 0) {
+            lorieScreen.state->gateA.sessionNonce = gateaNonce;
+        } else {
+            log(ERROR, "Gate A disabled: session nonce unavailable");
+        }
+    }
+
     pthread_mutexattr_init(&mutex_attr);
     pthread_mutexattr_setpshared(&mutex_attr, PTHREAD_PROCESS_SHARED);
     pthread_mutexattr_settype(&mutex_attr, PTHREAD_MUTEX_RECURSIVE);
@@ -479,8 +496,48 @@ void lorieSetRendererWakeupCond(int fd) {
 
 void lorieActivityConnected(void) {
     pvfb->state->drawRequested = pvfb->state->cursor.updated = true;
+    if (lorieGateAProtoEnabled() && pvfb->state->gateA.sessionNonce != 0) {
+        /* P1: every share starts a fresh generation. If the previous tuple was
+         * still bound, poison it first: the renderer may still hold the old
+         * mapping, and old work must fail closed, never carry over. u64 wrap
+         * is FATAL by protocol; saturate instead of wrapping. */
+        if (pvfb->state->gateA.generation != 0) {
+            lorieGateAPublishFatal(&pvfb->state->gateA, LORIE_GATEA_FAIL_GENERATION);
+            lorieGateARegistryCloseGeneration(pvfb->state->gateA.sessionNonce,
+                                              pvfb->state->gateA.generation);
+        }
+        if (pvfb->state->gateA.generation == UINT64_MAX) {
+            log(ERROR, "Gate A disabled: generation exhausted");
+            pvfb->state->gateA.sessionNonce = 0;
+        } else {
+            lorieGateAProtocolInit(&pvfb->state->gateA,
+                                   pvfb->state->gateA.sessionNonce,
+                                   pvfb->state->gateA.generation + 1);
+        }
+    }
     lorieSendSharedServerState(pvfb->stateFd);
     lorieRegisterBuffer(LORIE_BUFFER_FROM_PIXMAP(pScreenPtr->devPrivate));
+}
+
+/* P1 X-side generation telescope for cmdentrypoint.cpp. NULL unless the flag
+ * is on and X has a live shared mapping. */
+struct LorieGateAProtocol *lorieGateAShared(void) {
+    if (!lorieGateAProtoEnabled() || !pvfb || !pvfb->state)
+        return NULL;
+    return &pvfb->state->gateA;
+}
+
+/* True iff X-side Gate A generation is bound and unpoisoned. */
+int lorieGateAActive(void) {
+    struct LorieGateAProtocol *p = lorieGateAShared();
+    uint64_t nonce, generation;
+    if (!p)
+        return 0;
+    nonce = lorieGateALoadU64Acquire(&p->sessionNonce);
+    generation = lorieGateALoadU64Acquire(&p->generation);
+    if (nonce == 0 || generation == 0)
+        return 0;
+    return lorieGateAObserveFatal(p) == 0;
 }
 
 static LoriePixmapPriv* lorieRootWindowPixmapPriv(void) {

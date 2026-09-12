@@ -157,6 +157,297 @@ static void b3aMarkBatchFence(struct lorie_shared_server_state *state, uint64_t 
     b3aBatchRecordCount = 0;
 }
 
+/* ---- Gate A P1 renderer-side import state ----
+ * xcallback enqueues validated REGISTER outcomes; the GL thread below drains,
+ * validates GL resources, and owns ALL renderer-side Gate A sends (single
+ * writer). Legacy buffer lists are never touched by Gate A objects. */
+#define LORIE_GATEA_MAX_PENDING 8
+#define LORIE_GATEA_MAX_READY 16
+struct GateAPendingImport {
+    int occupied;
+    uint64_t id, nonce, generation, fingerprint;
+    AHardwareBuffer *ahb;   /* NULL iff receive/descriptor failed upstream */
+    uint32_t failCode;      /* LORIE_GATEA_FAIL_NONE iff ahb valid */
+};
+struct GateAReadyImport {
+    int occupied;
+    uint64_t id, nonce, generation, fingerprint;
+    AHardwareBuffer *ahb;
+    EGLClientBuffer clientBuffer;
+    EGLImage image;
+    GLuint texture;
+};
+static struct GateAPendingImport gateAPending[LORIE_GATEA_MAX_PENDING];
+static struct GateAReadyImport gateAReady[LORIE_GATEA_MAX_READY];
+static pthread_mutex_t gateAImportMutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t gateASendMutex = PTHREAD_MUTEX_INITIALIZER;
+static int gateAImportOverflow = 0;
+
+/* Transfer one REGISTER outcome from the looper thread to the GL thread.
+ * Ownership: on 0 the AHB reference (if any) transfers with the node; on
+ * nonzero the caller retains it and must release. */
+int lorieGateAEnqueueImport(uint64_t id, uint64_t nonce, uint64_t generation,
+                            uint64_t fingerprint, AHardwareBuffer *ahb, uint32_t failCode) {
+    int i;
+    if (id == 0 || nonce == 0 || generation == 0)
+        return -1;
+    pthread_mutex_lock(&gateAImportMutex);
+    for (i = 0; i < LORIE_GATEA_MAX_PENDING; i++) {
+        if (!gateAPending[i].occupied) {
+            gateAPending[i].occupied = 1;
+            gateAPending[i].id = id;
+            gateAPending[i].nonce = nonce;
+            gateAPending[i].generation = generation;
+            gateAPending[i].fingerprint = fingerprint;
+            gateAPending[i].ahb = ahb;
+            gateAPending[i].failCode = failCode;
+            pthread_mutex_unlock(&gateAImportMutex);
+            return 0;
+        }
+    }
+    gateAImportOverflow = 1;
+    pthread_mutex_unlock(&gateAImportMutex);
+    return -1;
+}
+
+/* Nonzero iff any pending node, ready entry, or sticky overflow exists.
+ * Used by the activity re-share path: live imports forbid silent rebind. */
+int lorieGateAImportBusy(void) {
+    int i, busy = 0;
+    pthread_mutex_lock(&gateAImportMutex);
+    if (gateAImportOverflow)
+        busy = 1;
+    for (i = 0; !busy && i < LORIE_GATEA_MAX_PENDING; i++)
+        busy = gateAPending[i].occupied;
+    for (i = 0; !busy && i < LORIE_GATEA_MAX_READY; i++)
+        busy = gateAReady[i].occupied;
+    pthread_mutex_unlock(&gateAImportMutex);
+    return busy;
+}
+
+/* Sole renderer-side Gate A frame writer path (GL thread only). Returns 0 on
+ * full delivery. Send failure means the generation is doomed via HUP; callers
+ * tear down what they built and log. */
+static int gateASendFrame(uint64_t id, uint64_t nonce, uint64_t generation,
+                          uint32_t type, const void *body, uint32_t bodyLen) {
+    struct LorieGateAFrame fr;
+    int ok = 0;
+    if (conn_fd == -1)
+        return -1;
+    fr.magic = LORIE_GATEA_MAGIC;
+    fr.version = LORIE_GATEA_PROTOCOL_VERSION;
+    fr.type = (uint16_t)type;
+    fr.length = bodyLen;
+    fr.reserved = 0;
+    fr.nonce = nonce;
+    fr.generation = generation;
+    fr.bufferId = id;
+    pthread_mutex_lock(&gateASendMutex);
+    if (lorieGateAWriteFull(conn_fd, &fr, sizeof(fr)) == (ssize_t)sizeof(fr)
+        && (bodyLen == 0 || lorieGateAWriteFull(conn_fd, body, bodyLen) == (ssize_t)bodyLen))
+        ok = 1;
+    pthread_mutex_unlock(&gateASendMutex);
+    return ok ? 0 : -1;
+}
+
+static void gateASendReady(uint64_t id, uint64_t nonce, uint64_t generation, uint64_t fingerprint) {
+    struct LorieGateAReadyBody body;
+    body.fingerprint = fingerprint;
+    if (gateASendFrame(id, nonce, generation, LORIE_GATEA_MSG_READY, &body, sizeof(body)) != 0)
+        loge("gatea: READY send failed id=%llu (generation doomed via HUP path)", (unsigned long long)id);
+}
+
+static void gateASendRegisterFailed(uint64_t id, uint64_t nonce, uint64_t generation, uint32_t code) {
+    struct LorieGateARegisterFailedBody body;
+    body.code = code;
+    body.reserved = 0;
+    if (gateASendFrame(id, nonce, generation, LORIE_GATEA_MSG_REGISTER_FAILED, &body, sizeof(body)) != 0)
+        loge("gatea: REGISTER_FAILED send failed id=%llu (generation doomed via HUP path)", (unsigned long long)id);
+}
+
+/* Validate one dequeued import on the GL thread (context current, same
+ * guarantees as the threadLoop attach path). Emits READY or REGISTER_FAILED.
+ * Destroys partials in reverse order; releases the AHB ref on every exit. */
+static void gateAValidateImport(struct lorie_shared_server_state *st, uint64_t id, uint64_t nonce, uint64_t generation,
+                                uint64_t fingerprint, AHardwareBuffer *ahb) {
+    EGLClientBuffer clientBuffer = NULL;
+    EGLImage image = NULL;
+    GLuint texture = 0;
+    AHardwareBuffer_Desc desc;
+    GLenum err;
+    int i;
+    {
+        /* Generation may have rotated while queued: stale nodes die quietly
+         * (X already poisoned or superseded them; sending for them now would
+         * corrupt the new generation). */
+        uint64_t bn = 0, bg = 0;
+        if (!lorieGateABoundTuple(&bn, &bg) || bn != nonce || bg != generation) {
+            lorieGateAReleaseAhb(ahb);
+            return;
+        }
+    }
+    if (eglGetCurrentDisplay() == EGL_NO_DISPLAY
+        || !lorieEglHasNativeClientBuffer() || !lorieEglGetNativeClientBufferANDROID) {
+        lorieGateAReleaseAhb(ahb);
+        gateASendRegisterFailed(id, nonce, generation, LORIE_GATEA_FAIL_IMPORT);
+        return;
+    }
+    clientBuffer = lorieEglGetNativeClientBufferANDROID(ahb);
+    if (clientBuffer == NULL) {
+        lorieGateAReleaseAhb(ahb);
+        gateASendRegisterFailed(id, nonce, generation, LORIE_GATEA_FAIL_IMPORT);
+        return;
+    }
+    LorieBuffer_describeAHardwareBuffer(ahb, &desc);
+    /* P1 admits server-owned BGRA only; anything else is sender corruption. */
+    if (desc.width <= 0 || desc.height <= 0 || desc.stride < desc.width
+        || desc.format != AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM
+        || lorieGateAFingerprint((uint32_t)desc.width, (uint32_t)desc.height,
+                                 (uint32_t)desc.stride, (uint32_t)desc.format) != fingerprint) {
+        lorieGateAReleaseAhb(ahb);
+        gateASendRegisterFailed(id, nonce, generation, LORIE_GATEA_FAIL_PROTOCOL);
+        return;
+    }
+    if (!lorieEglHasImage()) {
+        lorieGateAReleaseAhb(ahb);
+        gateASendRegisterFailed(id, nonce, generation, LORIE_GATEA_FAIL_IMPORT);
+        return;
+    }
+    {
+        const EGLint attrs[] = { EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE };
+        image = lorieEglCreateImageKHR(eglGetCurrentDisplay(), EGL_NO_CONTEXT,
+                                       EGL_NATIVE_BUFFER_ANDROID, clientBuffer, attrs);
+    }
+    if (image == NULL) {
+        lorieGateAReleaseAhb(ahb);
+        gateASendRegisterFailed(id, nonce, generation, LORIE_GATEA_FAIL_IMPORT);
+        return;
+    }
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    if (!lorieGlesHasEglImage()) {
+        glDeleteTextures(1, &texture);
+        lorieEglDestroyImageKHR(eglGetCurrentDisplay(), image);
+        lorieGateAReleaseAhb(ahb);
+        gateASendRegisterFailed(id, nonce, generation, LORIE_GATEA_FAIL_IMPORT);
+        return;
+    }
+    lorieGlEGLImageTargetTexture2DOES(GL_TEXTURE_2D, image);
+    err = GL_NO_ERROR;
+    for (GLenum e = glGetError(); e != GL_NO_ERROR; e = glGetError())
+        err = e;
+    if (err != GL_NO_ERROR) {
+        glDeleteTextures(1, &texture);
+        lorieEglDestroyImageKHR(eglGetCurrentDisplay(), image);
+        lorieGateAReleaseAhb(ahb);
+        gateASendRegisterFailed(id, nonce, generation, LORIE_GATEA_FAIL_DRAW);
+        return;
+    }
+    pthread_mutex_lock(&gateAImportMutex);
+    for (i = 0; i < LORIE_GATEA_MAX_READY; i++) {
+        if (gateAReady[i].occupied && gateAReady[i].id == id
+            && gateAReady[i].nonce == nonce && gateAReady[i].generation == generation)
+            break;
+    }
+    if (i < LORIE_GATEA_MAX_READY) {
+        /* Duplicate READY id in one generation: the sender registered twice
+         * without retiring. P3 never does this; poison deterministically here
+         * instead of aliasing (no reliance on a later observer). */
+        pthread_mutex_unlock(&gateAImportMutex);
+        glDeleteTextures(1, &texture);
+        lorieEglDestroyImageKHR(eglGetCurrentDisplay(), image);
+        lorieGateAReleaseAhb(ahb);
+        if (st != NULL)
+            lorieGateAPublishFatal(&st->gateA, LORIE_GATEA_FAIL_PROTOCOL);
+        loge("gatea: duplicate READY id=%llu in generation; poisoned", (unsigned long long)id);
+        return;
+    }
+    for (i = 0; i < LORIE_GATEA_MAX_READY; i++) {
+        if (!gateAReady[i].occupied) {
+            gateAReady[i].occupied = 1;
+            gateAReady[i].id = id;
+            gateAReady[i].nonce = nonce;
+            gateAReady[i].generation = generation;
+            gateAReady[i].fingerprint = fingerprint;
+            gateAReady[i].ahb = ahb;
+            gateAReady[i].clientBuffer = clientBuffer;
+            gateAReady[i].image = image;
+            gateAReady[i].texture = texture;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&gateAImportMutex);
+    if (i >= LORIE_GATEA_MAX_READY) {
+        /* Registry full: deterministic resource failure, not corruption. */
+        glDeleteTextures(1, &texture);
+        lorieEglDestroyImageKHR(eglGetCurrentDisplay(), image);
+        lorieGateAReleaseAhb(ahb);
+        gateASendRegisterFailed(id, nonce, generation, LORIE_GATEA_FAIL_IMPORT);
+        return;
+    }
+    gateASendReady(id, nonce, generation, fingerprint);
+    /* AHB reference now lives in the registry until UNREGISTER (P10+). */
+}
+
+/* Drain validated imports on the GL thread. Runs inside threadLoop with the GL
+ * context current. Overflow observed at enqueue poisons the generation: the
+ * pending nodes are released unused and nothing is validated. */
+static void gateADrainPendingImports(struct lorie_shared_server_state *st) {
+    AHardwareBuffer *toRelease[LORIE_GATEA_MAX_PENDING];
+    int nRelease = 0, hadOverflow = 0, i;
+    struct {
+        uint64_t id, nonce, generation, fingerprint;
+        AHardwareBuffer *ahb;
+        uint32_t failCode;
+    } work[LORIE_GATEA_MAX_PENDING];
+    int nWork = 0;
+    if (st == NULL)
+        return;
+    pthread_mutex_lock(&gateAImportMutex);
+    hadOverflow = gateAImportOverflow;
+    gateAImportOverflow = 0;
+    for (i = 0; i < LORIE_GATEA_MAX_PENDING; i++) {
+        if (!gateAPending[i].occupied)
+            continue;
+        if (hadOverflow) {
+            if (gateAPending[i].ahb != NULL)
+                toRelease[nRelease++] = gateAPending[i].ahb;
+            gateAPending[i].occupied = 0;
+            gateAPending[i].ahb = NULL;
+        } else {
+            work[nWork].id = gateAPending[i].id;
+            work[nWork].nonce = gateAPending[i].nonce;
+            work[nWork].generation = gateAPending[i].generation;
+            work[nWork].fingerprint = gateAPending[i].fingerprint;
+            work[nWork].ahb = gateAPending[i].ahb;
+            work[nWork].failCode = gateAPending[i].failCode;
+            nWork++;
+            gateAPending[i].occupied = 0;
+            gateAPending[i].ahb = NULL;
+        }
+    }
+    pthread_mutex_unlock(&gateAImportMutex);
+    for (i = 0; i < nRelease; i++)
+        lorieGateAReleaseAhb(toRelease[i]);
+    if (hadOverflow) {
+        lorieGateAPublishFatal(&st->gateA, LORIE_GATEA_FAIL_PROTOCOL);
+        loge("gatea: pending-import overflow; generation poisoned");
+        return;
+    }
+    for (i = 0; i < nWork; i++) {
+        if (work[i].failCode != LORIE_GATEA_FAIL_NONE) {
+            /* Receive/descriptor failure upstream: nothing retained, report. */
+            gateASendRegisterFailed(work[i].id, work[i].nonce, work[i].generation,
+                                    work[i].failCode);
+            continue;
+        }
+        gateAValidateImport(st, work[i].id, work[i].nonce, work[i].generation,
+                            work[i].fingerprint, work[i].ahb);
+    }
+}
+
 void Renderer::bindTexture(GLuint id) const {
     glBindTexture(GL_TEXTURE_2D, id);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filtering);
@@ -1265,6 +1556,12 @@ void Renderer::threadLoop() {
             waitingForBuffers = false;
         }
         pthread_spin_unlock(&bufferLock);
+
+        /* P1 Gate A: drain validated imports on the GL thread. OFF → one
+         * predictable branch; empty pending list → immediate return. Legacy
+         * attach path above is untouched. */
+        if (lorieGateAProtoEnabled())
+            gateADrainPendingImports(state);
 
         pthread_cond_signal(&stateChangeFinishCond);
         pthread_mutex_unlock(&stateLock);

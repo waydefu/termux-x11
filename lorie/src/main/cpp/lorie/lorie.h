@@ -589,6 +589,63 @@ static inline __always_inline uint64_t lorieGateAFingerprint(uint32_t w, uint32_
     return f;
 }
 
+/* ---- Gate A P1 cross-TU entry points ----
+ * Defined in cmdentrypoint.cpp / renderer.cpp / activity.cpp / InitOutput.c.
+ * All dormant unless TERMUX_X11_GATEA_PROTO=1 and a generation is bound+active.
+ * P3 admission will be the first caller of the send/insert paths. */
+
+/* Fail-closed process halt for Gate A fatal paths. Logs, then exits without
+ * running cleanup that assumes GPU quiescence (EGL/driver cleanup follows
+ * process teardown). Exit 127 separates protocol fatal from generic _exit(1). */
+__attribute__((noreturn)) static inline __always_inline void lorieGateAFatalHalt(const char *what, uint32_t reason) {
+    __android_log_print(ANDROID_LOG_FATAL, "gatea-a1", "GATEA_FATAL_HALT what=%s reason=%u", what, (unsigned)reason);
+    _exit(127);
+}
+
+/* X-side framed REGISTER send (cmdentrypoint.cpp). No callers in P1 (P3
+ * admission calls it). Returns 0 on full frame+handle delivery, -1 otherwise. */
+int lorieGateASendRegister(uint64_t id, uint64_t nonce, uint64_t generation,
+                           uint32_t w, uint32_t h, uint32_t stride, uint32_t format,
+                           AHardwareBuffer *ahb);
+
+/* X-side registry (cmdentrypoint.cpp). Pool-stable slots: waiter addresses
+ * stay valid for process lifetime, so input-thread signaling needs no
+ * refcounting. Insert arms nothing (P3 arms before send); mark updates state
+ * and signals the entry waiter. */
+int lorieGateARegistryInsert(uint64_t nonce, uint64_t generation, uint64_t id, uint64_t fingerprint);
+int lorieGateARegistryFind(uint64_t id, struct LorieGateABufferMeta *out);
+int lorieGateARegistryMarkChecked(uint64_t id, uint64_t nonce, uint64_t generation,
+                                  uint64_t fingerprint, int ready, uint32_t code);
+struct LorieGateAWaiter *lorieGateARegistryWaiter(uint64_t id);
+/* Tombstone every entry of an old generation (wake waiters FAILED). Called on
+ * generation rotation; entries never resurrect (insert-replace rules apply). */
+void lorieGateARegistryCloseGeneration(uint64_t oldNonce, uint64_t oldGeneration);
+
+/* X-side shared-state telescope (InitOutput.c). */
+struct LorieGateAProtocol *lorieGateAShared(void);
+int lorieGateAActive(void);
+
+/* Renderer-side import enqueue (renderer.cpp). Called once per REGISTER from
+ * activity.cpp xcallback; transfers the received AHB reference. Returns 0 if
+ * queued for GL-thread validation. */
+int lorieGateAEnqueueImport(uint64_t id, uint64_t nonce, uint64_t generation,
+                            uint64_t fingerprint, AHardwareBuffer *ahb, uint32_t failCode);
+
+/* Renderer import occupancy for the activity re-share path (renderer.cpp).
+ * Nonzero iff any pending node, ready entry, or sticky overflow exists. */
+int lorieGateAImportBusy(void);
+
+/* Release a received AHB reference on any thread (refcounted, no GL needed).
+ * Delegates to the availability-guarded buffer.c wrapper: direct NDK calls
+ * are forbidden outside buffer.c (minSdk 24 vs API-26 symbols). */
+static inline __always_inline void lorieGateAReleaseAhb(AHardwareBuffer *ahb) {
+    if (ahb != NULL)
+        LorieBuffer_releaseAHardwareBuffer(ahb);
+}
+
+/* Renderer-side bound tuple (activity.cpp). Returns nonzero iff bound. */
+int lorieGateABoundTuple(uint64_t *nonce, uint64_t *generation);
+
 struct lorie_shared_server_state {
     /*
      * Renderer and X server are separated into 2 different processes.
