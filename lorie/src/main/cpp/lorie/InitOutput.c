@@ -295,6 +295,16 @@ static char *p2a3PutHex(char *p, char *e, unsigned long v) {
     return p;
 }
 
+static char *p2a3PutHex64(char *p, char *e, uint64_t v) {
+    static const char H[] = "0123456789abcdef";
+    int i;
+
+    p = p2a3PutStr(p, e, "0x");
+    for (i = 15; i >= 0 && p < e; i--)
+        *p++ = H[(v >> (i * 4)) & 0xf];
+    return p;
+}
+
 static void p2a3WriteLine(const char *buf, size_t n) {
     if (!buf || n == 0)
         return;
@@ -304,6 +314,33 @@ static void p2a3WriteLine(const char *buf, size_t n) {
         (void) write(p2a3SnapFd, buf, n);
         (void) write(p2a3SnapFd, "\n", 1);
         (void) fsync(p2a3SnapFd);
+    }
+}
+
+/* 64 little-endian qwords (512 bytes). Authority for layout; Uctx parse is advisory. */
+static void p2a3DumpUraw(const void *uctx) {
+    const unsigned char *b = (const unsigned char *) uctx;
+    char buf[192];
+    unsigned q, i, k;
+
+    if (!b)
+        return;
+    for (q = 0; q < 64; q += 4) {
+        char *p = buf;
+        char *e = buf + sizeof(buf) - 1;
+
+        p = p2a3PutStr(p, e, "Uraw ");
+        p = p2a3PutDec(p, e, (long) q);
+        for (i = 0; i < 4; i++) {
+            uint64_t v = 0;
+
+            p = p2a3PutStr(p, e, " ");
+            for (k = 0; k < 8; k++)
+                v |= ((uint64_t) b[(q + i) * 8 + k]) << (k * 8);
+            p = p2a3PutHex64(p, e, v);
+        }
+        *p = 0;
+        p2a3WriteLine(buf, (size_t) (p - buf));
     }
 }
 
@@ -363,6 +400,16 @@ static void p2a3CrashHandler(int signo, siginfo_t *si, void *uctx) {
     p2a3WriteLine(buf, (size_t) (p - buf));
 
     p = buf;
+    p = p2a3PutStr(p, e, "Upid pid=");
+    p = p2a3PutDec(p, e, (long) getpid());
+    p = p2a3PutStr(p, e, " tid=");
+    p = p2a3PutDec(p, e, syscall(SYS_gettid));
+    *p = 0;
+    p2a3WriteLine(buf, (size_t) (p - buf));
+
+    p2a3DumpUraw(uctx);
+
+    p = buf;
     p = p2a3PutStr(p, e, "Ssig signo=");
     p = p2a3PutDec(p, e, signo);
     p = p2a3PutStr(p, e, " code=");
@@ -373,7 +420,7 @@ static void p2a3CrashHandler(int signo, siginfo_t *si, void *uctx) {
     *p = 0;
     p2a3WriteLine(buf, (size_t) (p - buf));
 
-    /* Auxiliary: not async-signal-safe. Uctx line above is the primary evidence. */
+    /* Unsafe auxiliary only. Original-fault authority is siginfo + Uraw. */
     xorg_backtrace();
     _exit(128 + signo);
 }
