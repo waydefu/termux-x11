@@ -66,7 +66,14 @@ extern bool lorieEglHasFence(void);
 /* ---- Gate A P2 forward declarations (defined beside exaGpuComp below) ---- */
 static int gateAPairActive(void);
 static int gateAPairOverlapsBuffer(LorieBuffer *buf);
-static int gateAUsed = 0; /* any direct publish this process (CloseScreen poison) */
+static int gateARetireBuffer(LorieBuffer *buf);
+static void gateACloseGeneration(void);
+__attribute__((noreturn)) static void gateAXFatal(const char *what,
+                                                   uint32_t reason,
+                                                   uint64_t serial);
+static int gateAUsed = 0;
+static int gateAClosing = 0; /* clean close rejects new admission */
+static int gateAInternalRepair = 0; /* SUCCESS-only repair may access live lease */
 
 struct vblank {
     struct xorg_list link;
@@ -521,6 +528,7 @@ void lorieActivityConnected(void) {
             lorieGateAProtocolInit(&pvfb->state->gateA,
                                    pvfb->state->gateA.sessionNonce,
                                    pvfb->state->gateA.generation + 1);
+            gateAClosing = 0;
         }
     }
     lorieSendSharedServerState(pvfb->stateFd);
@@ -535,6 +543,12 @@ struct LorieGateAProtocol *lorieGateAShared(void) {
     return &pvfb->state->gateA;
 }
 
+struct lorie_shared_server_state *lorieGateASharedState(void) {
+    if (!lorieGateAProtoEnabled() || !pvfb || !pvfb->state)
+        return NULL;
+    return pvfb->state;
+}
+
 /* True iff X-side Gate A generation is bound and unpoisoned. P2: also
  * requires the shared atomics to be lock-free at their actual addresses;
  * otherwise nothing may admit (fail-closed to D0a). */
@@ -543,7 +557,7 @@ int lorieGateAActive(void) {
     uint64_t nonce, generation;
     if (!p)
         return 0;
-    if (!lorieGateAAtomicsLockFree(p))
+    if (!lorieGateASharedAtomicsLockFree(pvfb->state))
         return 0;
     nonce = lorieGateALoadU64Acquire(&p->sessionNonce);
     generation = lorieGateALoadU64Acquire(&p->generation);
@@ -1151,17 +1165,10 @@ static Bool lorieCloseScreen(ScreenPtr pScreen) {
 
     if (pvfb->state)
         lorieB3aDump(&pvfb->state->b3aTelemetry, "CloseScreen");
-    /* P2: a live lease at CloseScreen is mid-transaction teardown = corruption.
-     * Otherwise, if Gate A was ever used, poison the generation: READY imports
-     * and EGL objects are generation-lived, and full UNREGISTER/drain is a
-     * later phase — no post-reset admission may trust them. Harmless at real
-     * shutdown; the share path re-initializes on reconnect. */
-    if (lorieGateAProtoEnabled()) {
-        if (gateAPairActive())
-            lorieGateAFatalHalt("x-close-in-lease", LORIE_GATEA_FAIL_CLOSE);
-        if (gateAUsed && pvfb->state)
-            lorieGateAPublishFatal(&pvfb->state->gateA, LORIE_GATEA_FAIL_CLOSE);
-    }
+    /* Clean close is a protocol drain, never a fatal-shaped cleanup. Fatal
+     * conditions inside the drain terminate before normal resource release. */
+    if (lorieGateAProtoEnabled())
+        gateACloseGeneration();
 
     if (pvfb->xrenderProbeInstalled && ps &&
         ps->Composite == lorieCompositeProbe && pvfb->xrenderSavedComposite)
@@ -1733,6 +1740,11 @@ static Bool lorieTryScheduleGpuBlit(PixmapPtr pixmap, PixmapPtr dst, RegionPtr u
             gpuCopyAttempts++;
         return FALSE;
     }
+    if (lorieGateAProtoEnabled()
+        && lorieGateAPrepareLegacyMeta(
+            &pvfb->state->gateADirect[writeIndex % LORIE_GPU_COPY_QUEUE_CAPACITY]) != 0)
+        lorieGateAFatalHalt("x-legacy-slot-still-direct",
+                            LORIE_GATEA_FAIL_PROTOCOL);
 
     // Make sure the renderer has (or will have) this texture. Idempotent if already registered.
     lorieRegisterBuffer(srcBuffer);
@@ -1882,6 +1894,11 @@ static Bool lorieTryScheduleGpuSolid(PixmapPtr dst, int x1, int y1, int x2, int 
     readIndex = lorieGateAObserveReadIndex(&pvfb->state->gpuCopyQueue.readIndex);
     if (writeIndex - readIndex >= LORIE_GPU_COPY_QUEUE_CAPACITY)
         return FALSE;
+    if (lorieGateAProtoEnabled()
+        && lorieGateAPrepareLegacyMeta(
+            &pvfb->state->gateADirect[writeIndex % LORIE_GPU_COPY_QUEUE_CAPACITY]) != 0)
+        lorieGateAFatalHalt("x-solid-slot-still-direct",
+                            LORIE_GATEA_FAIL_PROTOCOL);
 
     dstDesc = LorieBuffer_description(dstBuffer);
     dstIsRoot = dst == pScreenPtr->devPrivate;
@@ -2198,6 +2215,31 @@ static int gateAPairActive(void) {
     return gateAPair.state != GATEA_PAIR_NONE;
 }
 
+/* Conservative P2 serialization: queue emptiness, slot consumption and GPU
+ * terminality are distinct checks. Every direct reserve must pass all three. */
+static int gateAQueueSemanticallyQuiescent(void) {
+    struct lorie_shared_server_state *st = pvfb ? pvfb->state : NULL;
+    uint32_t wi, ri, fatal;
+    uint64_t completed, failed, last;
+    if (!st || gateAClosing || !lorieGateAActive())
+        return 0;
+    fatal = lorieGateAObserveFatal(&st->gateA);
+    failed = lorieGateAObserveFirstFailed(&st->gateA);
+    if (fatal != 0 || failed != 0)
+        return 0;
+    wi = lorieGateAObserveWriteIndex(&st->gpuCopyQueue.writeIndex);
+    ri = lorieGateAObserveReadIndex(&st->gpuCopyQueue.readIndex);
+    if (wi != ri)
+        return 0; /* queue not empty / slots not all consumed */
+    completed = lorieGateAObserveCompleted(&st->gpuCopyQueue.completedSerial);
+    last = pvfb->gpuCopySerialCounter;
+    if (completed != last)
+        return 0; /* consumed is not the same as GPU terminal */
+    return last == 0
+        || lorieGateADeriveResult(completed, failed, fatal, last)
+            == LORIE_GATEA_RESULT_SUCCESS;
+}
+
 static uint64_t gateABufferId(LorieBuffer *buf) {
     const LorieBuffer_Desc *d;
     if (!buf)
@@ -2317,6 +2359,9 @@ static Bool gateAEnsureReady(LorieBuffer *buf) {
 static void gateAPairUndoReserve(void) {
     if (gateAPair.state != GATEA_PAIR_RESERVED)
         return;
+    if (lorieGateARegistryMarkPairReleased(gateAPair.srcId,
+                                            gateAPair.dstId, 0) != 0)
+        lorieGateAFatalHalt("x-unreserve-registry", LORIE_GATEA_FAIL_PROTOCOL);
     if (gateAPair.srcBuf) {
         LorieBuffer_gpuCopyPendingDec(gateAPair.srcBuf);
         LorieBuffer_release(gateAPair.srcBuf);
@@ -2330,7 +2375,13 @@ static void gateAPairUndoReserve(void) {
         pvfb->rootGpuCopyPending--;
     }
     gateAPair.dstIsRoot = 0;
+    lorieGateATrace(pvfb->state, LORIE_GATEA_ROLE_X,
+                    LORIE_GATEA_EVENT_LEASE_RELEASE,
+                    gateAPair.generation, 0, gateAPair.srcId, gateAPair.dstId);
+    lorieGateACounterAdd(pvfb->state, LORIE_GATEA_COUNTER_LEASE_CURRENT, -1);
     gateAPair.state = GATEA_PAIR_NONE;
+    gateAPair.nonce = gateAPair.generation = 0;
+    gateAPair.srcId = gateAPair.dstId = 0;
 }
 
 /* P2 forward declarations using X picture types (visible from here on). */
@@ -2539,16 +2590,10 @@ static Bool gateADirectTryPrepare(int op, PicturePtr pSrc, PicturePtr pMask, Pic
         pDstPix->devPrivate.ptr = dp->locked;
         dp->wasLocked = FALSE;
     }
-    /* Before the first direct submit, the whole legacy queue must be
-     * quiescent: this closes the existing Present OOM/early-ACK cell, whose
-     * dropped ref cannot otherwise prove an older write finished. */
-    if (!gateAUsed) {
-        if (lorieGateAObserveCompleted(&pvfb->state->gpuCopyQueue.completedSerial)
-                != pvfb->gpuCopySerialCounter
-            || lorieGateAObserveReadIndex(&pvfb->state->gpuCopyQueue.readIndex)
-                != lorieGateAObserveWriteIndex(&pvfb->state->gpuCopyQueue.writeIndex))
-            return FALSE;
-    }
+    /* Every direct reserve is globally serialized against all prior renderer
+     * work, including Present entries whose pending refs were early-ACKed. */
+    if (!gateAQueueSemanticallyQuiescent())
+        return FALSE;
     wi = lorieGateAObserveWriteIndex(&pvfb->state->gpuCopyQueue.writeIndex);
     ri = lorieGateAObserveReadIndex(&pvfb->state->gpuCopyQueue.readIndex);
     if (wi - ri >= LORIE_GPU_COPY_QUEUE_CAPACITY)
@@ -2560,6 +2605,8 @@ static Bool gateADirectTryPrepare(int op, PicturePtr pSrc, PicturePtr pMask, Pic
          * yet, nothing published — D0a stays legal for the whole op. */
         return FALSE;
     }
+    if (lorieGateARegistryMarkPairReserved(sd->id, dd->id) != 0)
+        return FALSE;
     gateAPair.state = GATEA_PAIR_RESERVED;
     gateAPair.nonce = lorieGateALoadU64Acquire(&shared->sessionNonce);
     gateAPair.generation = lorieGateALoadU64Acquire(&shared->generation);
@@ -2576,6 +2623,10 @@ static Bool gateADirectTryPrepare(int op, PicturePtr pSrc, PicturePtr pMask, Pic
         LorieBuffer_gpuCopyPendingInc(db);
     }
     exaGpuComp.dstBuf = dstIsRoot ? NULL : db;
+    lorieGateACounterAdd(pvfb->state, LORIE_GATEA_COUNTER_LEASE_CURRENT, 1);
+    lorieGateATrace(pvfb->state, LORIE_GATEA_ROLE_X,
+                    LORIE_GATEA_EVENT_LEASE_RESERVED,
+                    gateAPair.generation, 0, gateAPair.srcId, gateAPair.dstId);
     return TRUE;
 }
 
@@ -2605,6 +2656,129 @@ static LorieGateAResult gateAWaitTerminal(uint64_t serial) {
             return LORIE_GATEA_RESULT_FATAL;
         usleep(200);
     }
+}
+
+__attribute__((noreturn)) static void gateAXFatal(const char *what,
+                                                   uint32_t reason,
+                                                   uint64_t serial) {
+    struct lorie_shared_server_state *st = pvfb ? pvfb->state : NULL;
+    uint64_t generation = st
+        ? lorieGateALoadU64Acquire(&st->gateA.generation) : gateAPair.generation;
+    if (st != NULL)
+        lorieGateAPublishFatal(&st->gateA, reason);
+    lorieGateATrace(st, LORIE_GATEA_ROLE_X,
+                    LORIE_GATEA_EVENT_GENERATION_FATAL,
+                    generation, serial, gateAPair.srcId, gateAPair.dstId);
+    lorieGateAFatalHalt(what, reason);
+}
+
+static void gateAWaitCleanAck(struct LorieGateAWaiter *waiter,
+                              const char *what, uint32_t reason) {
+    struct timespec now, deadline;
+    struct LorieGateAProtocol *shared = lorieGateAShared();
+    if (!waiter || !shared)
+        gateAXFatal(what, reason, 0);
+    clock_gettime(CLOCK_REALTIME, &now);
+    deadline = now;
+    deadline.tv_sec += 2;
+    for (;;) {
+        uint32_t state;
+        if (lorieGateAObserveFatal(shared) != 0)
+            gateAXFatal(what, reason, 0);
+        state = lorieGateAWaiterWaitUntil(waiter, &deadline);
+        if (state == LORIE_GATEA_WAIT_DONE)
+            return;
+        if (state == LORIE_GATEA_WAIT_FAILED)
+            gateAXFatal(what, reason, 0);
+        clock_gettime(CLOCK_REALTIME, &now);
+        if (now.tv_sec > deadline.tv_sec
+            || (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec))
+            gateAXFatal(what, LORIE_GATEA_FAIL_TIMEOUT, 0);
+    }
+}
+
+static int gateARetireBufferId(uint64_t id) {
+    struct LorieGateABufferMeta meta;
+    struct LorieGateAWaiter *waiter;
+    LorieGateAResult result;
+    int rc;
+    if (!lorieGateAProtoEnabled() || id == 0)
+        return 0;
+    rc = lorieGateARegistryBeginRetire(id, &meta);
+    if (rc == 1)
+        return 0; /* never registered */
+    if (rc != 0)
+        gateAXFatal("x-retire-state", LORIE_GATEA_FAIL_UNREGISTER, 0);
+    if (meta.lastSubmittedSerial != 0) {
+        result = gateAWaitTerminal(meta.lastSubmittedSerial);
+        if (result != LORIE_GATEA_RESULT_SUCCESS)
+            gateAXFatal("x-retire-nonterminal", LORIE_GATEA_FAIL_UNREGISTER,
+                        meta.lastSubmittedSerial);
+    }
+    waiter = lorieGateARegistryWaiter(id);
+    if (!waiter)
+        gateAXFatal("x-retire-waiter", LORIE_GATEA_FAIL_UNREGISTER,
+                    meta.lastSubmittedSerial);
+    if (lorieGateASendUnregister(id, meta.nonce, meta.generation,
+                                 meta.lastSubmittedSerial) != 0)
+        gateAXFatal("x-unregister-send", LORIE_GATEA_FAIL_UNREGISTER,
+                    meta.lastSubmittedSerial);
+    lorieGateATrace(pvfb->state, LORIE_GATEA_ROLE_X,
+                    LORIE_GATEA_EVENT_UNREGISTER_SEND,
+                    meta.generation, meta.lastSubmittedSerial, id, 0);
+    gateAWaitCleanAck(waiter, "x-unregister-wait", LORIE_GATEA_FAIL_UNREGISTER);
+    if (lorieGateARegistryRemoveAcked(id) != 0)
+        gateAXFatal("x-unregister-remove", LORIE_GATEA_FAIL_UNREGISTER,
+                    meta.lastSubmittedSerial);
+    return 0;
+}
+
+static int gateARetireBuffer(LorieBuffer *buf) {
+    return buf ? gateARetireBufferId(gateABufferId(buf)) : 0;
+}
+
+static void gateACloseGeneration(void) {
+    struct lorie_shared_server_state *st = pvfb ? pvfb->state : NULL;
+    struct LorieGateAProtocol *shared = lorieGateAShared();
+    struct LorieGateAWaiter *waiter;
+    uint64_t ids[16], nonce, generation, last;
+    int count, i;
+    if (!st || !shared)
+        return;
+    nonce = lorieGateALoadU64Acquire(&shared->sessionNonce);
+    generation = lorieGateALoadU64Acquire(&shared->generation);
+    if (nonce == 0 || generation == 0)
+        return;
+    if (gateAPairActive())
+        gateAXFatal("x-close-in-lease", LORIE_GATEA_FAIL_CLOSE,
+                    gateAPair.state == GATEA_PAIR_GPU_OWNED
+                        ? exaGpuComp.lastSerial : 0);
+    gateAClosing = 1;
+    last = pvfb->gpuCopySerialCounter;
+    if (last != 0 && gateAWaitTerminal(last) != LORIE_GATEA_RESULT_SUCCESS)
+        gateAXFatal("x-close-nonterminal", LORIE_GATEA_FAIL_CLOSE, last);
+    if (lorieGateAObserveReadIndex(&st->gpuCopyQueue.readIndex)
+            != lorieGateAObserveWriteIndex(&st->gpuCopyQueue.writeIndex)
+        || lorieGateAObserveCompleted(&st->gpuCopyQueue.completedSerial) != last
+        || lorieGateAObserveFirstFailed(shared) != 0
+        || lorieGateAObserveFatal(shared) != 0)
+        gateAXFatal("x-close-not-drained", LORIE_GATEA_FAIL_CLOSE, last);
+    count = lorieGateARegistrySnapshot(nonce, generation, ids, 16);
+    for (i = 0; i < count; i++)
+        if (gateARetireBufferId(ids[i]) != 0)
+            gateAXFatal("x-close-retire", LORIE_GATEA_FAIL_UNREGISTER, last);
+    if (lorieGateARegistrySnapshot(nonce, generation, ids, 16) != 0)
+        gateAXFatal("x-close-registry-not-empty", LORIE_GATEA_FAIL_CLOSE, last);
+    lorieGateAGenerationWaiterArm();
+    if (lorieGateASendGenerationClose(nonce, generation, last) != 0)
+        gateAXFatal("x-generation-close-send", LORIE_GATEA_FAIL_CLOSE, last);
+    lorieGateATrace(st, LORIE_GATEA_ROLE_X,
+                    LORIE_GATEA_EVENT_GENERATION_CLOSE,
+                    generation, last, 0, 0);
+    waiter = lorieGateAGenerationWaiter();
+    gateAWaitCleanAck(waiter, "x-generation-close-wait", LORIE_GATEA_FAIL_CLOSE);
+    lorieGateAStoreU64Release(&shared->generation, 0);
+    lorieGateAStoreU64Release(&shared->sessionNonce, 0);
 }
 
 /* Pre-transition refusal: FALSE lets the caller run synchronous CPU fallback
@@ -2652,9 +2826,11 @@ static Bool gateADirectPublishRect(int srcX, int srcY, int dstX, int dstY,
         if (exaGpuComp.scheduled == 0)
             return FALSE; /* nothing published: CPU fallback stays safe */
         if (gateAWaitTerminal(exaGpuComp.lastSerial) != LORIE_GATEA_RESULT_SUCCESS)
-            lorieGateAFatalHalt("x-own-queue-full", LORIE_GATEA_FAIL_TIMEOUT);
+            gateAXFatal("x-own-queue-full", LORIE_GATEA_FAIL_TIMEOUT,
+                        exaGpuComp.lastSerial);
         if (++tries > 1)
-            lorieGateAFatalHalt("x-queue-still-full", LORIE_GATEA_FAIL_TIMEOUT);
+            gateAXFatal("x-queue-still-full", LORIE_GATEA_FAIL_TIMEOUT,
+                        exaGpuComp.lastSerial);
     }
     if (exaGpuComp.scheduled == 0) {
         /* Ownership transition. All CPU writes are done (synchronous X
@@ -2662,9 +2838,15 @@ static Bool gateADirectPublishRect(int srcX, int srcY, int dstX, int dstY,
          * content to the GPU consumer. See the lease comment for why no
          * shared-state lock is taken here. */
         if (LorieBuffer_unlock(sp->buffer) != 0)
-            lorieGateAFatalHalt("x-unlock-src", LORIE_GATEA_FAIL_PROTOCOL);
+            gateAXFatal("x-unlock-src", LORIE_GATEA_FAIL_PROTOCOL, 0);
+        lorieGateATrace(pvfb->state, LORIE_GATEA_ROLE_X,
+                        LORIE_GATEA_EVENT_UNLOCK_SRC_OK,
+                        gateAPair.generation, 0, gateAPair.srcId, gateAPair.dstId);
         if (LorieBuffer_unlock(dp->buffer) != 0)
-            lorieGateAFatalHalt("x-unlock-dst", LORIE_GATEA_FAIL_PROTOCOL);
+            gateAXFatal("x-unlock-dst", LORIE_GATEA_FAIL_PROTOCOL, 0);
+        lorieGateATrace(pvfb->state, LORIE_GATEA_ROLE_X,
+                        LORIE_GATEA_EVENT_UNLOCK_DST_OK,
+                        gateAPair.generation, 0, gateAPair.srcId, gateAPair.dstId);
         sp->locked = NULL;
         dp->locked = NULL;
         exaGpuComp.src->devPrivate.ptr = NULL;
@@ -2673,16 +2855,20 @@ static Bool gateADirectPublishRect(int srcX, int srcY, int dstX, int dstY,
          * lease violation, never a fallback. */
         if (lorieGateAObserveFatal(shared) != 0 || !lorieGateAActive()
             || !gateAReadyStill(sp->buffer) || !gateAReadyStill(dp->buffer))
-            lorieGateAFatalHalt("x-post-unlock-revalidate", LORIE_GATEA_FAIL_GENERATION);
+            gateAXFatal("x-post-unlock-revalidate",
+                        LORIE_GATEA_FAIL_GENERATION, 0);
         if (sd->id != gateAPair.srcId || dd->id != gateAPair.dstId)
-            lorieGateAFatalHalt("x-post-unlock-identity", LORIE_GATEA_FAIL_PROTOCOL);
+            gateAXFatal("x-post-unlock-identity", LORIE_GATEA_FAIL_PROTOCOL, 0);
         gateAPair.state = GATEA_PAIR_GPU_OWNED;
         gateAUsed = 1;
+        lorieGateATrace(pvfb->state, LORIE_GATEA_ROLE_X,
+                        LORIE_GATEA_EVENT_LEASE_GPU_OWNED,
+                        gateAPair.generation, 0, gateAPair.srcId, gateAPair.dstId);
     }
     entry = &pvfb->state->gpuCopyQueue.entries[wi % LORIE_GPU_COPY_QUEUE_CAPACITY];
     memset(entry, 0, sizeof(*entry));
     if (++pvfb->gpuCopySerialCounter == 0)
-        lorieGateAFatalHalt("x-serial-wrap", LORIE_GATEA_FAIL_GENERATION);
+        gateAXFatal("x-serial-wrap", LORIE_GATEA_FAIL_GENERATION, 0);
     entry->serial = pvfb->gpuCopySerialCounter;
     entry->srcBufferId = sd->id;
     entry->dstBufferId = dd->id;
@@ -2695,7 +2881,21 @@ static Bool gateADirectPublishRect(int srcX, int srcY, int dstX, int dstY,
     entry->color = 0;
     entry->rects[0] = (LorieGpuCopyRect){ (int16_t)srcX, (int16_t)srcY,
         (int16_t)(srcX + width), (int16_t)(srcY + height) };
-    /* Fully initialized BEFORE the release-publish the renderer acquires. */
+    if (lorieGateARegistryMarkSubmitted(gateAPair.srcId, gateAPair.dstId,
+                                         entry->serial) != 0)
+        gateAXFatal("x-submit-registry", LORIE_GATEA_FAIL_PROTOCOL,
+                    entry->serial);
+    if (lorieGateAPublishDirectMeta(
+            &pvfb->state->gateADirect[wi % LORIE_GPU_COPY_QUEUE_CAPACITY],
+            gateAPair.nonce, gateAPair.generation, entry->serial,
+            entry->srcBufferId, entry->dstBufferId) != 0)
+        gateAXFatal("x-direct-slot-not-consumed", LORIE_GATEA_FAIL_PROTOCOL,
+                    entry->serial);
+    lorieGateATrace(pvfb->state, LORIE_GATEA_ROLE_X,
+                    LORIE_GATEA_EVENT_PUBLISH,
+                    gateAPair.generation, entry->serial,
+                    entry->srcBufferId, entry->dstBufferId);
+    /* Entry and direct identity are release-published before writeIndex. */
     lorieGateAPublishWriteIndex(&pvfb->state->gpuCopyQueue.writeIndex, wi + 1);
     pthread_cond_signal(rendererCond);
     exaGpuComp.lastSerial = entry->serial;
@@ -2709,17 +2909,28 @@ static void gateAPairRelockCpu(void) {
     LoriePixmapPriv *sp = LORIE_PIXMAP_PRIV_FROM_PIXMAP(exaGpuComp.src);
     LoriePixmapPriv *dp = LORIE_PIXMAP_PRIV_FROM_PIXMAP(exaGpuComp.dst);
     if (!sp || !dp || !sp->buffer || !dp->buffer)
-        lorieGateAFatalHalt("x-relock-priv", LORIE_GATEA_FAIL_PROTOCOL);
+        gateAXFatal("x-relock-priv", LORIE_GATEA_FAIL_PROTOCOL,
+                    exaGpuComp.lastSerial);
     if (sp->locked || dp->locked)
-        lorieGateAFatalHalt("x-relock-already-locked", LORIE_GATEA_FAIL_PROTOCOL);
+        gateAXFatal("x-relock-already-locked", LORIE_GATEA_FAIL_PROTOCOL,
+                    exaGpuComp.lastSerial);
     if (LorieBuffer_lock(sp->buffer, &sp->locked) != 0 || !sp->locked)
-        lorieGateAFatalHalt("x-relock-src", LORIE_GATEA_FAIL_PROTOCOL);
+        gateAXFatal("x-relock-src", LORIE_GATEA_FAIL_PROTOCOL,
+                    exaGpuComp.lastSerial);
     exaGpuComp.src->devPrivate.ptr = sp->locked;
     sp->wasLocked = FALSE;
+    lorieGateATrace(pvfb->state, LORIE_GATEA_ROLE_X,
+                    LORIE_GATEA_EVENT_RELOCK_SRC,
+                    gateAPair.generation, exaGpuComp.lastSerial,
+                    gateAPair.srcId, gateAPair.dstId);
     if (LorieBuffer_lock(dp->buffer, &dp->locked) != 0 || !dp->locked)
         lorieGateAFatalHalt("x-relock-dst", LORIE_GATEA_FAIL_PROTOCOL);
     exaGpuComp.dst->devPrivate.ptr = dp->locked;
     dp->wasLocked = FALSE;
+    lorieGateATrace(pvfb->state, LORIE_GATEA_ROLE_X,
+                    LORIE_GATEA_EVENT_RELOCK_DST,
+                    gateAPair.generation, exaGpuComp.lastSerial,
+                    gateAPair.srcId, gateAPair.dstId);
 }
 
 /* Direct Done: terminal derivation, then SUCCESS-only release. Anything but
@@ -2742,23 +2953,51 @@ static void gateADoneDirect(PixmapPtr dst) {
             : (uint32_t)LORIE_GATEA_FAIL_TIMEOUT;
         if (reason == 0)
             reason = LORIE_GATEA_FAIL_TIMEOUT;
-        lorieGateAFatalHalt("x-direct-not-success", reason);
+        gateAXFatal("x-direct-not-success", reason, exaGpuComp.lastSerial);
     }
+    lorieGateATrace(pvfb->state, LORIE_GATEA_ROLE_X,
+                    LORIE_GATEA_EVENT_SEMANTIC_SUCCESS,
+                    gateAPair.generation, exaGpuComp.lastSerial,
+                    gateAPair.srcId, gateAPair.dstId);
     gateAPairRelockCpu();
-    /* Lease clears BEFORE repair/ack: same-thread ordering makes further
-     * cross-op entry impossible here, and PrepareAccess must not refuse our
-     * own SUCCESS repair below. Refs stay held until the ack. */
-    gateAPair.state = GATEA_PAIR_NONE;
     if (dst && dst->drawable.depth < 32) {
+        gateAInternalRepair = 1;
         if (exaGpuComp.nrepair > 0 && exaGpuComp.nrepair < 32)
             lorieExaRepairDestXByteZero(dst, exaGpuComp.repair, exaGpuComp.nrepair);
         else
             lorieExaRepairDestXByteZero(dst, &exaGpuComp.repairUnion, 1);
+        gateAInternalRepair = 0;
+        lorieGateATrace(pvfb->state, LORIE_GATEA_ROLE_X,
+                        LORIE_GATEA_EVENT_REPAIR,
+                        gateAPair.generation, exaGpuComp.lastSerial,
+                        gateAPair.srcId, gateAPair.dstId);
     }
     lorieGpuCopyAck(exaGpuComp.src, exaGpuComp.dstBuf);
+    lorieGateATrace(pvfb->state, LORIE_GATEA_ROLE_X,
+                    LORIE_GATEA_EVENT_ACK,
+                    gateAPair.generation, exaGpuComp.lastSerial,
+                    gateAPair.srcId, gateAPair.dstId);
+    lorieGateATrace(pvfb->state, LORIE_GATEA_ROLE_X,
+                    LORIE_GATEA_EVENT_PENDING_DEC,
+                    gateAPair.generation, exaGpuComp.lastSerial,
+                    gateAPair.srcId, 0);
+    lorieGateATrace(pvfb->state, LORIE_GATEA_ROLE_X,
+                    LORIE_GATEA_EVENT_PENDING_DEC,
+                    gateAPair.generation, exaGpuComp.lastSerial,
+                    0, gateAPair.dstId);
+    if (lorieGateARegistryMarkPairReleased(gateAPair.srcId, gateAPair.dstId,
+                                            exaGpuComp.lastSerial) != 0)
+        gateAXFatal("x-release-registry", LORIE_GATEA_FAIL_PROTOCOL,
+                    exaGpuComp.lastSerial);
     gateAPair.srcBuf = NULL;
     gateAPair.dstBuf = NULL;
     gateAPair.dstIsRoot = 0;
+    lorieGateATrace(pvfb->state, LORIE_GATEA_ROLE_X,
+                    LORIE_GATEA_EVENT_LEASE_RELEASE,
+                    gateAPair.generation, exaGpuComp.lastSerial,
+                    gateAPair.srcId, gateAPair.dstId);
+    lorieGateACounterAdd(pvfb->state, LORIE_GATEA_COUNTER_LEASE_CURRENT, -1);
+    gateAPair.state = GATEA_PAIR_NONE;
     gateAPair.srcId = gateAPair.dstId = 0;
     gateAPair.nonce = gateAPair.generation = 0;
     exaCompDone++;
@@ -3070,6 +3309,8 @@ void lorieExaDestroyPixmap(__unused ScreenPtr pScreen, void *driverPriv) {
         && gateAPairOverlapsBuffer(priv->buffer))
         lorieGateAFatalHalt("x-destroy-in-lease", LORIE_GATEA_FAIL_UNREGISTER);
     if (priv->buffer) {
+        if (lorieGateAProtoEnabled() && gateARetireBuffer(priv->buffer) != 0)
+            gateAXFatal("x-retire-buffer", LORIE_GATEA_FAIL_UNREGISTER, 0);
         if (priv->locked)
             LorieBuffer_unlock(priv->buffer);
         lorieUnregisterBuffer(priv->buffer);
@@ -3099,10 +3340,10 @@ Bool loriePrepareAccess(PixmapPtr pPix, int index) {
     Bool needsGpuLock = lorieNeedsGpuLock(pPix, priv, index);
     /* P2: CPU access to a leased endpoint is refused. The lease only lives
      * inside one synchronous Prepare→Done, so reaching here means reentrancy
-     * or a missing Done — never a normal path. Our own SUCCESS repair runs
-     * after the lease clears (see gateADoneDirect). */
-    if (lorieGateAProtoEnabled() && priv && priv->buffer
-        && gateAPairOverlapsBuffer(priv->buffer)) {
+     * or a missing Done — never a normal path. The SUCCESS-only repair sets a
+     * private same-thread bypass after both endpoints are relocked. */
+    if (lorieGateAProtoEnabled() && !gateAInternalRepair
+        && priv && priv->buffer && gateAPairOverlapsBuffer(priv->buffer)) {
         log(ERROR, "Gate A: CPU access to leased buffer refused");
         return FALSE;
     }

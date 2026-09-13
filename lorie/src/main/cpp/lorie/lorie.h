@@ -214,9 +214,16 @@ typedef struct {
 #define LORIE_GATEA_ALIGNOF(t) _Alignof(t)
 #endif
 
-/* Prototype feature flag: exact "1" only. No call site yet (P3 admits later). */
+/* Prototype feature flag: exact "1" only. */
 static inline __always_inline int lorieGateAProtoEnabled(void) {
     const char *e = getenv("TERMUX_X11_GATEA_PROTO");
+    return e != NULL && e[0] == '1' && e[1] == '\0';
+}
+
+/* Experimental runtime telemetry is independently exact-default-OFF. It may
+ * observe Gate A but must never affect admission, ownership, or failure policy. */
+static inline __always_inline int lorieGateATelemetryEnabled(void) {
+    const char *e = getenv("TERMUX_X11_GATEA_TELEMETRY");
     return e != NULL && e[0] == '1' && e[1] == '\0';
 }
 
@@ -268,6 +275,125 @@ struct LorieGateAProtocol {
     uint64_t firstFailedSerial;  /* +24 sticky, 0 = none */
     uint32_t firstFailureCode;   /* +32 valid iff firstFailedSerial != 0 */
     uint32_t fatalReason;        /* +36 diagnostic mirror of generationFatal */
+};
+
+/* P2 direct identity is side metadata: the frozen queue entry remains byte-for-
+ * byte unchanged. X initializes all identity fields then release-publishes
+ * PUBLISHED before publishing writeIndex. Renderer acquire-loads state, checks
+ * slot+serial+tuple+endpoints, copies the queue entry, then release-publishes
+ * CONSUMED. X may reuse a slot only after observing CONSUMED (or EMPTY). */
+typedef enum {
+    LORIE_GATEA_DIRECT_EMPTY = 0,
+    LORIE_GATEA_DIRECT_PUBLISHED = 1,
+    LORIE_GATEA_DIRECT_CONSUMED = 2,
+} LorieGateADirectState;
+
+struct LorieGateADirectMeta {
+    uint32_t state;
+    uint32_t reserved;
+    uint64_t nonce;
+    uint64_t generation;
+    uint64_t serial;
+    uint64_t srcId;
+    uint64_t dstId;
+};
+
+LORIE_GATEA_STATIC_ASSERT(sizeof(struct LorieGateADirectMeta) == 48, "gatea direct metadata size");
+LORIE_GATEA_STATIC_ASSERT((offsetof(struct LorieGateADirectMeta, nonce) % 8) == 0, "gatea direct nonce aligned");
+LORIE_GATEA_STATIC_ASSERT((offsetof(struct LorieGateADirectMeta, generation) % 8) == 0, "gatea direct generation aligned");
+LORIE_GATEA_STATIC_ASSERT((offsetof(struct LorieGateADirectMeta, serial) % 8) == 0, "gatea direct serial aligned");
+
+/* Default-off, Experimental-only diagnostic schema. Counters are authoritative
+ * machine-readable values; the bounded ring preserves event order for small
+ * qualification cells. Ring overwrite is never silent: overflow is sticky. */
+typedef enum {
+    LORIE_GATEA_EVENT_NONE = 0,
+    LORIE_GATEA_EVENT_REGISTER_READY,
+    LORIE_GATEA_EVENT_LEASE_RESERVED,
+    LORIE_GATEA_EVENT_UNLOCK_SRC_OK,
+    LORIE_GATEA_EVENT_UNLOCK_DST_OK,
+    LORIE_GATEA_EVENT_LEASE_GPU_OWNED,
+    LORIE_GATEA_EVENT_PUBLISH,
+    LORIE_GATEA_EVENT_CONSUME_DIRECT,
+    LORIE_GATEA_EVENT_DIRECT_LOOKUP_OK,
+    LORIE_GATEA_EVENT_DIRECT_LOOKUP_FAIL,
+    LORIE_GATEA_EVENT_DRAW_SUBMIT,
+    LORIE_GATEA_EVENT_FENCE_SATISFIED,
+    LORIE_GATEA_EVENT_FENCE_TIMEOUT,
+    LORIE_GATEA_EVENT_FENCE_ERROR,
+    LORIE_GATEA_EVENT_COMPLETED_SERIAL,
+    LORIE_GATEA_EVENT_FIRST_FAILED_SERIAL,
+    LORIE_GATEA_EVENT_GENERATION_FATAL,
+    LORIE_GATEA_EVENT_SEMANTIC_SUCCESS,
+    LORIE_GATEA_EVENT_RELOCK_SRC,
+    LORIE_GATEA_EVENT_RELOCK_DST,
+    LORIE_GATEA_EVENT_REPAIR,
+    LORIE_GATEA_EVENT_ACK,
+    LORIE_GATEA_EVENT_PENDING_DEC,
+    LORIE_GATEA_EVENT_LEASE_RELEASE,
+    LORIE_GATEA_EVENT_UNREGISTER_SEND,
+    LORIE_GATEA_EVENT_UNREGISTER_ACK,
+    LORIE_GATEA_EVENT_RESOURCE_DESTROY,
+    LORIE_GATEA_EVENT_GENERATION_CLOSE,
+    LORIE_GATEA_EVENT_GENERATION_CLOSED,
+    LORIE_GATEA_EVENT_MAX,
+} LorieGateAEvent;
+
+typedef enum {
+    LORIE_GATEA_COUNTER_DIRECT_PUBLISH = 0,
+    LORIE_GATEA_COUNTER_DIRECT_CONSUME,
+    LORIE_GATEA_COUNTER_DIRECT_LOOKUP,
+    LORIE_GATEA_COUNTER_DIRECT_LOOKUP_FAIL,
+    LORIE_GATEA_COUNTER_DIRECT_DRAW,
+    LORIE_GATEA_COUNTER_FENCE_SATISFIED,
+    LORIE_GATEA_COUNTER_SEMANTIC_SUCCESS,
+    LORIE_GATEA_COUNTER_DIRECT_TO_LEGACY,
+    LORIE_GATEA_COUNTER_RELOCK,
+    LORIE_GATEA_COUNTER_REPAIR,
+    LORIE_GATEA_COUNTER_ACK,
+    LORIE_GATEA_COUNTER_PENDING_DEC,
+    LORIE_GATEA_COUNTER_AHB_ACQUIRE,
+    LORIE_GATEA_COUNTER_AHB_RELEASE,
+    LORIE_GATEA_COUNTER_EGLIMAGE_CREATE,
+    LORIE_GATEA_COUNTER_EGLIMAGE_DESTROY,
+    LORIE_GATEA_COUNTER_TEXTURE_CREATE,
+    LORIE_GATEA_COUNTER_TEXTURE_DELETE,
+    LORIE_GATEA_COUNTER_X_REGISTRY_CURRENT,
+    LORIE_GATEA_COUNTER_RENDERER_REGISTRY_CURRENT,
+    LORIE_GATEA_COUNTER_LEASE_CURRENT,
+    LORIE_GATEA_COUNTER_FENCE_TIMEOUT,
+    LORIE_GATEA_COUNTER_FENCE_ERROR,
+    LORIE_GATEA_COUNTER_FIRST_FAILED,
+    LORIE_GATEA_COUNTER_GENERATION_FATAL,
+    LORIE_GATEA_COUNTER_UNREGISTER,
+    LORIE_GATEA_COUNTER_RESOURCE_DESTROY,
+    LORIE_GATEA_COUNTER_GENERATION_CLOSE,
+    LORIE_GATEA_COUNTER_MAX,
+} LorieGateACounter;
+
+#define LORIE_GATEA_TRACE_CAPACITY 512u
+
+typedef enum {
+    LORIE_GATEA_ROLE_X = 1,
+    LORIE_GATEA_ROLE_RENDERER = 2,
+} LorieGateARole;
+
+struct LorieGateATraceRecord {
+    uint64_t sequence;
+    uint64_t generation;
+    uint64_t serial;
+    uint64_t srcId;
+    uint64_t dstId;
+    uint32_t role;
+    uint32_t event; /* release-published last; NONE means incomplete */
+};
+
+struct LorieGateATelemetry {
+    uint64_t nextSequence;
+    uint64_t counters[LORIE_GATEA_COUNTER_MAX];
+    uint32_t overflow;
+    uint32_t reserved;
+    struct LorieGateATraceRecord records[LORIE_GATEA_TRACE_CAPACITY];
 };
 
 LORIE_GATEA_STATIC_ASSERT(sizeof(struct LorieGateAProtocol) == 40, "gatea sideband size");
@@ -329,6 +455,52 @@ static inline __always_inline uint64_t lorieGateALoadU64Acquire(const uint64_t *
 
 static inline __always_inline void lorieGateAStoreU64Release(uint64_t *p, uint64_t v) {
     __atomic_store_n(p, v, __ATOMIC_RELEASE);
+}
+
+static inline __always_inline uint32_t lorieGateAObserveDirectMeta(
+        const struct LorieGateADirectMeta *p, struct LorieGateADirectMeta *out) {
+    uint32_t state = lorieGateALoadU32Acquire(&p->state);
+    if (out != NULL) {
+        out->state = state;
+        out->reserved = p->reserved;
+        out->nonce = p->nonce;
+        out->generation = p->generation;
+        out->serial = p->serial;
+        out->srcId = p->srcId;
+        out->dstId = p->dstId;
+    }
+    return state;
+}
+
+static inline __always_inline int lorieGateAPublishDirectMeta(
+        struct LorieGateADirectMeta *p, uint64_t nonce, uint64_t generation,
+        uint64_t serial, uint64_t srcId, uint64_t dstId) {
+    uint32_t state = lorieGateALoadU32Acquire(&p->state);
+    if (state == LORIE_GATEA_DIRECT_PUBLISHED)
+        return -1;
+    p->reserved = 0;
+    p->nonce = nonce;
+    p->generation = generation;
+    p->serial = serial;
+    p->srcId = srcId;
+    p->dstId = dstId;
+    lorieGateAStoreU32Release(&p->state, LORIE_GATEA_DIRECT_PUBLISHED);
+    return 0;
+}
+
+static inline __always_inline void lorieGateAConsumeDirectMeta(
+        struct LorieGateADirectMeta *p) {
+    lorieGateAStoreU32Release(&p->state, LORIE_GATEA_DIRECT_CONSUMED);
+}
+
+static inline __always_inline int lorieGateAPrepareLegacyMeta(
+        struct LorieGateADirectMeta *p) {
+    if (lorieGateALoadU32Acquire(&p->state) == LORIE_GATEA_DIRECT_PUBLISHED)
+        return -1;
+    p->reserved = 0;
+    p->nonce = p->generation = p->serial = p->srcId = p->dstId = 0;
+    lorieGateAStoreU32Release(&p->state, LORIE_GATEA_DIRECT_EMPTY);
+    return 0;
 }
 
 /* Queue indices: X release-stores writeIndex, renderer acquire-loads it;
@@ -409,6 +581,9 @@ static inline __always_inline uint32_t lorieGateAObserveFirstFailureCode(const s
  * Renderer::applyPendingGpuCopiesLocked (renderer thread only). */
 struct LorieGateABatchOut {
     uint64_t lastSerial;    /* highest consumed serial, 0 if none */
+    uint64_t generation;    /* direct tuple generation, 0 for legacy-only */
+    uint64_t lastSrcId;     /* last direct endpoint, telemetry/fatal only */
+    uint64_t lastDstId;
     uint32_t gateASeen;     /* nonzero iff a Gate A entry was consumed */
     uint32_t stopOnFailure; /* nonzero iff consumption halted on sticky failure */
     uint32_t batchGlError;  /* first GL error observed after a Gate A draw (0 none) */
@@ -632,6 +807,10 @@ __attribute__((noreturn)) static inline __always_inline void lorieGateAFatalHalt
 int lorieGateASendRegister(uint64_t id, uint64_t nonce, uint64_t generation,
                            uint32_t w, uint32_t h, uint32_t stride, uint32_t format,
                            AHardwareBuffer *ahb);
+int lorieGateASendUnregister(uint64_t id, uint64_t nonce, uint64_t generation,
+                             uint64_t lastSubmittedSerial);
+int lorieGateASendGenerationClose(uint64_t nonce, uint64_t generation,
+                                  uint64_t lastPublishedSerial);
 
 /* X-side registry (cmdentrypoint.cpp). Pool-stable slots: waiter addresses
  * stay valid for process lifetime, so input-thread signaling needs no
@@ -641,14 +820,31 @@ int lorieGateARegistryInsert(uint64_t nonce, uint64_t generation, uint64_t id, u
 int lorieGateARegistryFind(uint64_t id, struct LorieGateABufferMeta *out);
 int lorieGateARegistryMarkChecked(uint64_t id, uint64_t nonce, uint64_t generation,
                                   uint64_t fingerprint, int ready, uint32_t code);
+int lorieGateARegistryMarkPairReserved(uint64_t srcId, uint64_t dstId);
+int lorieGateARegistryMarkSubmitted(uint64_t srcId, uint64_t dstId, uint64_t serial);
+int lorieGateARegistryMarkPairReleased(uint64_t srcId, uint64_t dstId, uint64_t serial);
+int lorieGateARegistryBeginRetire(uint64_t id, struct LorieGateABufferMeta *out);
+int lorieGateARegistryHandleUnregisterAck(uint64_t id, uint64_t nonce, uint64_t generation);
+int lorieGateARegistryRemoveAcked(uint64_t id);
+int lorieGateARegistrySnapshot(uint64_t nonce, uint64_t generation,
+                               uint64_t *ids, uint32_t capacity);
 struct LorieGateAWaiter *lorieGateARegistryWaiter(uint64_t id);
+struct LorieGateAWaiter *lorieGateAGenerationWaiter(void);
+void lorieGateAGenerationWaiterArm(void);
+void lorieGateAGenerationClosedSignal(void);
 /* Tombstone every entry of an old generation (wake waiters FAILED). Called on
  * generation rotation; entries never resurrect (insert-replace rules apply). */
 void lorieGateARegistryCloseGeneration(uint64_t oldNonce, uint64_t oldGeneration);
 
 /* X-side shared-state telescope (InitOutput.c). */
 struct LorieGateAProtocol *lorieGateAShared(void);
+struct lorie_shared_server_state *lorieGateASharedState(void);
 int lorieGateAActive(void);
+
+/* Renderer GL-thread control queue. */
+int lorieGateAEnqueueControl(uint32_t type, uint64_t id, uint64_t nonce,
+                             uint64_t generation, uint64_t lastSerial);
+void lorieGateAWakeRenderer(void);
 
 /* Renderer-side import enqueue (renderer.cpp). Called once per REGISTER from
  * activity.cpp xcallback; transfers the received AHB reference. Returns 0 if
@@ -670,6 +866,7 @@ static inline __always_inline void lorieGateAReleaseAhb(AHardwareBuffer *ahb) {
 
 /* Renderer-side bound tuple (activity.cpp). Returns nonzero iff bound. */
 int lorieGateABoundTuple(uint64_t *nonce, uint64_t *generation);
+int lorieGateAUnbindTuple(uint64_t nonce, uint64_t generation);
 
 struct lorie_shared_server_state {
     /*
@@ -741,12 +938,102 @@ struct lorie_shared_server_state {
     /* Optional P2-B.3a records. Zero overhead apart from a disabled branch when off. */
     LorieB3aTelemetry b3aTelemetry;
 
-    /* Gate A P0 result sideband. Appended last: existing offsets unchanged.
-     * Zeroed with the mapping at creation; X initializes identity via
-     * lorieGateAProtocolInit before sharing. All cross-process access uses
-     * the centralized accessors above. */
+    /* Gate A P0 result sideband. Appended after all legacy fields: existing
+     * offsets unchanged. The frozen object itself remains exactly 40 bytes. */
     struct LorieGateAProtocol gateA;
+
+    /* P2 additions are separate from both the 168-byte queue entry and the
+     * frozen 40-byte result sideband. */
+    struct LorieGateADirectMeta gateADirect[LORIE_GPU_COPY_QUEUE_CAPACITY];
+    struct LorieGateATelemetry gateATelemetry;
 };
+
+static inline __always_inline bool lorieGateASharedAtomicsLockFree(
+        const struct lorie_shared_server_state *state) {
+    uint32_t i;
+    if (state == NULL || !lorieGateAAtomicsLockFree(&state->gateA))
+        return false;
+    for (i = 0; i < LORIE_GPU_COPY_QUEUE_CAPACITY; i++)
+        if (!__atomic_is_lock_free(sizeof(state->gateADirect[i].state),
+                                   &state->gateADirect[i].state))
+            return false;
+    return !lorieGateATelemetryEnabled()
+        || (__atomic_is_lock_free(sizeof(state->gateATelemetry.nextSequence),
+                                  &state->gateATelemetry.nextSequence)
+            && __atomic_is_lock_free(sizeof(state->gateATelemetry.counters[0]),
+                                     &state->gateATelemetry.counters[0])
+            && __atomic_is_lock_free(sizeof(state->gateATelemetry.overflow),
+                                     &state->gateATelemetry.overflow));
+}
+
+static inline __always_inline void lorieGateACounterAdd(
+        struct lorie_shared_server_state *state, uint32_t counter, int64_t delta) {
+    uint64_t amount;
+    if (!lorieGateATelemetryEnabled() || state == NULL
+        || counter >= LORIE_GATEA_COUNTER_MAX || delta == 0)
+        return;
+    amount = delta > 0 ? (uint64_t)delta : (uint64_t)(-delta);
+    if (delta > 0)
+        __atomic_fetch_add(&state->gateATelemetry.counters[counter], amount, __ATOMIC_RELAXED);
+    else
+        __atomic_fetch_sub(&state->gateATelemetry.counters[counter], amount, __ATOMIC_RELAXED);
+}
+
+static inline __always_inline uint32_t lorieGateACounterForEvent(uint32_t event) {
+    switch (event) {
+    case LORIE_GATEA_EVENT_PUBLISH: return LORIE_GATEA_COUNTER_DIRECT_PUBLISH;
+    case LORIE_GATEA_EVENT_CONSUME_DIRECT: return LORIE_GATEA_COUNTER_DIRECT_CONSUME;
+    case LORIE_GATEA_EVENT_DIRECT_LOOKUP_OK: return LORIE_GATEA_COUNTER_DIRECT_LOOKUP;
+    case LORIE_GATEA_EVENT_DIRECT_LOOKUP_FAIL: return LORIE_GATEA_COUNTER_DIRECT_LOOKUP_FAIL;
+    case LORIE_GATEA_EVENT_DRAW_SUBMIT: return LORIE_GATEA_COUNTER_DIRECT_DRAW;
+    case LORIE_GATEA_EVENT_FENCE_SATISFIED: return LORIE_GATEA_COUNTER_FENCE_SATISFIED;
+    case LORIE_GATEA_EVENT_FENCE_TIMEOUT: return LORIE_GATEA_COUNTER_FENCE_TIMEOUT;
+    case LORIE_GATEA_EVENT_FENCE_ERROR: return LORIE_GATEA_COUNTER_FENCE_ERROR;
+    case LORIE_GATEA_EVENT_FIRST_FAILED_SERIAL: return LORIE_GATEA_COUNTER_FIRST_FAILED;
+    case LORIE_GATEA_EVENT_GENERATION_FATAL: return LORIE_GATEA_COUNTER_GENERATION_FATAL;
+    case LORIE_GATEA_EVENT_SEMANTIC_SUCCESS: return LORIE_GATEA_COUNTER_SEMANTIC_SUCCESS;
+    case LORIE_GATEA_EVENT_RELOCK_SRC:
+    case LORIE_GATEA_EVENT_RELOCK_DST: return LORIE_GATEA_COUNTER_RELOCK;
+    case LORIE_GATEA_EVENT_REPAIR: return LORIE_GATEA_COUNTER_REPAIR;
+    case LORIE_GATEA_EVENT_ACK: return LORIE_GATEA_COUNTER_ACK;
+    case LORIE_GATEA_EVENT_PENDING_DEC: return LORIE_GATEA_COUNTER_PENDING_DEC;
+    case LORIE_GATEA_EVENT_UNREGISTER_SEND: return LORIE_GATEA_COUNTER_UNREGISTER;
+    case LORIE_GATEA_EVENT_RESOURCE_DESTROY: return LORIE_GATEA_COUNTER_RESOURCE_DESTROY;
+    case LORIE_GATEA_EVENT_GENERATION_CLOSE: return LORIE_GATEA_COUNTER_GENERATION_CLOSE;
+    default: return LORIE_GATEA_COUNTER_MAX;
+    }
+}
+
+static inline __always_inline void lorieGateATrace(
+        struct lorie_shared_server_state *state, uint32_t role, uint32_t event,
+        uint64_t generation, uint64_t serial, uint64_t srcId, uint64_t dstId) {
+    struct LorieGateATraceRecord *record;
+    uint64_t sequence;
+    uint32_t counter;
+    if (!lorieGateATelemetryEnabled() || state == NULL
+        || event == LORIE_GATEA_EVENT_NONE || event >= LORIE_GATEA_EVENT_MAX)
+        return;
+    counter = lorieGateACounterForEvent(event);
+    if (counter < LORIE_GATEA_COUNTER_MAX)
+        lorieGateACounterAdd(state, counter, 1);
+    sequence = __atomic_fetch_add(&state->gateATelemetry.nextSequence, 1, __ATOMIC_RELAXED);
+    if (sequence >= LORIE_GATEA_TRACE_CAPACITY)
+        lorieGateAStoreU32Release(&state->gateATelemetry.overflow, 1);
+    record = &state->gateATelemetry.records[sequence % LORIE_GATEA_TRACE_CAPACITY];
+    lorieGateAStoreU32Release(&record->event, LORIE_GATEA_EVENT_NONE);
+    record->sequence = sequence;
+    record->generation = generation;
+    record->serial = serial;
+    record->srcId = srcId;
+    record->dstId = dstId;
+    record->role = role;
+    lorieGateAStoreU32Release(&record->event, event);
+    __android_log_print(ANDROID_LOG_INFO, "gatea-telemetry",
+        "GATEA_EVENT seq=%llu role=%u event=%u generation=%llu serial=%llu src=%llu dst=%llu",
+        (unsigned long long)sequence, role, event,
+        (unsigned long long)generation, (unsigned long long)serial,
+        (unsigned long long)srcId, (unsigned long long)dstId);
+}
 
 #ifdef __cplusplus
 }
@@ -823,6 +1110,7 @@ struct Renderer {
     void setFiltering(jint f);
     void testCapabilities(int* legacy_drawing, int* gpu_present_disabled);
     void setSharedState(struct lorie_shared_server_state* newState);
+    void wakeGateA();
     void addBuffer(LorieBuffer* buf);
     void removeBuffer(uint64_t id);
     void removeAllBuffers();

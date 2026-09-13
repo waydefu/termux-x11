@@ -61,6 +61,25 @@ struct LorieGateAXEntry {
 static struct LorieGateAXEntry gateAXRegistry[LORIE_GATEA_XREGISTRY_SIZE];
 static pthread_mutex_t gateARegistryMutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t gateASendMutex = PTHREAD_MUTEX_INITIALIZER;
+static struct LorieGateAWaiter gateAGenerationCloseWaiter;
+static pthread_once_t gateAGenerationCloseWaiterOnce = PTHREAD_ONCE_INIT;
+
+static void gateAInitGenerationCloseWaiter(void) {
+    lorieGateAWaiterInit(&gateAGenerationCloseWaiter);
+}
+
+struct LorieGateAWaiter *lorieGateAGenerationWaiter(void) {
+    pthread_once(&gateAGenerationCloseWaiterOnce, gateAInitGenerationCloseWaiter);
+    return &gateAGenerationCloseWaiter;
+}
+
+void lorieGateAGenerationWaiterArm(void) {
+    lorieGateAWaiterArm(lorieGateAGenerationWaiter());
+}
+
+void lorieGateAGenerationClosedSignal(void) {
+    lorieGateAWaiterSignal(lorieGateAGenerationWaiter(), LORIE_GATEA_WAIT_DONE);
+}
 
 static struct LorieGateAXEntry *gateAXFindLocked(uint64_t id) {
     for (int i = 0; i < LORIE_GATEA_XREGISTRY_SIZE; i++) {
@@ -121,6 +140,9 @@ int lorieGateARegistryInsert(uint64_t nonce, uint64_t generation, uint64_t id, u
         }
     }
     pthread_mutex_unlock(&gateARegistryMutex);
+    if (rc == 0)
+        lorieGateACounterAdd(lorieGateASharedState(),
+                             LORIE_GATEA_COUNTER_X_REGISTRY_CURRENT, 1);
     return rc;
 }
 
@@ -171,11 +193,145 @@ int lorieGateARegistryMarkChecked(uint64_t id, uint64_t nonce, uint64_t generati
         }
     }
     pthread_mutex_unlock(&gateARegistryMutex);
+    if (rc == 0 && ready)
+        lorieGateATrace(lorieGateASharedState(), LORIE_GATEA_ROLE_X,
+                        LORIE_GATEA_EVENT_REGISTER_READY, generation, 0, id, 0);
     return rc;
 }
 
-/* Signal every registered waiter FAILED. Used when shared fatal is observed or
- * published; waiters then read the terminal state themselves. */
+int lorieGateARegistryMarkPairReserved(uint64_t srcId, uint64_t dstId) {
+    struct LorieGateAXEntry *src, *dst;
+    int rc = -1;
+    pthread_mutex_lock(&gateARegistryMutex);
+    src = gateAXFindLocked(srcId);
+    dst = gateAXFindLocked(dstId);
+    if (src != NULL && dst != NULL && src != dst
+        && src->meta.state == LORIE_GATEA_REG_READY
+        && dst->meta.state == LORIE_GATEA_REG_READY
+        && src->meta.pendingCount == 0 && dst->meta.pendingCount == 0) {
+        src->meta.pendingCount = 1;
+        dst->meta.pendingCount = 1;
+        src->meta.cpuLocked = 1;
+        dst->meta.cpuLocked = 1;
+        rc = 0;
+    }
+    pthread_mutex_unlock(&gateARegistryMutex);
+    return rc;
+}
+
+int lorieGateARegistryMarkSubmitted(uint64_t srcId, uint64_t dstId, uint64_t serial) {
+    struct LorieGateAXEntry *src, *dst;
+    int rc = -1;
+    if (serial == 0)
+        return -1;
+    pthread_mutex_lock(&gateARegistryMutex);
+    src = gateAXFindLocked(srcId);
+    dst = gateAXFindLocked(dstId);
+    if (src != NULL && dst != NULL && src != dst
+        && src->meta.state == LORIE_GATEA_REG_READY
+        && dst->meta.state == LORIE_GATEA_REG_READY
+        && src->meta.pendingCount == 1 && dst->meta.pendingCount == 1) {
+        src->meta.lastSubmittedSerial = serial;
+        dst->meta.lastSubmittedSerial = serial;
+        src->meta.cpuLocked = 0;
+        dst->meta.cpuLocked = 0;
+        rc = 0;
+    }
+    pthread_mutex_unlock(&gateARegistryMutex);
+    return rc;
+}
+
+int lorieGateARegistryMarkPairReleased(uint64_t srcId, uint64_t dstId, uint64_t serial) {
+    struct LorieGateAXEntry *src, *dst;
+    int rc = -1;
+    pthread_mutex_lock(&gateARegistryMutex);
+    src = gateAXFindLocked(srcId);
+    dst = gateAXFindLocked(dstId);
+    if (src != NULL && dst != NULL && src != dst
+        && src->meta.state == LORIE_GATEA_REG_READY
+        && dst->meta.state == LORIE_GATEA_REG_READY
+        && src->meta.pendingCount == 1 && dst->meta.pendingCount == 1
+        && (serial == 0 || (src->meta.lastSubmittedSerial == serial
+                            && dst->meta.lastSubmittedSerial == serial))) {
+        src->meta.pendingCount = 0;
+        dst->meta.pendingCount = 0;
+        src->meta.cpuLocked = 1;
+        dst->meta.cpuLocked = 1;
+        rc = 0;
+    }
+    pthread_mutex_unlock(&gateARegistryMutex);
+    return rc;
+}
+
+int lorieGateARegistryBeginRetire(uint64_t id, struct LorieGateABufferMeta *out) {
+    struct LorieGateAXEntry *e;
+    int rc = -1;
+    pthread_mutex_lock(&gateARegistryMutex);
+    e = gateAXFindLocked(id);
+    if (e == NULL) {
+        rc = 1; /* never registered: clean no-op */
+    } else if (e->meta.state == LORIE_GATEA_REG_READY
+               && e->meta.pendingCount == 0) {
+        e->meta.state = LORIE_GATEA_REG_RETIRING;
+        e->meta.unregisterAcked = 0;
+        if (out != NULL)
+            *out = e->meta;
+        lorieGateAWaiterArm(&e->waiter);
+        rc = 0;
+    }
+    pthread_mutex_unlock(&gateARegistryMutex);
+    return rc;
+}
+
+int lorieGateARegistryHandleUnregisterAck(uint64_t id, uint64_t nonce, uint64_t generation) {
+    struct LorieGateAXEntry *e;
+    int rc = -1;
+    pthread_mutex_lock(&gateARegistryMutex);
+    e = gateAXFindLocked(id);
+    if (e != NULL && e->meta.nonce == nonce && e->meta.generation == generation
+        && e->meta.state == LORIE_GATEA_REG_RETIRING
+        && e->meta.pendingCount == 0) {
+        e->meta.unregisterAcked = 1;
+        e->meta.state = LORIE_GATEA_REG_UNREGISTERED;
+        lorieGateAWaiterSignal(&e->waiter, LORIE_GATEA_WAIT_DONE);
+        rc = 0;
+    }
+    pthread_mutex_unlock(&gateARegistryMutex);
+    return rc;
+}
+
+int lorieGateARegistryRemoveAcked(uint64_t id) {
+    struct LorieGateAXEntry *e;
+    int rc = -1;
+    pthread_mutex_lock(&gateARegistryMutex);
+    e = gateAXFindLocked(id);
+    if (e != NULL && e->meta.state == LORIE_GATEA_REG_UNREGISTERED
+        && e->meta.unregisterAcked && e->meta.pendingCount == 0) {
+        lorieGateAWaiterDestroy(&e->waiter);
+        memset(e, 0, sizeof(*e));
+        rc = 0;
+    }
+    pthread_mutex_unlock(&gateARegistryMutex);
+    if (rc == 0)
+        lorieGateACounterAdd(lorieGateASharedState(),
+                             LORIE_GATEA_COUNTER_X_REGISTRY_CURRENT, -1);
+    return rc;
+}
+
+int lorieGateARegistrySnapshot(uint64_t nonce, uint64_t generation,
+                               uint64_t *ids, uint32_t capacity) {
+    uint32_t count = 0;
+    if (ids == NULL || capacity == 0)
+        return 0;
+    pthread_mutex_lock(&gateARegistryMutex);
+    for (int i = 0; i < LORIE_GATEA_XREGISTRY_SIZE && count < capacity; i++) {
+        if (gateAXRegistry[i].inUse && gateAXRegistry[i].meta.nonce == nonce
+            && gateAXRegistry[i].meta.generation == generation)
+            ids[count++] = gateAXRegistry[i].meta.bufferId;
+    }
+    pthread_mutex_unlock(&gateARegistryMutex);
+    return (int)count;
+}
 static void gateABroadcastGateAFailed(void) {
     int i;
     pthread_mutex_lock(&gateARegistryMutex);
@@ -435,8 +591,12 @@ static int gateAFrameTupleMatch(const struct LorieGateAFrame *fr) {
  * waiter FAILED, then halt without normal cleanup. */
 static void gateAFatalFromInput(uint32_t reason, const char *what) {
     struct LorieGateAProtocol *shared = lorieGateAShared();
-    if (shared != NULL)
+    if (shared != NULL) {
         lorieGateAPublishFatal(shared, reason);
+        lorieGateATrace(lorieGateASharedState(), LORIE_GATEA_ROLE_X,
+                        LORIE_GATEA_EVENT_GENERATION_FATAL,
+                        lorieGateALoadU64Acquire(&shared->generation), 0, 0, 0);
+    }
     gateABroadcastGateAFailed();
     lorieGateAFatalHalt(what, reason);
 }
@@ -492,6 +652,31 @@ static void handleGateAFrame(int fd) {
                 mrc == 2 ? "x-result-fingerprint" : "x-unsolicited-result");
         return;
     }
+    case LORIE_GATEA_MSG_UNREGISTER_ACK:
+        if (fr.length != 0 || fr.bufferId == 0
+            || lorieGateARegistryHandleUnregisterAck(fr.bufferId, fr.nonce,
+                                                      fr.generation) != 0) {
+            if (active)
+                gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL,
+                                    "x-bad-unregister-ack");
+            return;
+        }
+        lorieGateATrace(lorieGateASharedState(), LORIE_GATEA_ROLE_X,
+                        LORIE_GATEA_EVENT_UNREGISTER_ACK, fr.generation, 0,
+                        fr.bufferId, 0);
+        return;
+    case LORIE_GATEA_MSG_GENERATION_CLOSED:
+        if (fr.length != 0 || fr.bufferId != 0) {
+            if (active)
+                gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL,
+                                    "x-bad-generation-closed");
+            return;
+        }
+        lorieGateATrace(lorieGateASharedState(), LORIE_GATEA_ROLE_X,
+                        LORIE_GATEA_EVENT_GENERATION_CLOSED, fr.generation, 0,
+                        0, 0);
+        lorieGateAGenerationClosedSignal();
+        return;
     case LORIE_GATEA_MSG_FATAL_NOTIFY: {
         struct LorieGateAFatalNotifyBody body;
         struct LorieGateAProtocol *shared;
@@ -808,6 +993,45 @@ int lorieGateASendRegister(uint64_t id, uint64_t nonce, uint64_t generation,
 out:
     pthread_mutex_unlock(&gateASendMutex);
     return ok ? 0 : -1;
+}
+
+static int gateAXSendSimple(uint32_t type, uint64_t id, uint64_t nonce,
+                            uint64_t generation, const void *body, uint32_t bodyLen) {
+    struct LorieGateAFrame fr;
+    int ok = 0;
+    if (!lorieGateAProtoEnabled() || conn_fd == -1 || nonce == 0 || generation == 0)
+        return -1;
+    fr.magic = LORIE_GATEA_MAGIC;
+    fr.version = LORIE_GATEA_PROTOCOL_VERSION;
+    fr.type = (uint16_t)type;
+    fr.length = bodyLen;
+    fr.reserved = 0;
+    fr.nonce = nonce;
+    fr.generation = generation;
+    fr.bufferId = id;
+    pthread_mutex_lock(&gateASendMutex);
+    if (lorieGateAWriteFull(conn_fd, &fr, sizeof(fr)) == (ssize_t)sizeof(fr)
+        && (bodyLen == 0
+            || lorieGateAWriteFull(conn_fd, body, bodyLen) == (ssize_t)bodyLen))
+        ok = 1;
+    pthread_mutex_unlock(&gateASendMutex);
+    return ok ? 0 : -1;
+}
+
+int lorieGateASendUnregister(uint64_t id, uint64_t nonce, uint64_t generation,
+                             uint64_t lastSubmittedSerial) {
+    struct LorieGateAUnregisterBody body = { .lastSubmittedSerial = lastSubmittedSerial };
+    if (id == 0)
+        return -1;
+    return gateAXSendSimple(LORIE_GATEA_MSG_UNREGISTER, id, nonce, generation,
+                            &body, sizeof(body));
+}
+
+int lorieGateASendGenerationClose(uint64_t nonce, uint64_t generation,
+                                  uint64_t lastPublishedSerial) {
+    struct LorieGateAGenerationCloseBody body = { .lastPublishedSerial = lastPublishedSerial };
+    return gateAXSendSimple(LORIE_GATEA_MSG_GENERATION_CLOSE, 0, nonce, generation,
+                            &body, sizeof(body));
 }
 
 void lorieUnregisterBuffer(LorieBuffer* buffer) {

@@ -79,6 +79,24 @@ int lorieGateABoundTuple(uint64_t *nonce, uint64_t *generation) {
     return bound;
 }
 
+int lorieGateAUnbindTuple(uint64_t nonce, uint64_t generation) {
+    int rc = -1;
+    pthread_mutex_lock(&gateABindMutex);
+    if (gateABound && gateABoundNonce == nonce
+        && gateABoundGeneration == generation) {
+        gateABound = 0;
+        gateABoundNonce = 0;
+        gateABoundGeneration = 0;
+        rc = 0;
+    }
+    pthread_mutex_unlock(&gateABindMutex);
+    return rc;
+}
+
+void lorieGateAWakeRenderer(void) {
+    g_renderer.wakeGateA();
+}
+
 /* Bind from a freshly mapped shared state (socket-recv ordered before these
  * bytes). Exact version + nonzero tuple required; anything else leaves the
  * previous binding untouched (P1: any live imports at rebind time are fatal,
@@ -114,71 +132,89 @@ static int gateAPeekIsGateA(int fd) {
         && magic == LORIE_GATEA_MAGIC;
 }
 
-/* Consume exactly one REGISTER (caller verified magic via peek). Validates the
- * frame, consumes the AHB handle in all cases (leaving it would desync the
- * stream), then hands ONE outcome node to the GL thread. Short reads with a
- * bound generation are FATAL (desync); without a binding they drop. */
-static void gateAHandleRegister(int fd, uint64_t nonce, uint64_t generation) {
-    struct LorieGateAFrame fr;
+/* Consume a REGISTER body after the common frame header has been read. The AHB
+ * handle is consumed in all cases so the stream cannot desynchronize. */
+static void gateAHandleRegister(int fd, const struct LorieGateAFrame *fr,
+                                uint64_t nonce, uint64_t generation) {
     struct LorieGateARegisterBody body;
     AHardwareBuffer *ahb = NULL;
     AHardwareBuffer_Desc desc = {};
     uint64_t fingerprint;
-    /* NOTE: the frame header was already peeked, not consumed. */
-    if (lorieGateAReadFull(fd, &fr, sizeof(fr)) != (ssize_t)sizeof(fr))
-        lorieGateAFatalHalt("r-short-frame", LORIE_GATEA_FAIL_PROTOCOL);
-    if (fr.magic != LORIE_GATEA_MAGIC || fr.version != LORIE_GATEA_PROTOCOL_VERSION
-        || fr.reserved != 0 || fr.type != LORIE_GATEA_MSG_REGISTER
-        || fr.length != sizeof(body) || fr.bufferId == 0
-        || fr.nonce != nonce || fr.generation != generation)
+    if (fr->length != sizeof(body) || fr->bufferId == 0)
         lorieGateAFatalHalt("r-bad-register", LORIE_GATEA_FAIL_PROTOCOL);
     if (lorieGateAReadFull(fd, &body, sizeof(body)) != (ssize_t)sizeof(body))
         lorieGateAFatalHalt("r-short-register", LORIE_GATEA_FAIL_PROTOCOL);
     if (LorieBuffer_recvAHardwareBufferHandleFromUnixSocket(fd, &ahb) != 0 || ahb == NULL) {
-        /* Handle transport failed: nothing retained, GL thread reports it. */
-        lorieGateAEnqueueImport(fr.bufferId, nonce, generation, 0, NULL,
-                                LORIE_GATEA_FAIL_IMPORT);
+        if (lorieGateAEnqueueImport(fr->bufferId, nonce, generation, 0, NULL,
+                                    LORIE_GATEA_FAIL_IMPORT) != 0)
+            lorieGateAFatalHalt("r-import-enqueue", LORIE_GATEA_FAIL_IMPORT);
         return;
     }
-    /* P2: the direct pair needs exactly BGRA (source) or RGBX (destination).
-     * Nothing else is importable; framing/fingerprint checks below are
-     * unchanged. Import while X still CPU-holds the lock is safe: EGLImage
-     * creation maps no CPU address, and the renderer never CPU-locks or
-     * samples before X unlocks at first publish. */
     if (body.width == 0 || body.height == 0 || (int32_t)body.stride < (int32_t)body.width
         || (body.format != AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM
             && body.format != AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM)) {
         lorieGateAReleaseAhb(ahb);
-        lorieGateAEnqueueImport(fr.bufferId, nonce, generation, 0, NULL,
-                                LORIE_GATEA_FAIL_PROTOCOL);
+        if (lorieGateAEnqueueImport(fr->bufferId, nonce, generation, 0, NULL,
+                                    LORIE_GATEA_FAIL_PROTOCOL) != 0)
+            lorieGateAFatalHalt("r-import-enqueue", LORIE_GATEA_FAIL_PROTOCOL);
         return;
     }
     LorieBuffer_describeAHardwareBuffer(ahb, &desc);
     if (desc.width != (int32_t)body.width || desc.height != (int32_t)body.height
         || desc.stride != (int32_t)body.stride || desc.format != (int32_t)body.format) {
         lorieGateAReleaseAhb(ahb);
-        lorieGateAEnqueueImport(fr.bufferId, nonce, generation, 0, NULL,
-                                LORIE_GATEA_FAIL_PROTOCOL);
+        if (lorieGateAEnqueueImport(fr->bufferId, nonce, generation, 0, NULL,
+                                    LORIE_GATEA_FAIL_PROTOCOL) != 0)
+            lorieGateAFatalHalt("r-import-enqueue", LORIE_GATEA_FAIL_PROTOCOL);
         return;
     }
     fingerprint = lorieGateAFingerprint(body.width, body.height, body.stride, body.format);
-    if (lorieGateAEnqueueImport(fr.bufferId, nonce, generation, fingerprint, ahb,
+    if (lorieGateAEnqueueImport(fr->bufferId, nonce, generation, fingerprint, ahb,
                                 LORIE_GATEA_FAIL_NONE) != 0) {
-        /* Pool full: retain nothing, GL drain observes overflow and fatals. */
         lorieGateAReleaseAhb(ahb);
+        lorieGateAFatalHalt("r-import-overflow", LORIE_GATEA_FAIL_IMPORT);
     }
-    /* On success the AHB reference transfers to the GL thread via the node. */
 }
 
-/* Consume exactly one Gate A frame after a magic peek. Any non-REGISTER inbound
- * type is corruption in P1 (no such flows exist yet). */
+/* Consume one X→renderer Gate A frame after a magic peek. REGISTER carries an
+ * AHB handle; retirement controls are enqueued to the owning GL thread. */
 static void gateAHandleFrame(int fd) {
+    struct LorieGateAFrame fr;
     uint64_t nonce = 0, generation = 0;
     if (!lorieGateABoundTuple(&nonce, &generation))
-        return; /* teardown race: drop, no state change */
-    /* P1 receives REGISTER only; anything else is stream corruption. The
-     * full header is re-read inside gateAHandleRegister (peek consumed nothing). */
-    gateAHandleRegister(fd, nonce, generation);
+        return;
+    if (lorieGateAReadFull(fd, &fr, sizeof(fr)) != (ssize_t)sizeof(fr))
+        lorieGateAFatalHalt("r-short-frame", LORIE_GATEA_FAIL_PROTOCOL);
+    if (fr.magic != LORIE_GATEA_MAGIC || fr.version != LORIE_GATEA_PROTOCOL_VERSION
+        || fr.reserved != 0 || fr.nonce != nonce || fr.generation != generation)
+        lorieGateAFatalHalt("r-bad-frame", LORIE_GATEA_FAIL_PROTOCOL);
+    switch (fr.type) {
+    case LORIE_GATEA_MSG_REGISTER:
+        gateAHandleRegister(fd, &fr, nonce, generation);
+        return;
+    case LORIE_GATEA_MSG_UNREGISTER: {
+        struct LorieGateAUnregisterBody body;
+        if (fr.length != sizeof(body) || fr.bufferId == 0
+            || lorieGateAReadFull(fd, &body, sizeof(body)) != (ssize_t)sizeof(body))
+            lorieGateAFatalHalt("r-bad-unregister", LORIE_GATEA_FAIL_PROTOCOL);
+        if (lorieGateAEnqueueControl(fr.type, fr.bufferId, nonce, generation,
+                                     body.lastSubmittedSerial) != 0)
+            lorieGateAFatalHalt("r-unregister-overflow", LORIE_GATEA_FAIL_UNREGISTER);
+        return;
+    }
+    case LORIE_GATEA_MSG_GENERATION_CLOSE: {
+        struct LorieGateAGenerationCloseBody body;
+        if (fr.length != sizeof(body) || fr.bufferId != 0
+            || lorieGateAReadFull(fd, &body, sizeof(body)) != (ssize_t)sizeof(body))
+            lorieGateAFatalHalt("r-bad-generation-close", LORIE_GATEA_FAIL_PROTOCOL);
+        if (lorieGateAEnqueueControl(fr.type, 0, nonce, generation,
+                                     body.lastPublishedSerial) != 0)
+            lorieGateAFatalHalt("r-close-overflow", LORIE_GATEA_FAIL_CLOSE);
+        return;
+    }
+    default:
+        lorieGateAFatalHalt("r-unexpected-frame", LORIE_GATEA_FAIL_PROTOCOL);
+    }
 }
 
 static jclass FindClassOrDie(JNIEnv *env, const char* name) {
