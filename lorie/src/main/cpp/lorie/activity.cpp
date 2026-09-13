@@ -104,6 +104,7 @@ void lorieGateAWakeRenderer(void) {
 static void gateABindFromState(struct lorie_shared_server_state *state) {
     uint32_t version;
     uint64_t nonce, generation;
+    int bound;
     if (state == NULL)
         return;
     version = lorieGateALoadU32Acquire(&state->gateA.protocolVersion);
@@ -123,7 +124,10 @@ static void gateABindFromState(struct lorie_shared_server_state *state) {
     } else {
         gateABound = 0;
     }
+    bound = gateABound;
     pthread_mutex_unlock(&gateABindMutex);
+    log(INFO, "GATEA_BIND version=%u nonce=%llu generation=%llu bound=%d",
+        version, (unsigned long long)nonce, (unsigned long long)generation, bound);
 }
 
 static int gateAPeekIsGateA(int fd) {
@@ -188,6 +192,7 @@ static void gateAHandleFrame(int fd) {
     if (fr.magic != LORIE_GATEA_MAGIC || fr.version != LORIE_GATEA_PROTOCOL_VERSION
         || fr.reserved != 0 || fr.nonce != nonce || fr.generation != generation)
         lorieGateAFatalHalt("r-bad-frame", LORIE_GATEA_FAIL_PROTOCOL);
+    log(INFO, "GATEA_HANDLE type=%u id=%llu", fr.type, (unsigned long long)fr.bufferId);
     switch (fr.type) {
     case LORIE_GATEA_MSG_REGISTER:
         gateAHandleRegister(fd, &fr, nonce, generation);
@@ -336,13 +341,18 @@ static int xcallback(int fd, int events, __unused void* data) {
 
         again:
         /* Magic peek is valid only after the shared tuple is bound. Do not
-         * require Activity getenv: am start never has TERMUX_X11_GATEA_PROTO. */
+         * require Activity getenv: am start never has TERMUX_X11_GATEA_PROTO.
+         * Peek-true + unbound must not fall through to lorieEvent read. */
         if (gateAPeekIsGateA(conn_fd)) {
             uint64_t bn = 0, bg = 0;
-            if (lorieGateABoundTuple(&bn, &bg)) {
+            int bound = lorieGateABoundTuple(&bn, &bg);
+            log(INFO, "GATEA_PEEK magic=1 bound=%d nonce=%llu generation=%llu",
+                bound, (unsigned long long)bn, (unsigned long long)bg);
+            if (bound) {
                 gateAHandleFrame(conn_fd);
                 goto again;
             }
+            lorieGateAFatalHalt("r-unbound-frame", LORIE_GATEA_FAIL_PROTOCOL);
         }
         if (read(conn_fd, &e, sizeof(e)) == sizeof(e)) {
             switch(e.type) {
