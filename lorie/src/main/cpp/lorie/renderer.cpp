@@ -1486,11 +1486,14 @@ struct LorieGateABatchOut Renderer::applyPendingGpuCopiesLocked() {
         /* P2: sticky failure stops ALL further consumption. Every remaining
          * serial is poisoned or never-executed; consuming it as success
          * would release X ownership while the GPU still touches it. */
-        if (lorieGateAProtoEnabled()
-            && (lorieGateAObserveFatal(&state->gateA) != 0
-                || lorieGateAObserveFirstFailed(&state->gateA) != 0)) {
-            out.stopOnFailure = 1;
-            break;
+        {
+            uint64_t bn = 0, bg = 0;
+            if (lorieGateABoundTuple(&bn, &bg)
+                && (lorieGateAObserveFatal(&state->gateA) != 0
+                    || lorieGateAObserveFirstFailed(&state->gateA) != 0)) {
+                out.stopOnFailure = 1;
+                break;
+            }
         }
         /* Direct identity comes only from side metadata release-published before
          * writeIndex. READY lookup success is never used to classify an entry. */
@@ -1507,7 +1510,7 @@ struct LorieGateABatchOut Renderer::applyPendingGpuCopiesLocked() {
                             LORIE_GATEA_EVENT_CONSUME_DIRECT,
                             directMeta.generation, entry.serial,
                             entry.srcBufferId, entry.dstBufferId);
-            if (!lorieGateAProtoEnabled() || !lorieGateABoundTuple(&bn, &bg)
+            if (!lorieGateABoundTuple(&bn, &bg)
                 || bn != directMeta.nonce || bg != directMeta.generation
                 || entry.op != LORIE_GPU_OP_COMPOSITE
                 || entry.serial == 0 || entry.serial != directMeta.serial
@@ -2095,12 +2098,14 @@ void Renderer::threadLoop() {
         }
         pthread_spin_unlock(&bufferLock);
 
-        /* P1 Gate A: drain validated imports on the GL thread. OFF → one
-         * predictable branch; empty pending list → immediate return. Legacy
-         * attach path above is untouched. */
-        if (lorieGateAProtoEnabled()) {
-            gateADrainPendingImports(state);
-            gateADrainPendingControls(state);
+        /* Drain when the Activity has a bound tuple. Empty pending is a
+         * no-op. Do not use getenv: the APK process never has the X flag. */
+        {
+            uint64_t bn = 0, bg = 0;
+            if (lorieGateABoundTuple(&bn, &bg)) {
+                gateADrainPendingImports(state);
+                gateADrainPendingControls(state);
+            }
         }
 
         pthread_cond_signal(&stateChangeFinishCond);

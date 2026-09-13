@@ -314,11 +314,9 @@ static int xcallback(int fd, int events, __unused void* data) {
         if (instance)
             env->CallVoidMethod(instance, MainActivity.clientConnectedStateChanged);
 
-        /* P1 Gate A supplement: a bound generation cannot survive HUP. Bypass
-         * the blocking setSharedState/removeAllBuffers below: a renderer stuck
-         * in a fence wait would hang teardown instead of containing it. When
-         * unbound, the legacy path below is unchanged. */
-        if (lorieGateAProtoEnabled()) {
+        /* Bound tuple is the Activity-side enable signal. The APK process
+         * never inherits TERMUX_X11_GATEA_PROTO from the X launcher. */
+        {
             uint64_t bn = 0, bg = 0;
             if (lorieGateABoundTuple(&bn, &bg))
                 lorieGateAFatalHalt("r-hup", LORIE_GATEA_FAIL_GENERATION);
@@ -337,10 +335,9 @@ static int xcallback(int fd, int events, __unused void* data) {
         lorieEvent e = {0};
 
         again:
-        /* P1 Gate A magic gate. Bound + magic → consume exactly one frame and
-         * re-peek. Otherwise the legacy path below is byte-identical (an
-         * unbound magic-looking stream keeps legacy behavior, pre-existing). */
-        if (lorieGateAProtoEnabled() && gateAPeekIsGateA(conn_fd)) {
+        /* Magic peek is valid only after the shared tuple is bound. Do not
+         * require Activity getenv: am start never has TERMUX_X11_GATEA_PROTO. */
+        if (gateAPeekIsGateA(conn_fd)) {
             uint64_t bn = 0, bg = 0;
             if (lorieGateABoundTuple(&bn, &bg)) {
                 gateAHandleFrame(conn_fd);
@@ -384,11 +381,10 @@ static int xcallback(int fd, int events, __unused void* data) {
                         state = NULL;
                     }
 
-                    /* P1 Gate A bind: no imports can exist yet on a fresh share
-                     * (any prior live imports would have halted at HUP), so
-                     * bind directly. Same-thread with all other binding users. */
-                    if (lorieGateAProtoEnabled())
-                        gateABindFromState(state);
+                    /* Bind from the mapped tuple, not Activity getenv. X is
+                     * the only process that sees TERMUX_X11_GATEA_PROTO=1;
+                     * a zero generation leaves the previous binding untouched. */
+                    gateABindFromState(state);
 
                     g_renderer.setSharedState(state);
 
