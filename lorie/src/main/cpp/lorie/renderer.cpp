@@ -136,10 +136,8 @@ static const char solidFragmentShaderSrc[] =
 extern "C" volatile int conn_fd;
 
 static void notifyGpuCopyDone() {
-    if (conn_fd != -1) {
-        lorieEvent e = { .type = EVENT_GPU_COPY_DONE };
-        write(conn_fd, &e, sizeof(e));
-    }
+    lorieEvent e = { .type = EVENT_GPU_COPY_DONE };
+    (void)lorieActivitySendLegacyRecord(&e);
 }
 
 /* The renderer drains one ring batch at a time. Keep its record indices local
@@ -186,7 +184,6 @@ static struct GateAPendingImport gateAPending[LORIE_GATEA_MAX_PENDING];
 static struct GateAReadyImport gateAReady[LORIE_GATEA_MAX_READY];
 static struct GateAPendingControl gateAPendingControl[LORIE_GATEA_MAX_READY + 1];
 static pthread_mutex_t gateAImportMutex = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t gateASendMutex = PTHREAD_MUTEX_INITIALIZER;
 static int gateAImportOverflow = 0;
 
 /* Transfer one REGISTER outcome from the looper thread to the GL thread.
@@ -326,13 +323,10 @@ static int gateASendFrame(uint64_t id, uint64_t nonce, uint64_t generation,
     fr.nonce = nonce;
     fr.generation = generation;
     fr.bufferId = id;
-    pthread_mutex_lock(&gateASendMutex);
-    if (lorieGateAWriteFull(conn_fd, &fr, sizeof(fr)) == (ssize_t)sizeof(fr)
-        && (bodyLen == 0 || lorieGateAWriteFull(conn_fd, body, bodyLen) == (ssize_t)bodyLen))
-        ok = 1;
-    else
+    if (lorieActivitySendGateFrame(&fr, body, bodyLen) != 0)
         errn = errno;
-    pthread_mutex_unlock(&gateASendMutex);
+    else
+        ok = 1;
     if (!ok) {
         errno = errn ? errn : EIO;
         return -1;

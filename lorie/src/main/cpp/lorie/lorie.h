@@ -1,5 +1,42 @@
 #pragma once
 
+#ifdef LORIE_HOST_RECORD_DECODER_TEST
+#include <stdbool.h>
+#include <errno.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <sys/socket.h>
+#include <linux/input-event-codes.h>
+#include "b3a_telemetry.h"
+#ifndef __always_inline
+#define __always_inline inline __attribute__((always_inline))
+#endif
+#ifndef __unused
+#define __unused __attribute__((unused))
+#endif
+typedef int Bool;
+typedef struct AHardwareBuffer AHardwareBuffer;
+typedef struct AChoreographer AChoreographer;
+typedef struct LorieBuffer LorieBuffer;
+enum {
+    ANDROID_LOG_INFO = 4,
+    ANDROID_LOG_FATAL = 7
+};
+static inline int __android_log_print(int prio, const char *tag, const char *fmt, ...) {
+    (void)prio;
+    (void)tag;
+    (void)fmt;
+    return 0;
+}
+static inline void LorieBuffer_releaseAHardwareBuffer(AHardwareBuffer *ahb) {
+    (void)ahb;
+}
+#else
 #include <android/hardware_buffer.h>
 #include <android/native_window_jni.h>
 #include <android/choreographer.h>
@@ -21,6 +58,7 @@
 #include "linux/input-event-codes.h"
 #include "buffer.h"
 #include "b3a_telemetry.h"
+#endif
 
 #define PORT 7892
 #define MAGIC "0xDEADBEEF"
@@ -763,6 +801,507 @@ static inline __always_inline ssize_t lorieGateAReadFull(int fd, void *buf, size
     return (ssize_t)done;
 }
 
+/* ---- Incremental record decoder (PROTO ON only) ----
+ *
+ * The socket is a byte stream. This state machine consumes at most one
+ * nonblocking recv/recvmsg quantum per call and keeps every partial prefix,
+ * header, body, payload, or ancillary segment in the decoder. FIONREAD is not
+ * used as a framing decision. The output owns payload and receivedFd until
+ * lorieRecordRelease(). */
+#define LORIE_GATEA_WAIT_BUDGET_NS 2000000000ull
+#define LORIE_RECORD_IO_QUANTUM 4096u
+#define LORIE_RECORD_GATE_BODY_MAX 16u
+
+typedef enum {
+    LORIE_RECORD_WOULD_BLOCK = 0,
+    LORIE_RECORD_INCOMPLETE = 1,
+    LORIE_RECORD_PROGRESSED = 2,
+    LORIE_RECORD_PEER_CLOSED = 3,
+    LORIE_RECORD_IO_ERROR = 4,
+    LORIE_RECORD_PROTOCOL_FATAL = 5,
+} LorieRecordResult;
+
+typedef enum {
+    LORIE_RECORD_DECODER_X_REPLY = 1,
+} LorieRecordDecoderMode;
+
+typedef enum {
+    LORIE_RECORD_PHASE_PREFIX = 0,
+    LORIE_RECORD_PHASE_GATE_HEADER = 1,
+    LORIE_RECORD_PHASE_GATE_BODY = 2,
+    LORIE_RECORD_PHASE_LEGACY_BASE = 3,
+    LORIE_RECORD_PHASE_LEGACY_PAYLOAD = 4,
+    LORIE_RECORD_PHASE_LEGACY_FD = 5,
+    LORIE_RECORD_PHASE_LEGACY_COMPLETE = 6,
+} LorieRecordDecoderPhase;
+
+struct LorieDecodedRecord {
+    int isGate;
+    struct LorieGateAFrame gate;
+    uint8_t gateBody[LORIE_RECORD_GATE_BODY_MAX];
+    size_t gateBodyLen;
+    lorieEvent event;
+    void *payload;
+    size_t payloadLen;
+    int receivedFd;
+    int error;
+};
+
+struct LorieRecordDecoder {
+    uint32_t mode;
+    uint32_t phase;
+    uint8_t prefix[sizeof(uint32_t)];
+    size_t prefixLen;
+    uint8_t gateHeader[sizeof(struct LorieGateAFrame)];
+    size_t gateHeaderLen;
+    uint8_t gateBody[LORIE_RECORD_GATE_BODY_MAX];
+    size_t gateBodyLen;
+    size_t gateBodyNeed;
+    uint8_t legacyBase[sizeof(lorieEvent)];
+    size_t legacyBaseLen;
+    uint8_t *payload;
+    size_t payloadLen;
+    size_t payloadOffset;
+    int receivedFd;
+    int error;
+};
+
+static inline __always_inline void lorieRecordDecoderInit(
+        struct LorieRecordDecoder *decoder, uint32_t mode) {
+    memset(decoder, 0, sizeof(*decoder));
+    decoder->mode = mode;
+    decoder->phase = LORIE_RECORD_PHASE_PREFIX;
+    decoder->receivedFd = -1;
+}
+
+static inline __always_inline void lorieRecordRelease(
+        struct LorieDecodedRecord *record) {
+    if (record == NULL)
+        return;
+    free(record->payload);
+    record->payload = NULL;
+    record->payloadLen = 0;
+    if (record->receivedFd >= 0)
+        close(record->receivedFd);
+    record->receivedFd = -1;
+}
+
+static inline __always_inline void lorieRecordDecoderReset(
+        struct LorieRecordDecoder *decoder) {
+    uint32_t mode = decoder->mode;
+    free(decoder->payload);
+    if (decoder->receivedFd >= 0)
+        close(decoder->receivedFd);
+    memset(decoder, 0, sizeof(*decoder));
+    decoder->mode = mode;
+    decoder->phase = LORIE_RECORD_PHASE_PREFIX;
+    decoder->receivedFd = -1;
+}
+
+static inline __always_inline void lorieRecordDecoderDestroy(
+        struct LorieRecordDecoder *decoder) {
+    lorieRecordDecoderReset(decoder);
+}
+
+static inline __always_inline int lorieRecordDecoderRead(
+        int fd, void *buffer, size_t *have, size_t need, int *error) {
+    size_t remaining;
+    size_t request;
+    ssize_t n;
+    if (*have >= need)
+        return 1;
+    remaining = need - *have;
+    request = remaining > LORIE_RECORD_IO_QUANTUM
+        ? LORIE_RECORD_IO_QUANTUM : remaining;
+    do {
+        n = recv(fd, (uint8_t *)buffer + *have, request, MSG_DONTWAIT);
+    } while (n < 0 && errno == EINTR);
+    if (n > 0) {
+        *have += (size_t)n;
+        return 1;
+    }
+    if (n == 0) {
+        *error = 0;
+        return 0;
+    }
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+        *error = EAGAIN;
+        return 2;
+    }
+    *error = errno;
+    return -1;
+}
+
+static inline __always_inline int lorieRecordDecoderExpectedGateBody(
+        uint32_t mode, uint16_t type, size_t *length) {
+    if (mode == LORIE_RECORD_DECODER_X_REPLY) {
+        switch (type) {
+        case LORIE_GATEA_MSG_READY:
+        case LORIE_GATEA_MSG_REGISTER_FAILED:
+        case LORIE_GATEA_MSG_FATAL_NOTIFY:
+            *length = sizeof(struct LorieGateAReadyBody);
+            return 0;
+        case LORIE_GATEA_MSG_UNREGISTER_ACK:
+        case LORIE_GATEA_MSG_GENERATION_CLOSED:
+            *length = 0;
+            return 0;
+        default:
+            return -1;
+        }
+    }
+    return -1;
+}
+
+static inline __always_inline int lorieRecordDecoderLegacyFdExpected(
+        uint32_t mode, uint8_t type) {
+    return mode == LORIE_RECORD_DECODER_X_REPLY
+        && type == EVENT_RENDERER_WAKEUP_COND;
+}
+
+static inline __always_inline int lorieRecordDecoderPrepareGate(
+        struct LorieRecordDecoder *decoder) {
+    struct LorieGateAFrame frame;
+    size_t bodyLen;
+    memcpy(&frame, decoder->gateHeader, sizeof(frame));
+    if (frame.magic != LORIE_GATEA_MAGIC
+        || frame.version != LORIE_GATEA_PROTOCOL_VERSION
+        || frame.reserved != 0
+        || lorieRecordDecoderExpectedGateBody(decoder->mode, frame.type,
+                                               &bodyLen) != 0
+        || frame.length != bodyLen
+        || bodyLen > LORIE_RECORD_GATE_BODY_MAX) {
+        decoder->error = EPROTO;
+        return -1;
+    }
+    decoder->gateBodyNeed = bodyLen;
+    decoder->gateBodyLen = 0;
+    decoder->phase = LORIE_RECORD_PHASE_GATE_BODY;
+    return 0;
+}
+
+static inline __always_inline int lorieRecordDecoderPrepareLegacy(
+        struct LorieRecordDecoder *decoder) {
+    lorieEvent event;
+    size_t payloadLen = 0;
+    memcpy(&event, decoder->legacyBase, sizeof(event));
+    switch (event.type) {
+    case EVENT_SCREEN_SIZE:
+        payloadLen = event.screenSize.name_size;
+        break;
+    case EVENT_CLIPBOARD_SEND:
+        payloadLen = event.clipboardSend.count;
+        break;
+    default:
+        break;
+    }
+    if (payloadLen > SIZE_MAX - 1u) {
+        decoder->error = EOVERFLOW;
+        return -1;
+    }
+    decoder->payloadLen = payloadLen;
+    decoder->payloadOffset = 0;
+    if (payloadLen != 0) {
+        decoder->payload = (uint8_t *)calloc(1, payloadLen + 1u);
+        if (decoder->payload == NULL) {
+            decoder->error = ENOMEM;
+            return -1;
+        }
+    }
+    if (lorieRecordDecoderLegacyFdExpected(decoder->mode, event.type))
+        decoder->phase = LORIE_RECORD_PHASE_LEGACY_FD;
+    else if (payloadLen != 0)
+        decoder->phase = LORIE_RECORD_PHASE_LEGACY_PAYLOAD;
+    else
+        decoder->phase = LORIE_RECORD_PHASE_LEGACY_COMPLETE;
+    return 0;
+}
+
+static inline __always_inline void lorieRecordDecoderCloseAncillaryFds(
+        struct msghdr *message) {
+    struct cmsghdr *cmsg;
+    if (message == NULL)
+        return;
+    for (cmsg = CMSG_FIRSTHDR(message); cmsg != NULL;
+         cmsg = CMSG_NXTHDR(message, cmsg)) {
+        size_t nbytes;
+        size_t nfd;
+        size_t i;
+        if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS
+            || cmsg->cmsg_len < CMSG_LEN(sizeof(int)))
+            continue;
+        nbytes = (size_t)cmsg->cmsg_len - CMSG_LEN(0);
+        nfd = nbytes / sizeof(int);
+        for (i = 0; i < nfd; i++) {
+            int passed = -1;
+            memcpy(&passed, CMSG_DATA(cmsg) + (i * sizeof(int)), sizeof(passed));
+            if (passed >= 0)
+                close(passed);
+        }
+    }
+}
+
+static inline __always_inline LorieRecordResult lorieRecordDecoderReceiveFd(
+        struct LorieRecordDecoder *decoder, int fd) {
+    char byte = 0;
+    struct iovec iov = { .iov_base = &byte, .iov_len = sizeof(byte) };
+    union {
+        struct cmsghdr header;
+        uint8_t bytes[CMSG_SPACE(sizeof(int))];
+    } control = {0};
+    struct msghdr message = {
+        .msg_name = NULL,
+        .msg_namelen = 0,
+        .msg_iov = &iov,
+        .msg_iovlen = 1,
+        .msg_control = control.bytes,
+        .msg_controllen = sizeof(control.bytes),
+    };
+    ssize_t n;
+    struct cmsghdr *cmsg;
+    int received;
+    do {
+        n = recvmsg(fd, &message, MSG_DONTWAIT);
+    } while (n < 0 && errno == EINTR);
+    if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            decoder->error = EAGAIN;
+            return LORIE_RECORD_WOULD_BLOCK;
+        }
+        decoder->error = errno;
+        return LORIE_RECORD_IO_ERROR;
+    }
+    if (n == 0) {
+        decoder->error = 0;
+        return LORIE_RECORD_PEER_CLOSED;
+    }
+    cmsg = CMSG_FIRSTHDR(&message);
+    received = -1;
+    if (cmsg != NULL && cmsg->cmsg_level == SOL_SOCKET
+        && cmsg->cmsg_type == SCM_RIGHTS
+        && cmsg->cmsg_len >= CMSG_LEN(sizeof(int)))
+        memcpy(&received, CMSG_DATA(cmsg), sizeof(received));
+    if (n != 1 || (message.msg_flags & MSG_CTRUNC) != 0
+        || cmsg == NULL || cmsg->cmsg_level != SOL_SOCKET
+        || cmsg->cmsg_type != SCM_RIGHTS
+        || cmsg->cmsg_len != CMSG_LEN(sizeof(int))
+        || CMSG_NXTHDR(&message, cmsg) != NULL
+        || received < 0) {
+        lorieRecordDecoderCloseAncillaryFds(&message);
+        decoder->error = received < 0 ? EBADF : EPROTO;
+        return LORIE_RECORD_PROTOCOL_FATAL;
+    }
+    decoder->receivedFd = received;
+    decoder->phase = LORIE_RECORD_PHASE_PREFIX;
+    return LORIE_RECORD_PROGRESSED;
+}
+
+static inline __always_inline LorieRecordResult lorieRecordDecoderEmit(
+        struct LorieRecordDecoder *decoder, struct LorieDecodedRecord *out,
+        int isGate) {
+    memset(out, 0, sizeof(*out));
+    out->isGate = isGate;
+    out->receivedFd = -1;
+    out->error = decoder->error;
+    if (isGate) {
+        memcpy(&out->gate, decoder->gateHeader, sizeof(out->gate));
+        memcpy(out->gateBody, decoder->gateBody, decoder->gateBodyNeed);
+        out->gateBodyLen = decoder->gateBodyNeed;
+    } else {
+        memcpy(&out->event, decoder->legacyBase, sizeof(out->event));
+        out->payload = decoder->payload;
+        out->payloadLen = decoder->payloadLen;
+        decoder->payload = NULL;
+        if (out->event.type == EVENT_SCREEN_SIZE)
+            out->event.screenSize.name = (char *)out->payload;
+    }
+    out->receivedFd = decoder->receivedFd;
+    decoder->receivedFd = -1;
+    lorieRecordDecoderReset(decoder);
+    return LORIE_RECORD_PROGRESSED;
+}
+
+/* A record that needs no further socket bytes must PROGRESS in this call.
+ * Returning INCOMPLETE here makes the waiter pump poll an empty socket and
+ * age a complete UNREGISTER_ACK / GENERATION_CLOSED / fixed legacy event
+ * into timeout. */
+static inline __always_inline LorieRecordResult lorieRecordDecoderEmitIfComplete(
+        struct LorieRecordDecoder *decoder, struct LorieDecodedRecord *out) {
+    if (decoder->phase == LORIE_RECORD_PHASE_GATE_BODY
+        && decoder->gateBodyNeed == 0)
+        return lorieRecordDecoderEmit(decoder, out, 1);
+    if (decoder->phase == LORIE_RECORD_PHASE_LEGACY_COMPLETE)
+        return lorieRecordDecoderEmit(decoder, out, 0);
+    return LORIE_RECORD_INCOMPLETE;
+}
+
+static inline __always_inline LorieRecordResult lorieRecordDecoderNext(
+        int fd, struct LorieRecordDecoder *decoder,
+        struct LorieDecodedRecord *out) {
+    int readResult;
+    if (fd < 0) {
+        decoder->error = EBADF;
+        return LORIE_RECORD_IO_ERROR;
+    }
+    switch (decoder->phase) {
+    case LORIE_RECORD_PHASE_PREFIX:
+        readResult = lorieRecordDecoderRead(fd, decoder->prefix,
+                                            &decoder->prefixLen,
+                                            sizeof(decoder->prefix),
+                                            &decoder->error);
+        if (readResult == 0)
+            return LORIE_RECORD_PEER_CLOSED;
+        if (readResult == 2)
+            return LORIE_RECORD_WOULD_BLOCK;
+        if (readResult < 0)
+            return LORIE_RECORD_IO_ERROR;
+        if (decoder->prefixLen != sizeof(decoder->prefix))
+            return LORIE_RECORD_INCOMPLETE;
+        {
+            uint32_t magic;
+            memcpy(&magic, decoder->prefix, sizeof(magic));
+            if (magic == LORIE_GATEA_MAGIC) {
+                memcpy(decoder->gateHeader, decoder->prefix,
+                       sizeof(decoder->prefix));
+                decoder->gateHeaderLen = sizeof(decoder->prefix);
+                decoder->phase = LORIE_RECORD_PHASE_GATE_HEADER;
+            } else {
+                memcpy(decoder->legacyBase, decoder->prefix,
+                       sizeof(decoder->prefix));
+                decoder->legacyBaseLen = sizeof(decoder->prefix);
+                decoder->phase = LORIE_RECORD_PHASE_LEGACY_BASE;
+            }
+        }
+        return LORIE_RECORD_INCOMPLETE;
+    case LORIE_RECORD_PHASE_GATE_HEADER:
+        readResult = lorieRecordDecoderRead(fd, decoder->gateHeader,
+                                            &decoder->gateHeaderLen,
+                                            sizeof(decoder->gateHeader),
+                                            &decoder->error);
+        if (readResult == 0)
+            return LORIE_RECORD_PEER_CLOSED;
+        if (readResult == 2)
+            return LORIE_RECORD_WOULD_BLOCK;
+        if (readResult < 0)
+            return LORIE_RECORD_IO_ERROR;
+        if (decoder->gateHeaderLen != sizeof(decoder->gateHeader))
+            return LORIE_RECORD_INCOMPLETE;
+        if (lorieRecordDecoderPrepareGate(decoder) != 0)
+            return LORIE_RECORD_PROTOCOL_FATAL;
+        return lorieRecordDecoderEmitIfComplete(decoder, out);
+    case LORIE_RECORD_PHASE_GATE_BODY:
+        if (decoder->gateBodyNeed == 0)
+            return lorieRecordDecoderEmit(decoder, out, 1);
+        readResult = lorieRecordDecoderRead(fd, decoder->gateBody,
+                                            &decoder->gateBodyLen,
+                                            decoder->gateBodyNeed,
+                                            &decoder->error);
+        if (readResult == 0)
+            return LORIE_RECORD_PEER_CLOSED;
+        if (readResult == 2)
+            return LORIE_RECORD_WOULD_BLOCK;
+        if (readResult < 0)
+            return LORIE_RECORD_IO_ERROR;
+        if (decoder->gateBodyLen != decoder->gateBodyNeed)
+            return LORIE_RECORD_INCOMPLETE;
+        return lorieRecordDecoderEmit(decoder, out, 1);
+    case LORIE_RECORD_PHASE_LEGACY_BASE:
+        if (decoder->legacyBaseLen != sizeof(decoder->legacyBase)) {
+            readResult = lorieRecordDecoderRead(fd, decoder->legacyBase,
+                                                &decoder->legacyBaseLen,
+                                                sizeof(decoder->legacyBase),
+                                                &decoder->error);
+            if (readResult == 0)
+                return LORIE_RECORD_PEER_CLOSED;
+            if (readResult == 2)
+                return LORIE_RECORD_WOULD_BLOCK;
+            if (readResult < 0)
+                return LORIE_RECORD_IO_ERROR;
+            if (decoder->legacyBaseLen != sizeof(decoder->legacyBase))
+                return LORIE_RECORD_INCOMPLETE;
+            if (lorieRecordDecoderPrepareLegacy(decoder) != 0)
+                return LORIE_RECORD_PROTOCOL_FATAL;
+            return lorieRecordDecoderEmitIfComplete(decoder, out);
+        }
+        if (lorieRecordDecoderPrepareLegacy(decoder) != 0)
+            return LORIE_RECORD_PROTOCOL_FATAL;
+        return lorieRecordDecoderEmitIfComplete(decoder, out);
+    case LORIE_RECORD_PHASE_LEGACY_COMPLETE:
+        return lorieRecordDecoderEmit(decoder, out, 0);
+    case LORIE_RECORD_PHASE_LEGACY_PAYLOAD:
+        readResult = lorieRecordDecoderRead(fd, decoder->payload,
+                                            &decoder->payloadOffset,
+                                            decoder->payloadLen,
+                                            &decoder->error);
+        if (readResult == 0)
+            return LORIE_RECORD_PEER_CLOSED;
+        if (readResult == 2)
+            return LORIE_RECORD_WOULD_BLOCK;
+        if (readResult < 0)
+            return LORIE_RECORD_IO_ERROR;
+        if (decoder->payloadOffset != decoder->payloadLen)
+            return LORIE_RECORD_INCOMPLETE;
+        return lorieRecordDecoderEmit(decoder, out, 0);
+    case LORIE_RECORD_PHASE_LEGACY_FD:
+        if (decoder->receivedFd < 0) {
+            LorieRecordResult result = lorieRecordDecoderReceiveFd(decoder, fd);
+            if (result != LORIE_RECORD_PROGRESSED)
+                return result;
+        }
+        return lorieRecordDecoderEmit(decoder, out, 0);
+    default:
+        decoder->error = EPROTO;
+        return LORIE_RECORD_PROTOCOL_FATAL;
+    }
+}
+
+/* Deferred legacy ownership. The X pump adopts a decoded record, then either
+ * executes it after the active request or cancels it on generation close.
+ * Payload memory and received FDs stay owned here until dispose. */
+struct LorieDeferredLegacyRecord {
+    lorieEvent event;
+    void *payload;
+    size_t payloadLen;
+    int receivedFd;
+    uint64_t nonce;
+    uint64_t generation;
+    int cancelled;
+    struct LorieDeferredLegacyRecord *next;
+};
+
+static inline __always_inline void lorieDeferredLegacyDisposeOwned(
+        struct LorieDeferredLegacyRecord *record) {
+    if (record == NULL)
+        return;
+    free(record->payload);
+    record->payload = NULL;
+    record->payloadLen = 0;
+    if (record->receivedFd >= 0)
+        close(record->receivedFd);
+    record->receivedFd = -1;
+}
+
+static inline __always_inline void lorieDeferredLegacyAdoptDecoded(
+        struct LorieDeferredLegacyRecord *queued,
+        struct LorieDecodedRecord *record) {
+    queued->event = record->event;
+    queued->payload = record->payload;
+    queued->payloadLen = record->payloadLen;
+    queued->receivedFd = record->receivedFd;
+    record->payload = NULL;
+    record->receivedFd = -1;
+    if (queued->event.type == EVENT_SCREEN_SIZE)
+        queued->event.screenSize.name = (char *)queued->payload;
+}
+
+static inline __always_inline void lorieDeferredLegacyCancelIfMatch(
+        struct LorieDeferredLegacyRecord *record,
+        uint64_t nonce, uint64_t generation) {
+    if (record->nonce == nonce && record->generation == generation) {
+        record->cancelled = 1;
+        lorieDeferredLegacyDisposeOwned(record);
+    }
+}
+
 /* ---- Buffer retirement metadata (process-local registries, never shared) ---- */
 
 typedef enum {
@@ -850,6 +1389,28 @@ void lorieGateARegistryCloseGeneration(uint64_t oldNonce, uint64_t oldGeneration
 struct LorieGateAProtocol *lorieGateAShared(void);
 struct lorie_shared_server_state *lorieGateASharedState(void);
 int lorieGateAActive(void);
+
+/* X-side bounded connection pump. It returns the same explicit decoder
+ * results; a zero-timeout WOULD_BLOCK is a deadline quantum, not a retry
+ * sleep. poll(2) EINTR retries recompute remaining milliseconds from the
+ * caller's absolute CLOCK_MONOTONIC deadline. */
+#define LORIE_GATEA_LEGACY_NORMAL 0u
+#define LORIE_GATEA_LEGACY_DEFER 1u
+#define LORIE_GATEA_LEGACY_CANCEL 2u
+int lorieGateAPumpConnection(const struct timespec *deadline,
+                             uint32_t legacyPolicy);
+void lorieGateACancelDeferred(uint64_t nonce, uint64_t generation);
+
+/* Activity-process logical writer contract. The mutex also guards conn_fd
+ * close/rebind identity; helpers recheck conn_fd after locking and never hold
+ * it across Java callbacks, renderer waits, fences, or X replies. */
+extern pthread_mutex_t lorieActivityWriterMutex;
+int lorieActivitySendLegacyRecord(const lorieEvent *event);
+int lorieActivitySendLegacyPayload(const lorieEvent *event,
+                                    const void *payload, size_t payloadLen);
+int lorieActivitySendLegacyFd(const lorieEvent *event, int fd);
+int lorieActivitySendGateFrame(const struct LorieGateAFrame *frame,
+                               const void *body, size_t bodyLen);
 
 /* Renderer GL-thread control queue. */
 int lorieGateAEnqueueControl(uint32_t type, uint64_t id, uint64_t nonce,

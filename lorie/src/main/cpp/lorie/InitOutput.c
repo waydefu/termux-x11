@@ -2328,16 +2328,93 @@ static int gateAReadyStill(LorieBuffer *buf) {
         && meta.fingerprint == fp;
 }
 
-/* Bounded READY wait (CLOCK_REALTIME: the waiter cond uses default attrs).
- * TRUE iff READY for the active tuple. FALSE only for explicit
- * REGISTER_FAILED with CPU ownership intact (D0a fallback stays legal).
- * Timeout, fatal, or send failure fail-stops: the generation is unhealthy. */
+__attribute__((noreturn)) static void gateAXFatal(const char *what,
+                                                   uint32_t reason,
+                                                   uint64_t serial);
+
+static int gateADeadlineReached(const struct timespec *deadline) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return -1;
+    return now.tv_sec > deadline->tv_sec
+        || (now.tv_sec == deadline->tv_sec && now.tv_nsec >= deadline->tv_nsec);
+}
+
+static int gateAWaitForReply(struct LorieGateAWaiter *waiter,
+                              struct LorieGateAProtocol *shared,
+                              const char *what, uint32_t reason,
+                              uint32_t legacyPolicy, int failedAllowsFallback) {
+    struct timespec deadline;
+    if (!waiter || !shared)
+        gateAXFatal(what, reason, 0);
+    if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
+        gateAXFatal("x-wait-clock", LORIE_GATEA_FAIL_PROTOCOL, 0);
+    deadline.tv_sec += (time_t)(LORIE_GATEA_WAIT_BUDGET_NS / 1000000000ull);
+    deadline.tv_nsec += (long)(LORIE_GATEA_WAIT_BUDGET_NS % 1000000000ull);
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec++;
+        deadline.tv_nsec -= 1000000000L;
+    }
+    for (;;) {
+        uint32_t fatal = lorieGateAObserveFatal(shared);
+        uint32_t state = lorieGateAWaiterObserve(waiter);
+        int pumpResult;
+        int expired;
+        if (fatal != 0)
+            gateAXFatal(failedAllowsFallback ? "x-fatal-while-ready" : what,
+                        fatal, 0);
+        if (state == LORIE_GATEA_WAIT_DONE)
+            return 0;
+        if (state == LORIE_GATEA_WAIT_FAILED) {
+            if (failedAllowsFallback) {
+                if (lorieGateAObserveFatal(shared) != 0)
+                    gateAXFatal("x-fatal-after-failed", LORIE_GATEA_FAIL_GENERATION, 0);
+                return 1;
+            }
+            gateAXFatal(what, reason, 0);
+        }
+        expired = gateADeadlineReached(&deadline);
+        if (expired < 0)
+            gateAXFatal("x-wait-clock", LORIE_GATEA_FAIL_PROTOCOL, 0);
+        if (expired) {
+            fatal = lorieGateAObserveFatal(shared);
+            state = lorieGateAWaiterObserve(waiter);
+            if (fatal != 0)
+                gateAXFatal(failedAllowsFallback ? "x-fatal-after-timeout" : what,
+                            fatal, 0);
+            if (state == LORIE_GATEA_WAIT_DONE)
+                return 0;
+            if (state == LORIE_GATEA_WAIT_FAILED) {
+                if (failedAllowsFallback) {
+                    if (lorieGateAObserveFatal(shared) != 0)
+                        gateAXFatal("x-fatal-after-failed", LORIE_GATEA_FAIL_GENERATION, 0);
+                    return 1;
+                }
+                gateAXFatal(what, reason, 0);
+            }
+            gateAXFatal(what, LORIE_GATEA_FAIL_TIMEOUT, 0);
+        }
+        pumpResult = lorieGateAPumpConnection(&deadline, legacyPolicy);
+        if (pumpResult == LORIE_RECORD_PEER_CLOSED)
+            gateAXFatal("x-pump-hup", LORIE_GATEA_FAIL_GENERATION, 0);
+        if (pumpResult == LORIE_RECORD_IO_ERROR)
+            gateAXFatal("x-pump-io", reason, 0);
+        if (pumpResult == LORIE_RECORD_PROTOCOL_FATAL)
+            gateAXFatal("x-pump-protocol", LORIE_GATEA_FAIL_PROTOCOL, 0);
+        /* INCOMPLETE and WOULD_BLOCK retain decoder state and return to the
+         * same absolute deadline. There is deliberately no sleep retry. */
+    }
+}
+
+/* Bounded READY wait. TRUE iff READY for the active tuple. FALSE only for
+ * explicit REGISTER_FAILED with CPU ownership intact (D0a fallback stays
+ * legal). Timeout, fatal, or send failure fail-stops: the generation is
+ * unhealthy. */
 static Bool gateAEnsureReady(LorieBuffer *buf) {
     const LorieBuffer_Desc *d = buf ? LorieBuffer_description(buf) : NULL;
     struct LorieGateAProtocol *shared = lorieGateAShared();
     struct LorieGateABufferMeta meta;
     struct LorieGateAWaiter *w;
-    struct timespec now, deadline;
     uint64_t fp, nonce, generation;
     if (!d || d->type != LORIEBUFFER_AHARDWAREBUFFER || !d->buffer
         || d->width <= 0 || d->height <= 0 || d->stride < d->width)
@@ -2373,42 +2450,9 @@ static Bool gateAEnsureReady(LorieBuffer *buf) {
                                (uint32_t)d->height, (uint32_t)d->stride,
                                (uint32_t)d->format, d->buffer) != 0)
         lorieGateAFatalHalt("x-register-send", LORIE_GATEA_FAIL_PROTOCOL);
-    clock_gettime(CLOCK_REALTIME, &now);
-    deadline = now;
-    deadline.tv_sec += 2;
-    for (;;) {
-        uint32_t s = lorieGateAObserveFatal(shared);
-        if (s != 0)
-            lorieGateAFatalHalt("x-fatal-while-ready", s);
-        s = lorieGateAWaiterWaitUntil(w, &deadline);
-        if (s == LORIE_GATEA_WAIT_DONE)
-            break;
-        if (s == LORIE_GATEA_WAIT_FAILED) {
-            /* REGISTER_FAILED is cleanup-ACKed proof of no retention: D0a
-             * fallback stays legal. Re-check fatal first: a FAILED observed
-             * after fatal must halt, never fall back. */
-            if (lorieGateAObserveFatal(shared) != 0)
-                lorieGateAFatalHalt("x-fatal-after-failed", LORIE_GATEA_FAIL_GENERATION);
-            return FALSE;
-        }
-        clock_gettime(CLOCK_REALTIME, &now);
-        if (now.tv_sec > deadline.tv_sec
-            || (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) {
-            uint32_t fatal = lorieGateAObserveFatal(shared);
-            uint32_t terminal;
-            if (fatal != 0)
-                lorieGateAFatalHalt("x-fatal-after-timeout", fatal);
-            terminal = lorieGateAWaiterObserve(w);
-            if (terminal == LORIE_GATEA_WAIT_DONE)
-                break;
-            if (terminal == LORIE_GATEA_WAIT_FAILED) {
-                if (lorieGateAObserveFatal(shared) != 0)
-                    lorieGateAFatalHalt("x-fatal-after-failed", LORIE_GATEA_FAIL_GENERATION);
-                return FALSE;
-            }
-            lorieGateAFatalHalt("x-ready-timeout", LORIE_GATEA_FAIL_TIMEOUT);
-        }
-    }
+    if (gateAWaitForReply(w, shared, "x-ready-timeout", LORIE_GATEA_FAIL_TIMEOUT,
+                          LORIE_GATEA_LEGACY_DEFER, 1) != 0)
+        return FALSE;
     if (lorieGateAObserveFatal(shared) != 0)
         lorieGateAFatalHalt("x-fatal-after-ready", LORIE_GATEA_FAIL_GENERATION);
     if (!gateAReadyStill(buf))
@@ -2735,28 +2779,12 @@ __attribute__((noreturn)) static void gateAXFatal(const char *what,
 }
 
 static void gateAWaitCleanAck(struct LorieGateAWaiter *waiter,
-                              const char *what, uint32_t reason) {
-    struct timespec now, deadline;
+                              const char *what, uint32_t reason,
+                              uint32_t legacyPolicy) {
     struct LorieGateAProtocol *shared = lorieGateAShared();
     if (!waiter || !shared)
         gateAXFatal(what, reason, 0);
-    clock_gettime(CLOCK_REALTIME, &now);
-    deadline = now;
-    deadline.tv_sec += 2;
-    for (;;) {
-        uint32_t state;
-        if (lorieGateAObserveFatal(shared) != 0)
-            gateAXFatal(what, reason, 0);
-        state = lorieGateAWaiterWaitUntil(waiter, &deadline);
-        if (state == LORIE_GATEA_WAIT_DONE)
-            return;
-        if (state == LORIE_GATEA_WAIT_FAILED)
-            gateAXFatal(what, reason, 0);
-        clock_gettime(CLOCK_REALTIME, &now);
-        if (now.tv_sec > deadline.tv_sec
-            || (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec))
-            gateAXFatal(what, LORIE_GATEA_FAIL_TIMEOUT, 0);
-    }
+    gateAWaitForReply(waiter, shared, what, reason, legacyPolicy, 0);
 }
 
 static int gateARetireBufferId(uint64_t id) {
@@ -2788,7 +2816,8 @@ static int gateARetireBufferId(uint64_t id) {
     lorieGateATrace(pvfb->state, LORIE_GATEA_ROLE_X,
                     LORIE_GATEA_EVENT_UNREGISTER_SEND,
                     meta.generation, meta.lastSubmittedSerial, id, 0);
-    gateAWaitCleanAck(waiter, "x-unregister-wait", LORIE_GATEA_FAIL_UNREGISTER);
+    gateAWaitCleanAck(waiter, "x-unregister-wait", LORIE_GATEA_FAIL_UNREGISTER,
+                      LORIE_GATEA_LEGACY_DEFER);
     if (lorieGateARegistryRemoveAcked(id) != 0)
         gateAXFatal("x-unregister-remove", LORIE_GATEA_FAIL_UNREGISTER,
                     meta.lastSubmittedSerial);
@@ -2831,6 +2860,10 @@ static void gateACloseGeneration(void) {
             gateAXFatal("x-close-retire", LORIE_GATEA_FAIL_UNREGISTER, last);
     if (lorieGateARegistrySnapshot(nonce, generation, ids, 16) != 0)
         gateAXFatal("x-close-registry-not-empty", LORIE_GATEA_FAIL_CLOSE, last);
+    /* No deferred legacy semantic may cross clean generation close. Already
+     * queued records are tombstoned now; records encountered while waiting for
+     * GENERATION_CLOSED are consumed with CANCEL policy and released inline. */
+    lorieGateACancelDeferred(nonce, generation);
     lorieGateAGenerationWaiterArm();
     if (lorieGateASendGenerationClose(nonce, generation, last) != 0)
         gateAXFatal("x-generation-close-send", LORIE_GATEA_FAIL_CLOSE, last);
@@ -2838,7 +2871,8 @@ static void gateACloseGeneration(void) {
                     LORIE_GATEA_EVENT_GENERATION_CLOSE,
                     generation, last, 0, 0);
     waiter = lorieGateAGenerationWaiter();
-    gateAWaitCleanAck(waiter, "x-generation-close-wait", LORIE_GATEA_FAIL_CLOSE);
+    gateAWaitCleanAck(waiter, "x-generation-close-wait", LORIE_GATEA_FAIL_CLOSE,
+                      LORIE_GATEA_LEGACY_CANCEL);
     lorieGateAStoreU64Release(&shared->generation, 0);
     lorieGateAStoreU64Release(&shared->sessionNonce, 0);
 }

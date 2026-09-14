@@ -63,6 +63,15 @@ static pthread_mutex_t gateARegistryMutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t gateASendMutex = PTHREAD_MUTEX_INITIALIZER;
 static struct LorieGateAWaiter gateAGenerationCloseWaiter;
 static pthread_once_t gateAGenerationCloseWaiterOnce = PTHREAD_ONCE_INIT;
+static struct LorieRecordDecoder gateARecordDecoder;
+static int gateARecordDecoderReady = 0;
+
+static struct LorieDeferredLegacyRecord *gateADeferredHead = NULL;
+static struct LorieDeferredLegacyRecord *gateADeferredTail = NULL;
+
+static void gateAFatalFromInput(uint32_t reason, const char *what);
+static int handleLegacyRecord(struct LorieDecodedRecord *record, int queueWork);
+static Bool gateADeferredWorkProc(__unused ClientPtr client, void *closure);
 
 static void gateAInitGenerationCloseWaiter(void) {
     lorieGateAWaiterInit(&gateAGenerationCloseWaiter);
@@ -564,16 +573,6 @@ static Bool handleTouchEvent(__unused ClientPtr pClient, void *closure) {
     return TRUE;
 }
 
-/* ---- Gate A P1 input-thread dispatch ----
- * Peek for magic-gated frames before the legacy parse. Flag OFF (or no magic)
- * → legacy path byte-identical (same blocking profile: peek blocks exactly
- * where the legacy read below would). */
-static int gateAPeekIsGateA(int fd) {
-    uint32_t magic = 0;
-    return recv(fd, &magic, sizeof(magic), MSG_PEEK) == (ssize_t)sizeof(magic)
-        && magic == LORIE_GATEA_MAGIC;
-}
-
 /* Bound-tuple match for an inbound frame. Uses acquire loads; the generation
  * can only advance under the share path, never backwards. */
 static int gateAFrameTupleMatch(const struct LorieGateAFrame *fr) {
@@ -601,120 +600,184 @@ static void gateAFatalFromInput(uint32_t reason, const char *what) {
     lorieGateAFatalHalt(what, reason);
 }
 
-/* Consume exactly one Gate A frame (caller verified magic via peek), or take
- * the fatal path. Short reads mean stream desync: FATAL while a generation is
- * bound, deterministic drop during teardown when nothing is bound. */
-static void handleGateAFrame(int fd) {
-    struct LorieGateAFrame fr;
+/* Consume one already assembled Gate A frame. The decoder has consumed the
+ * header/body, so this function never performs socket I/O. */
+static void handleGateARecord(const struct LorieDecodedRecord *record) {
+    const struct LorieGateAFrame *fr = &record->gate;
     int active = lorieGateAActive();
-    if (lorieGateAReadFull(fd, &fr, sizeof(fr)) != (ssize_t)sizeof(fr)) {
-        if (active)
-            gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL, "x-short-frame");
+    if (!active)
+        return;
+    if (!gateAFrameTupleMatch(fr)) {
+        gateAFatalFromInput(LORIE_GATEA_FAIL_GENERATION, "x-wrong-generation");
         return;
     }
-    if (fr.magic != LORIE_GATEA_MAGIC || fr.version != LORIE_GATEA_PROTOCOL_VERSION
-        || fr.reserved != 0) {
-        if (active)
-            gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL, "x-bad-frame");
-        return;
-    }
-    if (!gateAFrameTupleMatch(&fr)) {
-        if (active)
-            gateAFatalFromInput(LORIE_GATEA_FAIL_GENERATION, "x-wrong-generation");
-        return;
-    }
-    switch (fr.type) {
+    switch (fr->type) {
     case LORIE_GATEA_MSG_READY:
     case LORIE_GATEA_MSG_REGISTER_FAILED: {
-        /* Both bodies are fixed 8 bytes: READY carries the fingerprint,
-         * FAILED carries {code,reserved} (low 32 bits are the code). One
-         * atomic lookup+check+update: unsolicited or fingerprint-mismatched
-         * replies for the bound generation are corruption (P3 inserts before
-         * sending, so a legitimate reply always matches). */
         uint64_t bodyWord = 0;
         int mrc;
-        if (fr.length != sizeof(bodyWord)) {
-            if (active)
-                gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL, "x-bad-result-length");
-            return;
-        }
-        if (lorieGateAReadFull(fd, &bodyWord, sizeof(bodyWord)) != (ssize_t)sizeof(bodyWord)) {
-            if (active)
-                gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL, "x-short-result");
-            return;
-        }
-        mrc = lorieGateARegistryMarkChecked(fr.bufferId, fr.nonce, fr.generation,
-            bodyWord,
-            fr.type == LORIE_GATEA_MSG_READY,
-            fr.type == LORIE_GATEA_MSG_READY ? 0 : (uint32_t)(bodyWord & 0xffffffffu));
-        if (mrc != 0 && active)
+        if (fr->bufferId == 0)
+            gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL,
+                                "x-bad-result-buffer");
+        memcpy(&bodyWord, record->gateBody, sizeof(bodyWord));
+        mrc = lorieGateARegistryMarkChecked(fr->bufferId, fr->nonce,
+            fr->generation, bodyWord,
+            fr->type == LORIE_GATEA_MSG_READY,
+            fr->type == LORIE_GATEA_MSG_READY
+                ? 0 : (uint32_t)(bodyWord & 0xffffffffu));
+        if (mrc != 0)
             gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL,
                 mrc == 2 ? "x-result-fingerprint" : "x-unsolicited-result");
         return;
     }
     case LORIE_GATEA_MSG_UNREGISTER_ACK:
-        if (fr.length != 0 || fr.bufferId == 0
-            || lorieGateARegistryHandleUnregisterAck(fr.bufferId, fr.nonce,
-                                                      fr.generation) != 0) {
-            if (active)
-                gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL,
-                                    "x-bad-unregister-ack");
-            return;
-        }
-        lorieGateATrace(lorieGateASharedState(), LORIE_GATEA_ROLE_X,
-                        LORIE_GATEA_EVENT_UNREGISTER_ACK, fr.generation, 0,
-                        fr.bufferId, 0);
+        if (fr->bufferId == 0
+            || lorieGateARegistryHandleUnregisterAck(fr->bufferId, fr->nonce,
+                                                      fr->generation) != 0)
+            gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL,
+                                "x-bad-unregister-ack");
+        else
+            lorieGateATrace(lorieGateASharedState(), LORIE_GATEA_ROLE_X,
+                            LORIE_GATEA_EVENT_UNREGISTER_ACK, fr->generation,
+                            0, fr->bufferId, 0);
         return;
     case LORIE_GATEA_MSG_GENERATION_CLOSED:
-        if (fr.length != 0 || fr.bufferId != 0) {
-            if (active)
-                gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL,
-                                    "x-bad-generation-closed");
-            return;
-        }
+        if (fr->bufferId != 0)
+            gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL,
+                                "x-bad-generation-closed");
         lorieGateATrace(lorieGateASharedState(), LORIE_GATEA_ROLE_X,
-                        LORIE_GATEA_EVENT_GENERATION_CLOSED, fr.generation, 0,
-                        0, 0);
+                        LORIE_GATEA_EVENT_GENERATION_CLOSED, fr->generation,
+                        0, 0, 0);
         lorieGateAGenerationClosedSignal();
         return;
     case LORIE_GATEA_MSG_FATAL_NOTIFY: {
         struct LorieGateAFatalNotifyBody body;
-        struct LorieGateAProtocol *shared;
-        if (fr.length != sizeof(body))
-            { if (active) gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL, "x-bad-fatal-length"); return; }
-        if (lorieGateAReadFull(fd, &body, sizeof(body)) != (ssize_t)sizeof(body))
-            { if (active) gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL, "x-short-fatal"); return; }
-        /* Hint only: correctness comes from the shared atomic. Because the
-         * renderer CASes before notifying and the flag is sticky, observing a
-         * genuine hint with a clear flag is impossible — treat it as corrupt. */
-        shared = lorieGateAShared();
-        if (shared == NULL || lorieGateAObserveFatal(shared) == 0)
-            gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL, "x-spurious-fatal-hint");
-        gateABroadcastGateAFailed();
+        struct LorieGateAProtocol *shared = lorieGateAShared();
+        memcpy(&body, record->gateBody, sizeof(body));
+        if (body.reserved != 0 || shared == NULL
+            || lorieGateAObserveFatal(shared) == 0)
+            gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL,
+                                "x-spurious-fatal-hint");
+        else
+            gateABroadcastGateAFailed();
         return;
     }
     default:
-        /* REGISTER/UNREGISTER/CLOSE/CLOSED inbound to X, or unknown type:
-         * corruption in P1 (no such flows exist yet). */
-        if (active)
-            gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL, "x-unexpected-msg");
+        gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL, "x-unexpected-msg");
         return;
     }
 }
 
-void handleLorieEvents(int fd, __unused int ready, __unused void *ignored) {
+static void gateADeferredUnlink(struct LorieDeferredLegacyRecord *record) {
+    struct LorieDeferredLegacyRecord **cursor = &gateADeferredHead;
+    while (*cursor != NULL && *cursor != record)
+        cursor = &(*cursor)->next;
+    if (*cursor == NULL)
+        return;
+    *cursor = record->next;
+    if (gateADeferredTail == record)
+        gateADeferredTail = NULL;
+    if (gateADeferredHead != NULL && gateADeferredTail == NULL) {
+        gateADeferredTail = gateADeferredHead;
+        while (gateADeferredTail->next != NULL)
+            gateADeferredTail = gateADeferredTail->next;
+    }
+    record->next = NULL;
+}
+
+static void gateADeferredRelease(struct LorieDeferredLegacyRecord *record) {
+    lorieDeferredLegacyDisposeOwned(record);
+    free(record);
+}
+
+static int gateADeferredTupleValid(
+        const struct LorieDeferredLegacyRecord *record) {
+    struct LorieGateAProtocol *shared;
+    if (record->cancelled || record->nonce == 0 || record->generation == 0)
+        return !record->cancelled;
+    shared = lorieGateAShared();
+    return shared != NULL
+        && lorieGateALoadU64Acquire(&shared->sessionNonce) == record->nonce
+        && lorieGateALoadU64Acquire(&shared->generation) == record->generation
+        && lorieGateAObserveFatal(shared) == 0;
+}
+
+static int gateAQueueDeferredRecord(struct LorieDecodedRecord *record) {
+    struct LorieDeferredLegacyRecord *queued;
+    struct LorieGateAProtocol *shared;
+    queued = (struct LorieDeferredLegacyRecord *)calloc(1, sizeof(*queued));
+    if (queued == NULL)
+        return -1;
+    lorieDeferredLegacyAdoptDecoded(queued, record);
+    shared = lorieGateAShared();
+    if (shared != NULL) {
+        queued->nonce = lorieGateALoadU64Acquire(&shared->sessionNonce);
+        queued->generation = lorieGateALoadU64Acquire(&shared->generation);
+    }
+    if (!QueueWorkProc(gateADeferredWorkProc, NULL, queued)) {
+        gateADeferredRelease(queued);
+        return -1;
+    }
+    if (gateADeferredTail != NULL)
+        gateADeferredTail->next = queued;
+    else
+        gateADeferredHead = queued;
+    gateADeferredTail = queued;
+    lorieWakeServer();
+    return 0;
+}
+
+/* Close/cross-generation cancellation releases payload and received FD now.
+ * The tombstone stays until the already queued WorkProc runs, preventing a
+ * queued closure from dereferencing freed memory. */
+void lorieGateACancelDeferred(uint64_t nonce, uint64_t generation) {
+    struct LorieDeferredLegacyRecord *record;
+    for (record = gateADeferredHead; record != NULL; record = record->next)
+        lorieDeferredLegacyCancelIfMatch(record, nonce, generation);
+}
+
+static Bool gateADeferredWorkProc(__unused ClientPtr client, void *closure) {
+    struct LorieDeferredLegacyRecord *queued =
+        (struct LorieDeferredLegacyRecord *)closure;
+    struct LorieDecodedRecord record;
+    gateADeferredUnlink(queued);
+    if (!gateADeferredTupleValid(queued)) {
+        gateADeferredRelease(queued);
+        return TRUE;
+    }
+    memset(&record, 0, sizeof(record));
+    record.event = queued->event;
+    record.payload = queued->payload;
+    record.payloadLen = queued->payloadLen;
+    record.receivedFd = queued->receivedFd;
+    queued->payload = NULL;
+    queued->receivedFd = -1;
+    if (record.event.type == EVENT_SCREEN_SIZE)
+        record.event.screenSize.name = (char *)record.payload;
+    handleLegacyRecord(&record, 0);
+    lorieRecordRelease(&record);
+    free(queued);
+    return TRUE;
+}
+
+static void closeLorieConnection(int fd) {
+    LorieBuffer *buf;
+    InputThreadUnregisterDev(fd);
+    if (conn_fd == fd)
+        conn_fd = -1;
+    close(fd);
+    lorieEnableClipboardSync(FALSE);
+    while ((buf = LorieBufferList_first(&registeredBuffers)))
+        LorieBuffer_removeFromList(buf);
+}
+
+static void handleLorieEventsLegacy(int fd, __unused int ready, __unused void *ignored) {
     ValuatorMask mask;
     lorieEvent e = {0};
     valuator_mask_zero(&mask);
 
     if (ready & X_NOTIFY_ERROR) {
-        LorieBuffer* buf;
-        InputThreadUnregisterDev(fd);
-        close(fd);
-        conn_fd = -1;
-        lorieEnableClipboardSync(FALSE);
-        while ((buf = LorieBufferList_first(&registeredBuffers)))
-            LorieBuffer_removeFromList(buf);
+        closeLorieConnection(fd);
         /* P1 Gate A supplement: an active generation cannot survive HUP.
          * Poison shared state (best-effort containment for the renderer side),
          * wake every waiter FAILED, then halt without normal cleanup. Legacy
@@ -729,12 +792,8 @@ void handleLorieEvents(int fd, __unused int ready, __unused void *ignored) {
         return;
     }
 
-    /* P1 Gate A magic gate. OFF (or no magic) → legacy path byte-identical. */
-    if (lorieGateAProtoEnabled() && gateAPeekIsGateA(fd)) {
-        handleGateAFrame(fd);
-        goto again;
-    }
-
+    /* PROTO OFF path intentionally retains the historical blocking legacy
+     * parser. The bounded decoder is selected only by handleLorieEvents(). */
     again:
     if (read(fd, &e, sizeof(e)) == sizeof(e)) {
         switch(e.type) {
@@ -906,6 +965,317 @@ void handleLorieEvents(int fd, __unused int ready, __unused void *ignored) {
         if (ioctl(fd, FIONREAD, &n) >= 0 && n > sizeof(e))
             goto again;
     }
+}
+
+static int legacyRecordNeedsWorkProc(uint8_t type) {
+    switch (type) {
+    case EVENT_SCREEN_SIZE:
+    case EVENT_TOUCH:
+    case EVENT_CLIPBOARD_ANNOUNCE:
+    case EVENT_CLIPBOARD_SEND:
+    case EVENT_GPU_COPY_DONE:
+    case EVENT_LOCK_KEYS_STATE:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* Execute one complete legacy record. queueWork=1 preserves the historical
+ * WorkProc boundary for records that require it; queueWork=2 defers every
+ * semantic action while a Gate waiter owns the active X request. */
+static int handleLegacyRecord(struct LorieDecodedRecord *record, int queueWork) {
+    ValuatorMask mask;
+    lorieEvent *e = &record->event;
+    if (queueWork == 2 || (queueWork == 1 && legacyRecordNeedsWorkProc(e->type)))
+        return gateAQueueDeferredRecord(record);
+    valuator_mask_zero(&mask);
+    switch (e->type) {
+    case EVENT_SCREEN_SIZE:
+        __android_log_print(ANDROID_LOG_ERROR, "tx11-request",
+                            "window changed: %d %d %s", e->screenSize.width,
+                            e->screenSize.height, e->screenSize.name ?: "");
+        lorieConfigureNotify(e->screenSize.width, e->screenSize.height,
+                             e->screenSize.framerate, e->screenSize.name_size,
+                             e->screenSize.name);
+        return 0;
+    case EVENT_TOUCH: {
+        lorieEvent *copy = (lorieEvent *)calloc(1, sizeof(*copy));
+        if (copy == NULL)
+            return -1;
+        *copy = *e;
+        handleTouchEvent(NULL, copy);
+        return 0;
+    }
+    case EVENT_STYLUS: {
+        static int buttons_prev = 0;
+        uint32_t released, pressed, diff;
+        DeviceIntPtr device = e->stylus.mouse ? lorieMouse
+            : (e->stylus.eraser ? lorieEraser : loriePen);
+        if (!device) {
+            __android_log_print(ANDROID_LOG_DEBUG, "LorieNative",
+                                "got stylus event but device is not requested\n");
+            return 0;
+        }
+        __android_log_print(ANDROID_LOG_DEBUG, "LorieNative",
+                            "got stylus event %f %f %d %d %d %d %s\n",
+                            e->stylus.x, e->stylus.y, e->stylus.pressure,
+                            e->stylus.tilt_x, e->stylus.tilt_y,
+                            e->stylus.orientation,
+                            device == lorieMouse ? "lorieMouse"
+                            : (device == loriePen ? "loriePen" : "lorieEraser"));
+        valuator_mask_set_double(&mask, 0,
+                                 max(min(e->stylus.x, pScreenPtr->width), 0));
+        valuator_mask_set_double(&mask, 1,
+                                 max(min(e->stylus.y, pScreenPtr->height), 0));
+        if (device != lorieMouse) {
+            valuator_mask_set_double(&mask, 2, e->stylus.pressure);
+            valuator_mask_set_double(&mask, 3, e->stylus.tilt_x);
+            valuator_mask_set_double(&mask, 4, e->stylus.tilt_y);
+            valuator_mask_set_double(&mask, 5, e->stylus.orientation);
+        }
+        QueuePointerEvents(device, MotionNotify, 0,
+                           POINTER_ABSOLUTE | POINTER_DESKTOP
+                           | (device == lorieMouse ? POINTER_NORAW : 0),
+                           &mask);
+        diff = buttons_prev ^ e->stylus.buttons;
+        released = diff & ~e->stylus.buttons;
+        pressed = diff & e->stylus.buttons;
+        for (int i = 0; i < 3; i++) {
+            if (released & 0x1)
+                QueuePointerEvents(device, ButtonRelease, i + 1,
+                                   POINTER_RELATIVE, nullptr);
+            if (pressed & 0x1)
+                QueuePointerEvents(device, ButtonPress, i + 1,
+                                   POINTER_RELATIVE, nullptr);
+            released >>= 1;
+            pressed >>= 1;
+        }
+        buttons_prev = e->stylus.buttons;
+        return 0;
+    }
+    case EVENT_STYLUS_ENABLE:
+        lorieSetStylusEnabled(e->stylusEnable.enable);
+        return 0;
+    case EVENT_MOUSE: {
+        int flags;
+        switch (e->mouse.detail) {
+        case 0:
+            flags = e->mouse.relative ? POINTER_RELATIVE | POINTER_ACCELERATE
+                : POINTER_ABSOLUTE | POINTER_SCREEN | POINTER_NORAW;
+            if (!e->mouse.relative) {
+                e->mouse.x = max(0, min(e->mouse.x, pScreenPtr->width));
+                e->mouse.y = max(0, min(e->mouse.y, pScreenPtr->height));
+            }
+            valuator_mask_set_double(&mask, 0, (double)e->mouse.x);
+            valuator_mask_set_double(&mask, 1, (double)e->mouse.y);
+            QueuePointerEvents(lorieMouse, MotionNotify, 0, flags, &mask);
+            break;
+        case 1:
+        case 2:
+        case 3:
+            QueuePointerEvents(lorieMouse,
+                               e->mouse.down ? ButtonPress : ButtonRelease,
+                               e->mouse.detail, POINTER_RELATIVE, nullptr);
+            break;
+        case 4:
+            if (e->mouse.x) {
+                valuator_mask_zero(&mask);
+                valuator_mask_set_double(&mask, 2,
+                                         (double)e->mouse.x / 120);
+                QueuePointerEvents(lorieMouse, MotionNotify, 0,
+                                   POINTER_RELATIVE, &mask);
+            }
+            if (e->mouse.y) {
+                valuator_mask_zero(&mask);
+                valuator_mask_set_double(&mask, 3,
+                                         (double)e->mouse.y / 120);
+                QueuePointerEvents(lorieMouse, MotionNotify, 0,
+                                   POINTER_RELATIVE, &mask);
+            }
+            break;
+        }
+        return 0;
+    }
+    case EVENT_KEY:
+        QueueKeyboardEvents(lorieKeyboard,
+                             e->key.state ? KeyPress : KeyRelease,
+                             e->key.key);
+        return 0;
+    case EVENT_UNICODE: {
+        int ks = ucs2keysym((long)e->unicode.code);
+        __android_log_print(ANDROID_LOG_DEBUG, "LorieNative",
+                            "Trying to input keysym %d\n", ks);
+        lorieKeysymKeyboardEvent(ks, TRUE);
+        lorieKeysymKeyboardEvent(ks, FALSE);
+        return 0;
+    }
+    case EVENT_CLIPBOARD_ENABLE:
+        lorieEnableClipboardSync(e->clipboardEnable.enable);
+        return 0;
+    case EVENT_CLIPBOARD_ANNOUNCE:
+        lorieHandleClipboardAnnounce();
+        return 0;
+    case EVENT_CLIPBOARD_SEND:
+        if (record->payloadLen != e->clipboardSend.count
+            || (record->payloadLen != 0 && record->payload == NULL))
+            return -1;
+        lorieHandleClipboardData((const char *)record->payload);
+        return 0;
+    case EVENT_RENDERER_WAKEUP_COND:
+        if (record->receivedFd < 0)
+            return -1;
+        {
+            int wakeupFd = record->receivedFd;
+            record->receivedFd = -1;
+            lorieSetRendererWakeupCond(wakeupFd);
+        }
+        return 0;
+    case EVENT_GPU_COPY_DONE:
+        lorieRecheckGpuCopies();
+        return 0;
+    case EVENT_LOCK_KEYS_STATE:
+        lorieSyncLockKeysState(e->lockKeysState.state);
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+static void gateAInitRecordDecoder(void) {
+    lorieRecordDecoderInit(&gateARecordDecoder,
+                           LORIE_RECORD_DECODER_X_REPLY);
+    gateARecordDecoderReady = 1;
+}
+
+static int gateADeadlineMilliseconds(const struct timespec *deadline) {
+    struct timespec now;
+    int64_t seconds;
+    int64_t milliseconds;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        return -1;
+    seconds = (int64_t)deadline->tv_sec - (int64_t)now.tv_sec;
+    milliseconds = seconds * 1000
+        + ((int64_t)deadline->tv_nsec - (int64_t)now.tv_nsec) / 1000000;
+    if (milliseconds <= 0)
+        return 0;
+    return milliseconds > INT_MAX ? INT_MAX : (int)milliseconds;
+}
+
+int lorieGateAPumpConnection(const struct timespec *deadline,
+                             uint32_t legacyPolicy) {
+    struct pollfd pollFd;
+    struct LorieDecodedRecord record;
+    LorieRecordResult result;
+    int timeout;
+    int pollResult;
+    if (!deadline)
+        return LORIE_RECORD_IO_ERROR;
+    if (!gateARecordDecoderReady)
+        gateAInitRecordDecoder();
+    pollFd.fd = conn_fd;
+    pollFd.events = POLLIN | POLLHUP | POLLERR | POLLRDHUP;
+    /* poll(2) timeout is relative. Recompute remaining ms from the absolute
+     * monotonic deadline on every attempt, including EINTR, so a signal
+     * cannot restart a stale 2000 ms interval. */
+    for (;;) {
+        timeout = gateADeadlineMilliseconds(deadline);
+        if (timeout < 0) {
+            gateARecordDecoder.error = errno;
+            return LORIE_RECORD_IO_ERROR;
+        }
+        if (timeout == 0)
+            return LORIE_RECORD_WOULD_BLOCK;
+        pollFd.revents = 0;
+        pollResult = poll(&pollFd, 1, timeout);
+        if (pollResult < 0 && errno == EINTR)
+            continue;
+        break;
+    }
+    if (pollResult == 0)
+        return LORIE_RECORD_WOULD_BLOCK;
+    if (pollResult < 0) {
+        gateARecordDecoder.error = errno;
+        return LORIE_RECORD_IO_ERROR;
+    }
+    if (pollFd.revents & (POLLHUP | POLLRDHUP)) {
+        gateARecordDecoder.error = 0;
+        return LORIE_RECORD_PEER_CLOSED;
+    }
+    if (pollFd.revents & (POLLERR | POLLNVAL)) {
+        gateARecordDecoder.error = EIO;
+        return LORIE_RECORD_IO_ERROR;
+    }
+    result = lorieRecordDecoderNext(conn_fd, &gateARecordDecoder, &record);
+    if (result != LORIE_RECORD_PROGRESSED)
+        return result;
+    if (record.isGate)
+        handleGateARecord(&record);
+    else if (legacyPolicy == LORIE_GATEA_LEGACY_CANCEL)
+        lorieRecordRelease(&record);
+    else if (legacyPolicy == LORIE_GATEA_LEGACY_DEFER) {
+        if (gateAQueueDeferredRecord(&record) != 0) {
+            lorieRecordRelease(&record);
+            gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL,
+                                "x-deferred-record-queue");
+        }
+    } else if (handleLegacyRecord(&record, 1) != 0) {
+        lorieRecordRelease(&record);
+        if (lorieGateAActive())
+            gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL,
+                                "x-legacy-record-dispatch");
+    }
+    lorieRecordRelease(&record);
+    return LORIE_RECORD_PROGRESSED;
+}
+
+static void handleLorieEventsProto(int fd, int ready) {
+    struct LorieDecodedRecord record;
+    LorieRecordResult result;
+    if (ready & X_NOTIFY_ERROR) {
+        closeLorieConnection(fd);
+        lorieRecordDecoderDestroy(&gateARecordDecoder);
+        gateARecordDecoderReady = 0;
+        if (lorieGateAActive()) {
+            gateAFatalFromInput(LORIE_GATEA_FAIL_GENERATION, "x-hup");
+            return;
+        }
+        return;
+    }
+    if (conn_fd == -1)
+        return;
+    if (!gateARecordDecoderReady)
+        gateAInitRecordDecoder();
+    result = lorieRecordDecoderNext(fd, &gateARecordDecoder, &record);
+    if (result == LORIE_RECORD_PROGRESSED) {
+        if (record.isGate)
+            handleGateARecord(&record);
+        else if (handleLegacyRecord(&record, 1) != 0 && lorieGateAActive())
+            gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL,
+                                "x-legacy-record-dispatch");
+        lorieRecordRelease(&record);
+    } else if (result == LORIE_RECORD_PEER_CLOSED
+               || result == LORIE_RECORD_IO_ERROR
+               || result == LORIE_RECORD_PROTOCOL_FATAL) {
+        if (lorieGateAActive())
+            gateAFatalFromInput(result == LORIE_RECORD_PEER_CLOSED
+                ? LORIE_GATEA_FAIL_GENERATION : LORIE_GATEA_FAIL_PROTOCOL,
+                result == LORIE_RECORD_PEER_CLOSED ? "x-eof" : "x-record-error");
+        else {
+            closeLorieConnection(fd);
+            lorieRecordDecoderDestroy(&gateARecordDecoder);
+            gateARecordDecoderReady = 0;
+            lorieGateACancelDeferred(0, 0);
+        }
+    }
+}
+
+void handleLorieEvents(int fd, __unused int ready, __unused void *ignored) {
+    if (!lorieGateAProtoEnabled()) {
+        handleLorieEventsLegacy(fd, ready, ignored);
+        return;
+    }
+    handleLorieEventsProto(fd, ready);
 }
 
 void lorieSendClipboardData(const char* data) {

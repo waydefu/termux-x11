@@ -21,10 +21,80 @@
 #pragma ide diagnostic ignored "cppcoreguidelines-narrowing-conversions"
 #pragma ide diagnostic ignored "ConstantFunctionResult"
 #define log(prio, ...) __android_log_print(ANDROID_LOG_ ## prio, "LorieNative", __VA_ARGS__)
-#define sendEvent(...) do { if (conn_fd != -1) { lorieEvent e = { __VA_ARGS__ }; write(conn_fd, &e, sizeof(e)); } } while (0)
+#define sendEvent(...) do { lorieEvent e = { __VA_ARGS__ }; (void)lorieActivitySendLegacyRecord(&e); } while (0)
 
-extern volatile int conn_fd; // The only variable from shared with X server code.
+extern volatile int conn_fd; // Guarded by lorieActivityWriterMutex for write/close/rebind.
+pthread_mutex_t lorieActivityWriterMutex = PTHREAD_MUTEX_INITIALIZER;
 bool lorieDebugEnabled = false;
+
+static int lorieActivityWriteLocked(int fd, const void *first, size_t firstLen,
+                                    const void *second, size_t secondLen) {
+    if (fd < 0) {
+        errno = EBADF;
+        return -1;
+    }
+    if (first == NULL || firstLen == 0 || (secondLen != 0 && second == NULL)) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (lorieGateAWriteFull(fd, first, firstLen) != (ssize_t)firstLen)
+        return -1;
+    if (secondLen != 0
+        && lorieGateAWriteFull(fd, second, secondLen) != (ssize_t)secondLen)
+        return -1;
+    return 0;
+}
+
+int lorieActivitySendLegacyPayload(const lorieEvent *event,
+                                    const void *payload, size_t payloadLen) {
+    int fd, rc, savedErrno;
+    pthread_mutex_lock(&lorieActivityWriterMutex);
+    fd = conn_fd;
+    rc = lorieActivityWriteLocked(fd, event, event ? sizeof(*event) : 0,
+                                  payload, payloadLen);
+    savedErrno = rc == 0 ? 0 : errno;
+    pthread_mutex_unlock(&lorieActivityWriterMutex);
+    errno = savedErrno;
+    return rc;
+}
+
+int lorieActivitySendLegacyRecord(const lorieEvent *event) {
+    return lorieActivitySendLegacyPayload(event, NULL, 0);
+}
+
+int lorieActivitySendLegacyFd(const lorieEvent *event, int sentFd) {
+    int fd, rc = -1, savedErrno = EBADF;
+    pthread_mutex_lock(&lorieActivityWriterMutex);
+    fd = conn_fd;
+    if (fd < 0 || sentFd < 0) {
+        savedErrno = EBADF;
+    } else if (event == NULL) {
+        savedErrno = EINVAL;
+    } else if (lorieGateAWriteFull(fd, event, sizeof(*event))
+               != (ssize_t)sizeof(*event)
+               || ancil_send_fd(fd, sentFd) != 0) {
+        savedErrno = errno != 0 ? errno : EIO;
+    } else {
+        rc = 0;
+        savedErrno = 0;
+    }
+    pthread_mutex_unlock(&lorieActivityWriterMutex);
+    errno = savedErrno;
+    return rc;
+}
+
+int lorieActivitySendGateFrame(const struct LorieGateAFrame *frame,
+                               const void *body, size_t bodyLen) {
+    int fd, rc, savedErrno;
+    pthread_mutex_lock(&lorieActivityWriterMutex);
+    fd = conn_fd;
+    rc = lorieActivityWriteLocked(fd, frame, frame ? sizeof(*frame) : 0,
+                                  body, bodyLen);
+    savedErrno = errno;
+    pthread_mutex_unlock(&lorieActivityWriterMutex);
+    errno = savedErrno;
+    return rc;
+}
 
 // Timestamp of the last real input reaching the X session, from any source. Read/written only
 // from the Android main thread via JNI.
@@ -328,8 +398,12 @@ static int xcallback(int fd, int events, __unused void* data) {
         }
 
         ALooper_removeFd(ALooper_forThread(), fd);
-        close(conn_fd);
-        conn_fd = -1;
+        pthread_mutex_lock(&lorieActivityWriterMutex);
+        if (conn_fd == fd) {
+            conn_fd = -1;
+            close(fd);
+        }
+        pthread_mutex_unlock(&lorieActivityWriterMutex);
         g_renderer.setSharedState(NULL);
         g_renderer.removeAllBuffers();
         log(DEBUG, "disconnected");
@@ -339,7 +413,6 @@ static int xcallback(int fd, int events, __unused void* data) {
     if (conn_fd != -1) {
         lorieEvent e = {0};
 
-        again:
         /* Magic peek is valid only after the shared tuple is bound. Do not
          * require Activity getenv: am start never has TERMUX_X11_GATEA_PROTO.
          * Peek-true + unbound must not fall through to lorieEvent read. */
@@ -349,8 +422,11 @@ static int xcallback(int fd, int events, __unused void* data) {
             log(INFO, "GATEA_PEEK magic=1 bound=%d nonce=%llu generation=%llu",
                 bound, (unsigned long long)bn, (unsigned long long)bg);
             if (bound) {
+                /* Process exactly one complete Gate record for this looper
+                 * callback. Level-triggered delivery schedules another callback
+                 * if X already queued more bytes; never block on a second peek. */
                 gateAHandleFrame(conn_fd);
-                goto again;
+                return 1;
             }
             lorieGateAFatalHalt("r-unbound-frame", LORIE_GATEA_FAIL_PROTOCOL);
         }
@@ -423,31 +499,40 @@ static int xcallback(int fd, int events, __unused void* data) {
                 }
             }
         }
-
-        int n;
-        if (ioctl(conn_fd, FIONREAD, &n) >= 0 && n > sizeof(e))
-            goto again;
     }
 
     return 1;
 }
 
 static void connect_(__unused JNIEnv* env, __unused jobject cls, jint fd) {
-    if (conn_fd != -1) {
-        ALooper_removeFd(ALooper_forThread(), conn_fd);
-        close(conn_fd);
+    int oldFd;
+    pthread_mutex_lock(&lorieActivityWriterMutex);
+    oldFd = conn_fd;
+    if (oldFd != -1) {
+        ALooper_removeFd(ALooper_forThread(), oldFd);
+        conn_fd = -1;
+        close(oldFd);
+    }
+    pthread_mutex_unlock(&lorieActivityWriterMutex);
+    if (oldFd != -1) {
         g_renderer.setSharedState(NULL);
         g_renderer.removeAllBuffers();
         log(DEBUG, "disconnected");
     }
 
-    if ((conn_fd = fd) != -1) {
-        ALooper_addFd(ALooper_forThread(), fd, 0, ALOOPER_EVENT_INPUT | ALOOPER_EVENT_ERROR | ALOOPER_EVENT_HANGUP, xcallback, NULL);
+    if (fd != -1) {
+        pthread_mutex_lock(&lorieActivityWriterMutex);
+        conn_fd = fd;
+        pthread_mutex_unlock(&lorieActivityWriterMutex);
+        ALooper_addFd(ALooper_forThread(), fd, 0,
+                      ALOOPER_EVENT_INPUT | ALOOPER_EVENT_ERROR
+                      | ALOOPER_EVENT_HANGUP, xcallback, NULL);
 
-        // Give the X server our renderer wakeup cond var fd, resent on every reconnect.
+        /* Give the X server the renderer wakeup fd as one serialized logical
+         * record so no UI or renderer writer can split event from SCM_RIGHTS. */
         lorieEvent e = { .type = EVENT_RENDERER_WAKEUP_COND };
-        write(conn_fd, &e, sizeof(e));
-        ancil_send_fd(conn_fd, g_renderer.getWakeupCondFd());
+        if (lorieActivitySendLegacyFd(&e, g_renderer.getWakeupCondFd()) != 0)
+            log(ERROR, "Failed to send renderer wakeup fd: %s", strerror(errno));
 
         log(DEBUG, "XCB connection is successfull");
     }
@@ -499,7 +584,7 @@ static void sendTextEvent(JNIEnv *env, __unused jobject thiz, jbyteArray text) {
 
             log(DEBUG, "Sending unicode event: %lc (U+%X)", wc, wc);
             lorieEvent e = { .unicode = { .t = EVENT_UNICODE, .code = (uint32_t) wc } };
-            write(conn_fd, &e, sizeof(e));
+            (void)lorieActivitySendLegacyRecord(&e);
             p += len;
             if (p - (char*) str >= length)
                 break;
@@ -541,19 +626,24 @@ JNIEXPORT jint JNI_OnLoad(JavaVM *vm, __unused void *reserved) {
                 if (conn_fd != -1 && text) {
                     jsize length = env->GetArrayLength(text);
                     jbyte* str = env->GetByteArrayElements(text, NULL);
-                    sendEvent(.clipboardSend = { .t = EVENT_CLIPBOARD_SEND, .count = (uint32_t) length });
-                    write(conn_fd, str, length);
+                    lorieEvent e = { .clipboardSend = {
+                        .t = EVENT_CLIPBOARD_SEND, .count = (uint32_t) length } };
+                    (void)lorieActivitySendLegacyPayload(&e, str, (size_t)length);
                     env->ReleaseByteArrayElements(text, str, JNI_ABORT);
                 }
             }},
             {"sendWindowChange", "(IIILjava/lang/String;)V", (void *) +[](__unused JNIEnv* env, __unused jobject cls, jint width, jint height, jint framerate, jstring jname) {
                 if (conn_fd != -1) {
                     const char *name = (!jname || width <= 0 || height <= 0) ? NULL : env->GetStringUTFChars(jname, JNI_FALSE);
-                    sendEvent(.screenSize = { .t = EVENT_SCREEN_SIZE, .width = (uint16_t) width, .height = (uint16_t) height, .framerate = (uint16_t) framerate, .name_size = (name ? strlen(name) : 0) });
-                    if (name) {
-                        write(conn_fd, name, strlen(name));
+                    size_t nameLen = name ? strlen(name) : 0;
+                    lorieEvent e = { .screenSize = {
+                        .t = EVENT_SCREEN_SIZE, .width = (uint16_t) width,
+                        .height = (uint16_t) height,
+                        .framerate = (uint16_t) framerate,
+                        .name_size = nameLen } };
+                    (void)lorieActivitySendLegacyPayload(&e, name, nameLen);
+                    if (name)
                         env->ReleaseStringUTFChars(jname, name);
-                    }
                 }
             }},
             {"sendMouseEvent", "(FFIZZ)V", (void *) +[](__unused JNIEnv* env, __unused jobject cls, jfloat x, jfloat y, jint which_button, jboolean button_down, jboolean relative) {
