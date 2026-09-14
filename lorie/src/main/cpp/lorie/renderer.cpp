@@ -262,6 +262,22 @@ int lorieGateAImportBusy(void) {
     return busy;
 }
 
+/* Nonzero iff the GL thread must run to drain REGISTER/UNREGISTER/CLOSE.
+ * Excludes ready-registry occupancy so a live READY entry cannot pin
+ * shouldWait() false forever after the first successful import. */
+static int gateAHasPendingDrain(void) {
+    int i, pending = 0;
+    pthread_mutex_lock(&gateAImportMutex);
+    if (gateAImportOverflow)
+        pending = 1;
+    for (i = 0; !pending && i < LORIE_GATEA_MAX_PENDING; i++)
+        pending = gateAPending[i].occupied;
+    for (i = 0; !pending && i < LORIE_GATEA_MAX_READY + 1; i++)
+        pending = gateAPendingControl[i].occupied;
+    pthread_mutex_unlock(&gateAImportMutex);
+    return pending;
+}
+
 /* Sole renderer-side Gate A frame writer path (GL thread only). Returns 0 on
  * full delivery. Send failure means the generation is doomed via HUP; callers
  * tear down what they built and log. */
@@ -533,6 +549,9 @@ static void gateADrainPendingImports(struct lorie_shared_server_state *st) {
         }
     }
     pthread_mutex_unlock(&gateAImportMutex);
+    if (nWork || hadOverflow)
+        __android_log_print(ANDROID_LOG_INFO, "LorieNative",
+                            "GATEA_DRAIN imports=%d overflow=%d", nWork, hadOverflow);
     for (i = 0; i < nRelease; i++)
         lorieGateAReleaseAhb(toRelease[i]);
     if (hadOverflow) {
@@ -600,6 +619,9 @@ static void gateADrainPendingControls(struct lorie_shared_server_state *st) {
         memset(&gateAPendingControl[i], 0, sizeof(gateAPendingControl[i]));
     }
     pthread_mutex_unlock(&gateAImportMutex);
+    if (nWork)
+        __android_log_print(ANDROID_LOG_INFO, "LorieNative",
+                            "GATEA_DRAIN controls=%d", nWork);
     for (i = 0; i < nWork; i++) {
         uint64_t bn = 0, bg = 0;
         struct GateAPendingControl *ctl = &work[i];
@@ -2029,7 +2051,8 @@ bool Renderer::shouldWait(bool *waitingForBuffers) {
     pthread_spin_unlock(&bufferLock);
     gpuCopyPending = state && lorieGateAObserveReadIndex(&state->gpuCopyQueue.readIndex)
         != lorieGateAObserveWriteIndex(&state->gpuCopyQueue.writeIndex);
-    if (stateChanged || windowChanged || buffersChanged || gpuCopyPending)
+    if (stateChanged || windowChanged || buffersChanged || gpuCopyPending
+        || gateAHasPendingDrain())
         // If there are pending changes we should process them immediately.
         return false;
 
