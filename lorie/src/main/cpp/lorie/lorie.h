@@ -220,9 +220,9 @@ static inline __always_inline int lorieGateAProtoEnabled(void) {
     return e != NULL && e[0] == '1' && e[1] == '\0';
 }
 
-/* Experimental runtime telemetry is independently exact-default-OFF. It may
- * observe Gate A but must never affect admission, ownership, or failure policy. */
-static inline __always_inline int lorieGateATelemetryEnabled(void) {
+/* X-process request only. Exact "1". Activity/renderer never inherit the
+ * launcher environment; they must read the published shared enable word. */
+static inline __always_inline int lorieGateATelemetryRequested(void) {
     const char *e = getenv("TERMUX_X11_GATEA_TELEMETRY");
     return e != NULL && e[0] == '1' && e[1] == '\0';
 }
@@ -392,6 +392,8 @@ struct LorieGateATelemetry {
     uint64_t nextSequence;
     uint64_t counters[LORIE_GATEA_COUNTER_MAX];
     uint32_t overflow;
+    /* Published enable: 1 iff X requested exact "1" for this mapping.
+     * Layout unchanged (was reserved). Default remains 0 / OFF. */
     uint32_t reserved;
     struct LorieGateATraceRecord records[LORIE_GATEA_TRACE_CAPACITY];
 };
@@ -649,6 +651,14 @@ static inline __always_inline uint32_t lorieGateAWaiterWaitUntil(struct LorieGat
         if (pthread_cond_timedwait(&w->cond, &w->lock, deadline) == ETIMEDOUT)
             break;
     }
+    s = w->state;
+    pthread_mutex_unlock(&w->lock);
+    return s;
+}
+
+static inline __always_inline uint32_t lorieGateAWaiterObserve(struct LorieGateAWaiter *w) {
+    uint32_t s;
+    pthread_mutex_lock(&w->lock);
     s = w->state;
     pthread_mutex_unlock(&w->lock);
     return s;
@@ -957,19 +967,32 @@ static inline __always_inline bool lorieGateASharedAtomicsLockFree(
         if (!__atomic_is_lock_free(sizeof(state->gateADirect[i].state),
                                    &state->gateADirect[i].state))
             return false;
-    return !lorieGateATelemetryEnabled()
-        || (__atomic_is_lock_free(sizeof(state->gateATelemetry.nextSequence),
-                                  &state->gateATelemetry.nextSequence)
-            && __atomic_is_lock_free(sizeof(state->gateATelemetry.counters[0]),
-                                     &state->gateATelemetry.counters[0])
-            && __atomic_is_lock_free(sizeof(state->gateATelemetry.overflow),
-                                     &state->gateATelemetry.overflow));
+    return __atomic_is_lock_free(sizeof(state->gateATelemetry.nextSequence),
+                                 &state->gateATelemetry.nextSequence)
+        && __atomic_is_lock_free(sizeof(state->gateATelemetry.counters[0]),
+                                 &state->gateATelemetry.counters[0])
+        && __atomic_is_lock_free(sizeof(state->gateATelemetry.overflow),
+                                 &state->gateATelemetry.overflow)
+        && __atomic_is_lock_free(sizeof(state->gateATelemetry.reserved),
+                                 &state->gateATelemetry.reserved);
+}
+
+/* Renderer/Activity enable authority: bound generation + published word.
+ * Never getenv: the APK process does not inherit the X launcher flag. */
+static inline __always_inline int lorieGateATelemetryPublished(
+        const struct lorie_shared_server_state *state) {
+    if (state == NULL)
+        return 0;
+    if (lorieGateALoadU64Acquire(&state->gateA.sessionNonce) == 0
+        || lorieGateALoadU64Acquire(&state->gateA.generation) == 0)
+        return 0;
+    return lorieGateALoadU32Acquire(&state->gateATelemetry.reserved) == 1u;
 }
 
 static inline __always_inline void lorieGateACounterAdd(
         struct lorie_shared_server_state *state, uint32_t counter, int64_t delta) {
     uint64_t amount;
-    if (!lorieGateATelemetryEnabled() || state == NULL
+    if (!lorieGateATelemetryPublished(state) || state == NULL
         || counter >= LORIE_GATEA_COUNTER_MAX || delta == 0)
         return;
     amount = delta > 0 ? (uint64_t)delta : (uint64_t)(-delta);
@@ -1010,7 +1033,7 @@ static inline __always_inline void lorieGateATrace(
     struct LorieGateATraceRecord *record;
     uint64_t sequence;
     uint32_t counter;
-    if (!lorieGateATelemetryEnabled() || state == NULL
+    if (!lorieGateATelemetryPublished(state) || state == NULL
         || event == LORIE_GATEA_EVENT_NONE || event >= LORIE_GATEA_EVENT_MAX)
         return;
     counter = lorieGateACounterForEvent(event);

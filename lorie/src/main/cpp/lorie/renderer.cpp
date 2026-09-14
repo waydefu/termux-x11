@@ -278,15 +278,46 @@ static int gateAHasPendingDrain(void) {
     return pending;
 }
 
+__attribute__((noreturn)) static void gateARendererFatal(
+        struct lorie_shared_server_state *st, const char *what,
+        uint32_t reason, uint64_t serial, uint64_t srcId, uint64_t dstId);
+
+static uint64_t gateANowUs(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)ts.tv_nsec / 1000ull;
+}
+
+/* Bounded post-drain stage log. Enable is the published shared word, never
+ * Activity getenv. No pointers, FDs, AHB handles, tokens, or pixels. */
+static void gateAValidateStage(struct lorie_shared_server_state *st,
+                               uint64_t generation, uint64_t id,
+                               const char *stage, int result, int errn,
+                               uint64_t t0) {
+    uint32_t version;
+    uint64_t elapsed;
+    if (st == NULL || stage == NULL || !lorieGateATelemetryPublished(st))
+        return;
+    version = lorieGateALoadU32Acquire(&st->gateA.protocolVersion);
+    elapsed = gateANowUs() - t0;
+    __android_log_print(ANDROID_LOG_INFO, "LorieNative",
+        "GATEA_VALIDATE version=%u generation=%llu bufferId=%llu stage=%s result=%d errno=%d elapsed_us=%llu",
+        version, (unsigned long long)generation, (unsigned long long)id,
+        stage, result, errn, (unsigned long long)elapsed);
+}
+
 /* Sole renderer-side Gate A frame writer path (GL thread only). Returns 0 on
- * full delivery. Send failure means the generation is doomed via HUP; callers
- * tear down what they built and log. */
+ * full delivery. Send failure preserves errno for stage logs; callers
+ * fail-stop instead of waiting for a later HUP. */
 static int gateASendFrame(uint64_t id, uint64_t nonce, uint64_t generation,
                           uint32_t type, const void *body, uint32_t bodyLen) {
     struct LorieGateAFrame fr;
     int ok = 0;
-    if (conn_fd == -1)
+    int errn = 0;
+    if (conn_fd == -1) {
+        errno = EBADF;
         return -1;
+    }
     fr.magic = LORIE_GATEA_MAGIC;
     fr.version = LORIE_GATEA_PROTOCOL_VERSION;
     fr.type = (uint16_t)type;
@@ -299,8 +330,14 @@ static int gateASendFrame(uint64_t id, uint64_t nonce, uint64_t generation,
     if (lorieGateAWriteFull(conn_fd, &fr, sizeof(fr)) == (ssize_t)sizeof(fr)
         && (bodyLen == 0 || lorieGateAWriteFull(conn_fd, body, bodyLen) == (ssize_t)bodyLen))
         ok = 1;
+    else
+        errn = errno;
     pthread_mutex_unlock(&gateASendMutex);
-    return ok ? 0 : -1;
+    if (!ok) {
+        errno = errn ? errn : EIO;
+        return -1;
+    }
+    return 0;
 }
 
 static int gateASendReady(uint64_t id, uint64_t nonce, uint64_t generation,
@@ -311,12 +348,22 @@ static int gateASendReady(uint64_t id, uint64_t nonce, uint64_t generation,
                           &body, sizeof(body));
 }
 
-static void gateASendRegisterFailed(uint64_t id, uint64_t nonce, uint64_t generation, uint32_t code) {
+static void gateASendRegisterFailed(struct lorie_shared_server_state *st,
+                                    uint64_t id, uint64_t nonce, uint64_t generation,
+                                    uint32_t code, uint64_t t0) {
     struct LorieGateARegisterFailedBody body;
+    int rc, errn = 0;
     body.code = code;
     body.reserved = 0;
-    if (gateASendFrame(id, nonce, generation, LORIE_GATEA_MSG_REGISTER_FAILED, &body, sizeof(body)) != 0)
-        loge("gatea: REGISTER_FAILED send failed id=%llu (generation doomed via HUP path)", (unsigned long long)id);
+    gateAValidateStage(st, generation, id, "FAILED_SEND_ENTER", (int)code, 0, t0);
+    rc = gateASendFrame(id, nonce, generation, LORIE_GATEA_MSG_REGISTER_FAILED,
+                        &body, sizeof(body));
+    if (rc != 0)
+        errn = errno;
+    gateAValidateStage(st, generation, id, "FAILED_SEND_RETURN", rc == 0 ? 1 : 0, errn, t0);
+    if (rc != 0)
+        gateARendererFatal(st, "r-failed-send", LORIE_GATEA_FAIL_PROTOCOL, 0, id, 0);
+    gateAValidateStage(st, generation, id, "VALIDATE_TERMINAL_FAILED", (int)code, 0, t0);
 }
 
 static int gateASendUnregisterAck(struct lorie_shared_server_state *st,
@@ -374,38 +421,58 @@ static void gateADestroyReadyImport(struct lorie_shared_server_state *st,
 }
 
 /* Validate one dequeued import on the GL thread (context current, same
- * guarantees as the threadLoop attach path). Emits READY or REGISTER_FAILED.
- * Destroys partials in reverse order; releases the AHB ref on every exit. */
+ * guarantees as the threadLoop attach path). Every dequeued REGISTER ends in
+ * READY, REGISTER_FAILED (after reverse cleanup), or FATAL. No silent return. */
 static void gateAValidateImport(struct lorie_shared_server_state *st, uint64_t id, uint64_t nonce, uint64_t generation,
                                 uint64_t fingerprint, AHardwareBuffer *ahb) {
     EGLClientBuffer clientBuffer = NULL;
     EGLImage image = NULL;
+    EGLDisplay dpy;
+    EGLContext ctx;
     GLuint texture = 0;
     AHardwareBuffer_Desc desc;
     GLenum err;
-    int i;
+    uint64_t t0 = gateANowUs();
+    uint64_t bn = 0, bg = 0;
+    int i, rc, errn;
     if (ahb != NULL)
         lorieGateACounterAdd(st, LORIE_GATEA_COUNTER_AHB_ACQUIRE, 1);
-    {
-        /* Generation may have rotated while queued: stale nodes die quietly
-         * (X already poisoned or superseded them; sending for them now would
-         * corrupt the new generation). */
-        uint64_t bn = 0, bg = 0;
-        if (!lorieGateABoundTuple(&bn, &bg) || bn != nonce || bg != generation) {
-            gateAReleaseTrackedAhb(st, ahb);
-            return;
-        }
+    gateAValidateStage(st, generation, id, "VALIDATE_ENTER", 1, 0, t0);
+    if (!lorieGateABoundTuple(&bn, &bg) || bn != nonce || bg != generation) {
+        gateAValidateStage(st, generation, id, "TUPLE_MISMATCH", 0, 0, t0);
+        gateAReleaseTrackedAhb(st, ahb);
+        gateAValidateStage(st, generation, id, "VALIDATE_TERMINAL_FATAL", 0, 0, t0);
+        gateARendererFatal(st, "r-tuple-mismatch", LORIE_GATEA_FAIL_GENERATION,
+                           0, id, 0);
     }
-    if (eglGetCurrentDisplay() == EGL_NO_DISPLAY
+    gateAValidateStage(st, generation, id, "TUPLE_MATCH", 1, 0, t0);
+    dpy = eglGetCurrentDisplay();
+    ctx = eglGetCurrentContext();
+    if (dpy == EGL_NO_DISPLAY)
+        gateAValidateStage(st, generation, id, "EGL_NO_DISPLAY", 0, 0, t0);
+    else
+        gateAValidateStage(st, generation, id, "EGL_DISPLAY_PRESENT", 1, 0, t0);
+    if (ctx == EGL_NO_CONTEXT)
+        gateAValidateStage(st, generation, id, "EGL_NO_CONTEXT", 0, 0, t0);
+    else
+        gateAValidateStage(st, generation, id, "EGL_CONTEXT_PRESENT", 1, 0, t0);
+    if (lorieEglHasNativeClientBuffer() && lorieEglGetNativeClientBufferANDROID)
+        gateAValidateStage(st, generation, id, "NATIVE_CLIENT_BUFFER_CAPABLE", 1, 0, t0);
+    else
+        gateAValidateStage(st, generation, id, "NATIVE_CLIENT_BUFFER_CAPABLE", 0, 0, t0);
+    if (dpy == EGL_NO_DISPLAY
         || !lorieEglHasNativeClientBuffer() || !lorieEglGetNativeClientBufferANDROID) {
         gateAReleaseTrackedAhb(st, ahb);
-        gateASendRegisterFailed(id, nonce, generation, LORIE_GATEA_FAIL_IMPORT);
+        gateASendRegisterFailed(st, id, nonce, generation, LORIE_GATEA_FAIL_IMPORT, t0);
         return;
     }
+    gateAValidateStage(st, generation, id, "CLIENT_BUFFER_ENTER", 1, 0, t0);
     clientBuffer = lorieEglGetNativeClientBufferANDROID(ahb);
+    gateAValidateStage(st, generation, id, "CLIENT_BUFFER_RETURN",
+                       clientBuffer != NULL ? 1 : 0, 0, t0);
     if (clientBuffer == NULL) {
         gateAReleaseTrackedAhb(st, ahb);
-        gateASendRegisterFailed(id, nonce, generation, LORIE_GATEA_FAIL_IMPORT);
+        gateASendRegisterFailed(st, id, nonce, generation, LORIE_GATEA_FAIL_IMPORT, t0);
         return;
     }
     LorieBuffer_describeAHardwareBuffer(ahb, &desc);
@@ -417,30 +484,35 @@ static void gateAValidateImport(struct lorie_shared_server_state *st, uint64_t i
         || lorieGateAFingerprint((uint32_t)desc.width, (uint32_t)desc.height,
                                  (uint32_t)desc.stride, (uint32_t)desc.format) != fingerprint) {
         gateAReleaseTrackedAhb(st, ahb);
-        gateASendRegisterFailed(id, nonce, generation, LORIE_GATEA_FAIL_PROTOCOL);
+        gateASendRegisterFailed(st, id, nonce, generation, LORIE_GATEA_FAIL_PROTOCOL, t0);
         return;
     }
     if (!lorieEglHasImage()) {
         gateAReleaseTrackedAhb(st, ahb);
-        gateASendRegisterFailed(id, nonce, generation, LORIE_GATEA_FAIL_IMPORT);
+        gateASendRegisterFailed(st, id, nonce, generation, LORIE_GATEA_FAIL_IMPORT, t0);
         return;
     }
     {
         const EGLint attrs[] = { EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE };
-        image = lorieEglCreateImageKHR(eglGetCurrentDisplay(), EGL_NO_CONTEXT,
+        gateAValidateStage(st, generation, id, "CREATE_IMAGE_ENTER", 1, 0, t0);
+        image = lorieEglCreateImageKHR(dpy, EGL_NO_CONTEXT,
                                        EGL_NATIVE_BUFFER_ANDROID, clientBuffer, attrs);
+        gateAValidateStage(st, generation, id, "CREATE_IMAGE_RETURN",
+                           image != NULL ? 1 : 0, 0, t0);
     }
     if (image == NULL) {
         gateAReleaseTrackedAhb(st, ahb);
-        gateASendRegisterFailed(id, nonce, generation, LORIE_GATEA_FAIL_IMPORT);
+        gateASendRegisterFailed(st, id, nonce, generation, LORIE_GATEA_FAIL_IMPORT, t0);
         return;
     }
     lorieGateACounterAdd(st, LORIE_GATEA_COUNTER_EGLIMAGE_CREATE, 1);
     glGenTextures(1, &texture);
+    gateAValidateStage(st, generation, id, "TEXTURE_CREATE_RETURN",
+                       texture != 0 ? 1 : 0, 0, t0);
     if (texture == 0) {
         gateADestroyGlObjects(st, 0, image);
         gateAReleaseTrackedAhb(st, ahb);
-        gateASendRegisterFailed(id, nonce, generation, LORIE_GATEA_FAIL_DRAW);
+        gateASendRegisterFailed(st, id, nonce, generation, LORIE_GATEA_FAIL_DRAW, t0);
         return;
     }
     lorieGateACounterAdd(st, LORIE_GATEA_COUNTER_TEXTURE_CREATE, 1);
@@ -450,17 +522,20 @@ static void gateAValidateImport(struct lorie_shared_server_state *st, uint64_t i
     if (!lorieGlesHasEglImage()) {
         gateADestroyGlObjects(st, texture, image);
         gateAReleaseTrackedAhb(st, ahb);
-        gateASendRegisterFailed(id, nonce, generation, LORIE_GATEA_FAIL_IMPORT);
+        gateASendRegisterFailed(st, id, nonce, generation, LORIE_GATEA_FAIL_IMPORT, t0);
         return;
     }
+    gateAValidateStage(st, generation, id, "IMAGE_TARGET_ENTER", 1, 0, t0);
     lorieGlEGLImageTargetTexture2DOES(GL_TEXTURE_2D, image);
+    gateAValidateStage(st, generation, id, "IMAGE_TARGET_RETURN", 1, 0, t0);
     err = GL_NO_ERROR;
     for (GLenum e = glGetError(); e != GL_NO_ERROR; e = glGetError())
         err = e;
+    gateAValidateStage(st, generation, id, "GL_ERROR", (int)err, 0, t0);
     if (err != GL_NO_ERROR) {
         gateADestroyGlObjects(st, texture, image);
         gateAReleaseTrackedAhb(st, ahb);
-        gateASendRegisterFailed(id, nonce, generation, LORIE_GATEA_FAIL_DRAW);
+        gateASendRegisterFailed(st, id, nonce, generation, LORIE_GATEA_FAIL_DRAW, t0);
         return;
     }
     pthread_mutex_lock(&gateAImportMutex);
@@ -471,15 +546,13 @@ static void gateAValidateImport(struct lorie_shared_server_state *st, uint64_t i
     }
     if (i < LORIE_GATEA_MAX_READY) {
         /* Duplicate READY id in one generation: the sender registered twice
-         * without retiring. P3 never does this; poison deterministically here
-         * instead of aliasing (no reliance on a later observer). */
+         * without retiring. Unified renderer fatal containment; no aliasing. */
         pthread_mutex_unlock(&gateAImportMutex);
         gateADestroyGlObjects(st, texture, image);
         gateAReleaseTrackedAhb(st, ahb);
-        if (st != NULL)
-            lorieGateAPublishFatal(&st->gateA, LORIE_GATEA_FAIL_PROTOCOL);
-        loge("gatea: duplicate READY id=%llu in generation; poisoned", (unsigned long long)id);
-        return;
+        gateAValidateStage(st, generation, id, "VALIDATE_TERMINAL_FATAL", 0, 0, t0);
+        gateARendererFatal(st, "r-duplicate-ready", LORIE_GATEA_FAIL_PROTOCOL,
+                           0, id, 0);
     }
     for (i = 0; i < LORIE_GATEA_MAX_READY; i++) {
         if (!gateAReady[i].occupied) {
@@ -500,15 +573,22 @@ static void gateAValidateImport(struct lorie_shared_server_state *st, uint64_t i
         /* Registry full: deterministic resource failure, not corruption. */
         gateADestroyGlObjects(st, texture, image);
         gateAReleaseTrackedAhb(st, ahb);
-        gateASendRegisterFailed(id, nonce, generation, LORIE_GATEA_FAIL_IMPORT);
+        gateASendRegisterFailed(st, id, nonce, generation, LORIE_GATEA_FAIL_IMPORT, t0);
         return;
     }
-    if (gateASendReady(id, nonce, generation, fingerprint) != 0)
+    gateAValidateStage(st, generation, id, "READY_SEND_ENTER", 1, 0, t0);
+    rc = gateASendReady(id, nonce, generation, fingerprint);
+    errn = rc != 0 ? errno : 0;
+    gateAValidateStage(st, generation, id, "READY_SEND_RETURN", rc == 0 ? 1 : 0, errn, t0);
+    if (rc != 0) {
+        gateAValidateStage(st, generation, id, "VALIDATE_TERMINAL_FATAL", 0, errn, t0);
         gateARendererFatal(st, "r-ready-send", LORIE_GATEA_FAIL_PROTOCOL,
                            0, id, 0);
+    }
     lorieGateACounterAdd(st, LORIE_GATEA_COUNTER_RENDERER_REGISTRY_CURRENT, 1);
     lorieGateATrace(st, LORIE_GATEA_ROLE_RENDERER,
                     LORIE_GATEA_EVENT_REGISTER_READY, generation, 0, id, 0);
+    gateAValidateStage(st, generation, id, "VALIDATE_TERMINAL_READY", 1, 0, t0);
 }
 
 /* Drain validated imports on the GL thread. Runs inside threadLoop with the GL
@@ -562,8 +642,8 @@ static void gateADrainPendingImports(struct lorie_shared_server_state *st) {
     for (i = 0; i < nWork; i++) {
         if (work[i].failCode != LORIE_GATEA_FAIL_NONE) {
             /* Receive/descriptor failure upstream: nothing retained, report. */
-            gateASendRegisterFailed(work[i].id, work[i].nonce, work[i].generation,
-                                    work[i].failCode);
+            gateASendRegisterFailed(st, work[i].id, work[i].nonce, work[i].generation,
+                                    work[i].failCode, gateANowUs());
             continue;
         }
         gateAValidateImport(st, work[i].id, work[i].nonce, work[i].generation,

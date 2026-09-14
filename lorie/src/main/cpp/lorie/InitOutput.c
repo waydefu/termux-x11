@@ -575,6 +575,8 @@ void lorieActivityConnected(void) {
             lorieGateAProtocolInit(&pvfb->state->gateA,
                                    pvfb->state->gateA.sessionNonce,
                                    pvfb->state->gateA.generation + 1);
+            lorieGateAStoreU32Release(&pvfb->state->gateATelemetry.reserved,
+                lorieGateATelemetryRequested() ? 1u : 0u);
             gateAClosing = 0;
         }
     }
@@ -2391,8 +2393,21 @@ static Bool gateAEnsureReady(LorieBuffer *buf) {
         }
         clock_gettime(CLOCK_REALTIME, &now);
         if (now.tv_sec > deadline.tv_sec
-            || (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec))
+            || (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) {
+            uint32_t fatal = lorieGateAObserveFatal(shared);
+            uint32_t terminal;
+            if (fatal != 0)
+                lorieGateAFatalHalt("x-fatal-after-timeout", fatal);
+            terminal = lorieGateAWaiterObserve(w);
+            if (terminal == LORIE_GATEA_WAIT_DONE)
+                break;
+            if (terminal == LORIE_GATEA_WAIT_FAILED) {
+                if (lorieGateAObserveFatal(shared) != 0)
+                    lorieGateAFatalHalt("x-fatal-after-failed", LORIE_GATEA_FAIL_GENERATION);
+                return FALSE;
+            }
             lorieGateAFatalHalt("x-ready-timeout", LORIE_GATEA_FAIL_TIMEOUT);
+        }
     }
     if (lorieGateAObserveFatal(shared) != 0)
         lorieGateAFatalHalt("x-fatal-after-ready", LORIE_GATEA_FAIL_GENERATION);
