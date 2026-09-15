@@ -929,6 +929,23 @@ static bool gateAFencePublishGateA(struct lorie_shared_server_state *st,
     return true;
 }
 
+/* Present/COPY/SOLID are LORIE_GPU_OP_COPY or SOLID, so gateASeen stays 0
+ * and the Gate A fence helper never runs. completedSerial still advances,
+ * which is why R6-D2-INFLIGHT-retry1 admitted later Composite (X 20856,
+ * PUBLISH serial 8) while EVENT_COMPLETED_SERIAL for Present serial 6 was
+ * absent. Telemetry-gated; does not change fence wait or publish order. */
+static void gateATraceLegacyCompleted(struct lorie_shared_server_state *st,
+                                      uint64_t lastSerial, uint64_t srcId,
+                                      uint64_t dstId) {
+    uint64_t generation = 0;
+    if (st == NULL || lastSerial == 0)
+        return;
+    generation = lorieGateALoadU64Acquire(&st->gateA.generation);
+    lorieGateATrace(st, LORIE_GATEA_ROLE_RENDERER,
+                    LORIE_GATEA_EVENT_COMPLETED_SERIAL,
+                    generation, lastSerial, srcId, dstId);
+}
+
 void Renderer::bindTexture(GLuint id) const {
     glBindTexture(GL_TEXTURE_2D, id);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filtering);
@@ -1779,6 +1796,8 @@ struct LorieGateABatchOut Renderer::applyPendingGpuCopiesLocked() {
         /* readIndex means slot copied/consumed ONLY — never GPU done,
          * semantic success, or ownership returned. */
         out.lastSerial = entry.serial;
+        out.lastSrcId = entry.srcBufferId;
+        out.lastDstId = entry.dstBufferId;
         lorieGateAPublishReadIndex(&state->gpuCopyQueue.readIndex, ri + 1);
         } /* end legacy-entry else */
     }
@@ -1837,6 +1856,7 @@ void Renderer::applyPendingGpuCopies() {
         // Only now that the GPU has actually finished (not just been told to start) is it safe to
         // let present_execute_copy release/idle the source pixmap back to the client.
         lorieGateAPublishCompleted(&state->gpuCopyQueue.completedSerial, out.lastSerial);
+        gateATraceLegacyCompleted(state, out.lastSerial, out.lastSrcId, out.lastDstId);
         state->rendererSolidComplete = state->rendererSolidSubmits;
         notifyGpuCopyDone();
         }
@@ -2090,6 +2110,8 @@ void Renderer::redrawLocked(bool* waitingForBuffers) {
             }
         } else {
         lorieGateAPublishCompleted(&state->gpuCopyQueue.completedSerial, gpuCopySerial);
+        gateATraceLegacyCompleted(state, gpuCopySerial,
+                                  gpuCopyOut.lastSrcId, gpuCopyOut.lastDstId);
         }
         state->rendererSolidComplete = state->rendererSolidSubmits;
         if (!gpuCopyOut.gateASeen)
