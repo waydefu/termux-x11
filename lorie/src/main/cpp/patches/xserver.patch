@@ -132,6 +132,42 @@
  
          InputThreadInit();
  
+--- ./dix/dispatch.c
++++ ./dix/dispatch.c
+@@ -129,6 +129,9 @@ int ProcInitialConnection();
+ #include "xkbsrv.h"
+ #include "client.h"
+ #include "xfixesint.h"
++#include <string.h>
++
++extern void lorieGateATraceXRequest(int major, int minor, uint32_t clientSeq);
+ 
+ #ifdef XSERVER_DTRACE
+ #include "registry.h"
+@@ -534,6 +537,22 @@ Dispatch(void)
+                     if (ext)
+                         client->minorOp = ext->MinorOpcode(client);
+                 }
++                if (client->majorOp == 62 /* X_CopyArea */
++                    || client->majorOp == 70 /* X_PolyFillRectangle */
++                    || client->majorOp == 73 /* X_GetImage */) {
++                    lorieGateATraceXRequest(client->majorOp, client->minorOp,
++                                            client->sequence);
++                } else if (client->majorOp >= EXTENSION_BASE) {
++                    ExtensionEntry *gateAExt = GetExtensionEntry(client->majorOp);
++
++                    if (gateAExt && gateAExt->name
++                        && ((strcmp(gateAExt->name, "RENDER") == 0
++                             && client->minorOp == 8)
++                            || (strcmp(gateAExt->name, "Present") == 0
++                                && client->minorOp == 1)))
++                        lorieGateATraceXRequest(client->majorOp, client->minorOp,
++                                                client->sequence);
++                }
+ #ifdef XSERVER_DTRACE
+                 if (XSERVER_REQUEST_START_ENABLED())
+                     XSERVER_REQUEST_START(LookupMajorName(client->majorOp),
+ 
 +++ ./dri3/dri3_request.c
 @@ -227,6 +227,35 @@
      return Success;
@@ -424,7 +460,15 @@
      present_check_flip2_ptr             check_flip2;
  
 +++ ./present/present_execute.c
-@@ -34,5 +34,7 @@
+@@ -21,6 +21,7 @@
+  */
+ 
+ #include "present_priv.h"
++#include "dix.h"
+ 
+ /*
+  * Called when the wait fence is triggered; just gets the current msc/ust and
+@@ -34,5 +35,7 @@
      ScreenPtr               screen = vblank->screen;
      present_screen_priv_ptr screen_priv = present_screen_priv(screen);
 -
@@ -433,7 +477,7 @@
 +
      screen_priv->re_execute(vblank);
  }
-@@ -67,6 +69,14 @@
+@@ -67,6 +70,14 @@
      WindowPtr                   window = vblank->window;
      ScreenPtr                   screen = window->drawable.pScreen;
      present_screen_priv_ptr screen_priv = present_screen_priv(screen);
@@ -448,7 +492,7 @@
  
      /* If present_flip failed, we may have to requeue for the next MSC */
      if (vblank->exec_msc == crtc_msc + 1 &&
-@@ -79,12 +95,59 @@
+@@ -79,12 +96,64 @@
          return;
      }
  
@@ -473,11 +517,14 @@
 +        }
 +    } else if (lorieTryScheduleGpuCopy(vblank->pixmap, gpuCopyDst, vblank->update, gpuCopyXOff, gpuCopyYOff,
 +                                        &vblank->gpu_copy_serial, &vblank->gpu_copy_dst_buffer)) {
++        ClientPtr gateAClient = GetCurrentClient();
++        uint32_t gateAClientSeq = gateAClient ? gateAClient->sequence : 0;
 +        /* lorie: our GPU blit writes the destination pixmap directly, bypassing the normal GC
 +         * ops that Damage tracking hooks into, so report it manually - same drawable and region
 +         * present_scmd.c's flip success path already uses, so this also reaches Composite's
 +         * per-window damage for redirected windows, not just lorie's own root damage. */
 +        RegionPtr damage = vblank->update ? vblank->update : &window->clipList;
++        lorieGateATraceXCallback(4u, vblank->gpu_copy_serial, gateAClientSeq);
 +        if (vblank->update)
 +            RegionIntersect(damage, damage, &window->clipList);
 +        DamageDamageRegion(&window->drawable, damage);
@@ -489,13 +536,15 @@
 +            RegionDestroy(vblank->update);
 +            vblank->update = NULL;
 +        }
-+        if (Success == screen_priv->queue_vblank(screen, window, vblank->crtc, vblank->event_id, crtc_msc + 1)) {
++        if (!lorieGateAPresentRequeueShouldFail() &&
++            Success == screen_priv->queue_vblank(screen, window, vblank->crtc, vblank->event_id, crtc_msc + 1)) {
 +            vblank->gpu_copy_pending = TRUE;
 +            vblank->queued = TRUE;
 +            return;
 +        }
-+        /* Failed to requeue for polling (e.g. OOM) - release our extra ref and treat the
-+         * presumably still in-flight GPU copy as done; same best-effort fallback as above. */
++        /* Failed to requeue for polling (e.g. OOM) or R6 one-shot env — release
++         * extra ref and treat the presumably still in-flight GPU copy as done. */
++        lorieGateATracePresentEarlyAck(vblank->gpu_copy_serial, 0);
 +        lorieGpuCopyAck(vblank->pixmap, vblank->gpu_copy_dst_buffer);
 +    } else {
 +        present_copy_region(&window->drawable, vblank->pixmap, vblank->update, vblank->x_off, vblank->y_off);
@@ -522,7 +571,7 @@
  #include <X11/X.h>
  #include "scrnintstr.h"
  #include "misc.h"
-@@ -90,8 +91,31 @@
+@@ -90,8 +91,34 @@
      Bool                abort_flip;     /* aborting this flip */
      PresentFlipReason   reason;         /* reason for which flip is not possible */
      Bool                has_suboptimal; /* whether client can support SuboptimalCopy mode */
@@ -541,6 +590,9 @@
 +                                     uint64_t *out_serial, void **out_dst_buffer);
 +extern Bool lorieGpuCopyIsDone(uint64_t serial);
 +extern void lorieGpuCopyAck(PixmapPtr pixmap, void *dst_buffer);
++extern void lorieGateATraceXCallback(uint32_t xop, uint64_t gpuSerial, uint32_t clientSeq);
++extern int lorieGateAPresentRequeueShouldFail(void);
++extern void lorieGateATracePresentEarlyAck(uint64_t gpuSerial, uint64_t dstId);
 +/* lorie: implemented in lorie/cmdentrypoint.c. Avoids waiting forever on a GPU copy that a dead renderer will never finish. */
 +extern bool lorieConnectionAlive(void);
 +/* lorie: implemented in lorie/InitOutput.c. Renderer can be connected but still unable to

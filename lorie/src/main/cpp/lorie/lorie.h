@@ -374,8 +374,27 @@ typedef enum {
     LORIE_GATEA_EVENT_RESOURCE_DESTROY,
     LORIE_GATEA_EVENT_GENERATION_CLOSE,
     LORIE_GATEA_EVENT_GENERATION_CLOSED,
+    /* R6 observability. Numbers 1..28 stay frozen. No new counters. */
+    LORIE_GATEA_EVENT_REQUEST_ARRIVED,
+    LORIE_GATEA_EVENT_CALLBACK_EXECUTED,
+    LORIE_GATEA_EVENT_DIRECT_ADMIT_REJECT,
+    LORIE_GATEA_EVENT_PRESENT_EARLY_ACK,
     LORIE_GATEA_EVENT_MAX,
 } LorieGateAEvent;
+
+#define LORIE_GATEA_XOP_COPYAREA 1u
+#define LORIE_GATEA_XOP_SOLID 2u
+#define LORIE_GATEA_XOP_COMPOSITE 3u
+#define LORIE_GATEA_XOP_PRESENT 4u
+#define LORIE_GATEA_XOP_PREPARE_ACCESS 5u
+#define LORIE_GATEA_REJECT_NOT_QUIESCENT 1u
+#define LORIE_GATEA_REJECT_PAIR_ACTIVE 2u
+
+/* R6 X-trace ABI. Implemented in InitOutput.c; dix/present call without lorie.h. */
+void lorieGateATraceXRequest(int major, int minor, uint32_t clientSeq);
+void lorieGateATraceXCallback(uint32_t xop, uint64_t gpuSerial, uint32_t clientSeq);
+int lorieGateAPresentRequeueShouldFail(void);
+void lorieGateATracePresentEarlyAck(uint64_t gpuSerial, uint64_t dstId);
 
 typedef enum {
     LORIE_GATEA_COUNTER_DIRECT_PUBLISH = 0,
@@ -452,6 +471,13 @@ LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateAProtocol, firstFailedSerial)
 LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateAProtocol, firstFailureCode) == 32, "gatea failCode off");
 LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateAProtocol, fatalReason) == 36, "gatea fatalReason off");
 LORIE_GATEA_STATIC_ASSERT(sizeof(LorieGpuCopyEntry) == 168, "queue entry ABI unchanged");
+LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_EVENT_GENERATION_CLOSED == 28, "event 28 frozen");
+LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_EVENT_REQUEST_ARRIVED == 29, "r6 request-arrived");
+LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_EVENT_CALLBACK_EXECUTED == 30, "r6 callback");
+LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_EVENT_DIRECT_ADMIT_REJECT == 31, "r6 admit-reject");
+LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_EVENT_PRESENT_EARLY_ACK == 32, "r6 present-early-ack");
+LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_EVENT_MAX == 33, "r6 event max");
+LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_COUNTER_MAX == 28, "counter ABI frozen");
 LORIE_GATEA_STATIC_ASSERT(__atomic_always_lock_free(4, (const volatile void *)0)
     && __atomic_always_lock_free(8, (const volatile void *)0), "gatea atomics lock-free");
 

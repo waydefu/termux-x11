@@ -68,6 +68,8 @@ static int gateAPairActive(void);
 static int gateAPairOverlapsBuffer(LorieBuffer *buf);
 static int gateARetireBuffer(LorieBuffer *buf);
 static void gateACloseGeneration(void);
+static uint32_t gateACurrentClientSeq(void);
+static void gateATraceAdmitReject(uint64_t reason, uint64_t dstId);
 __attribute__((noreturn)) static void gateAXFatal(const char *what,
                                                    uint32_t reason,
                                                    uint64_t serial);
@@ -2037,6 +2039,7 @@ static Bool lorieExaPrepareSolid(PixmapPtr dst, int alu, Pixel planemask, Pixel 
     Pixel fullmask;
 
     memset(&exaGpuSolid, 0, sizeof(exaGpuSolid));
+    lorieGateATraceXCallback(LORIE_GATEA_XOP_SOLID, 0, gateACurrentClientSeq());
     exaSolidPrepare++;
     if (lorieGpuExaDisabled() || pvfb->root.legacyDrawing || !lorieConnectionAlive() || !lorieRendererAvailable()) {
         exaSolidFallback++;
@@ -2082,6 +2085,7 @@ static void lorieExaSolid(PixmapPtr dst, int x1, int y1, int x2, int y2) {
         exaGpuSolid.lastSerial = serial;
         exaGpuSolid.scheduled++;
         exaGpuSolid.dstBuf = dstBuf;
+        lorieGateATraceXCallback(LORIE_GATEA_XOP_SOLID, serial, gateACurrentClientSeq());
         if (exaGpuSolid.nrepair == 0)
             exaGpuSolid.repairUnion = box;
         else {
@@ -2161,6 +2165,7 @@ static Bool lorieExaPrepareCopy(PixmapPtr src, PixmapPtr dst, unused int dx, unu
     Pixel fullmask;
 
     memset(&exaGpuCopy, 0, sizeof(exaGpuCopy));
+    lorieGateATraceXCallback(LORIE_GATEA_XOP_COPYAREA, 0, gateACurrentClientSeq());
     if (lorieGpuExaDisabled() || pvfb->root.legacyDrawing || !lorieConnectionAlive() || !lorieRendererAvailable())
         return FALSE;
     if (alu != GXcopy || src == dst)
@@ -2206,6 +2211,7 @@ static void lorieExaCopy(PixmapPtr dst, int srcX, int srcY, int dstX, int dstY, 
         exaGpuCopy.scheduled++;
         exaGpuCopy.dstBuf = dstBuf;
         exaCopyOffloads++;
+        lorieGateATraceXCallback(LORIE_GATEA_XOP_COPYAREA, serial, gateACurrentClientSeq());
         return;
     }
     if (exaGpuCopy.scheduled)
@@ -2295,6 +2301,66 @@ static uint64_t gateABufferId(LorieBuffer *buf) {
         return 0;
     d = LorieBuffer_description(buf);
     return d ? d->id : 0;
+}
+
+static uint32_t gateACurrentClientSeq(void) {
+    ClientPtr client = GetCurrentClient();
+    return client ? client->sequence : 0;
+}
+
+static uint64_t gateACurrentGeneration(void) {
+    struct lorie_shared_server_state *st = pvfb ? pvfb->state : NULL;
+    if (!st)
+        return 0;
+    return lorieGateALoadU64Acquire(&st->gateA.generation);
+}
+
+void lorieGateATraceXRequest(int major, int minor, uint32_t clientSeq) {
+    struct lorie_shared_server_state *st = pvfb ? pvfb->state : NULL;
+    uint64_t srcId;
+    if (!st)
+        return;
+    srcId = ((uint64_t)(uint32_t) major << 32) | (uint32_t) minor;
+    lorieGateATrace(st, LORIE_GATEA_ROLE_X, LORIE_GATEA_EVENT_REQUEST_ARRIVED,
+                    gateACurrentGeneration(), 0, srcId, clientSeq);
+}
+
+void lorieGateATraceXCallback(uint32_t xop, uint64_t gpuSerial, uint32_t clientSeq) {
+    struct lorie_shared_server_state *st = pvfb ? pvfb->state : NULL;
+    if (!st)
+        return;
+    lorieGateATrace(st, LORIE_GATEA_ROLE_X, LORIE_GATEA_EVENT_CALLBACK_EXECUTED,
+                    gateACurrentGeneration(), gpuSerial, xop, clientSeq);
+}
+
+int lorieGateAPresentRequeueShouldFail(void) {
+    static int armed = -1;
+    const char *e;
+    if (armed < 0) {
+        e = getenv("TERMUX_X11_GATEA_R6_PRESENT_REQUEUE_FAIL");
+        armed = (e != NULL && e[0] == '1' && e[1] == '\0') ? 1 : 0;
+    }
+    if (armed != 1)
+        return 0;
+    armed = 0;
+    return 1;
+}
+
+void lorieGateATracePresentEarlyAck(uint64_t gpuSerial, uint64_t dstId) {
+    struct lorie_shared_server_state *st = pvfb ? pvfb->state : NULL;
+    if (!st)
+        return;
+    lorieGateATrace(st, LORIE_GATEA_ROLE_X, LORIE_GATEA_EVENT_PRESENT_EARLY_ACK,
+                    gateACurrentGeneration(), gpuSerial, 0, dstId);
+}
+
+static void gateATraceAdmitReject(uint64_t reason, uint64_t dstId) {
+    struct lorie_shared_server_state *st = pvfb ? pvfb->state : NULL;
+    uint64_t serial = pvfb ? pvfb->gpuCopySerialCounter : 0;
+    if (!st)
+        return;
+    lorieGateATrace(st, LORIE_GATEA_ROLE_X, LORIE_GATEA_EVENT_DIRECT_ADMIT_REJECT,
+                    gateACurrentGeneration(), serial, reason, dstId);
 }
 
 /* Nonzero iff the buffer is inside the live pair lease (either endpoint). */
@@ -2568,6 +2634,7 @@ static Bool lorieExaPrepareComposite(int op, PicturePtr pSrc, PicturePtr pMask, 
     uint64_t prepare_start = lorieB3aEnabled() ? lorieB3aNowNs() : 0;
     uint32_t b3aRecord = lorieB3aCurrentRecord();
     memset(&exaGpuComp, 0, sizeof(exaGpuComp));
+    lorieGateATraceXCallback(LORIE_GATEA_XOP_COMPOSITE, 0, gateACurrentClientSeq());
     if (!lorieCanAccelComposite(op, pSrc, pMask, pDst, pSrcPix, pMaskPix, pDstPix)) {
         exaCompPrepareFalse++;
         lorieB3aSetFallback(pvfb->state ? &pvfb->state->b3aTelemetry : NULL, b3aRecord, true);
@@ -2651,8 +2718,12 @@ static Bool gateADirectTryPrepare(int op, PicturePtr pSrc, PicturePtr pMask, Pic
     const LorieBuffer_Desc *sd, *dd;
     uint32_t wi, ri;
     Bool dstIsRoot;
-    if (!lorieGateAProtoEnabled() || gateAPairActive())
+    if (!lorieGateAProtoEnabled())
         return FALSE;
+    if (gateAPairActive()) {
+        gateATraceAdmitReject(LORIE_GATEA_REJECT_PAIR_ACTIVE, 0);
+        return FALSE;
+    }
     shared = lorieGateAShared();
     if (!shared || !lorieGateAAtomicsLockFree(shared) || !lorieGateAActive())
         return FALSE;
@@ -2698,8 +2769,10 @@ static Bool gateADirectTryPrepare(int op, PicturePtr pSrc, PicturePtr pMask, Pic
     }
     /* Every direct reserve is globally serialized against all prior renderer
      * work, including Present entries whose pending refs were early-ACKed. */
-    if (!gateAQueueSemanticallyQuiescent())
+    if (!gateAQueueSemanticallyQuiescent()) {
+        gateATraceAdmitReject(LORIE_GATEA_REJECT_NOT_QUIESCENT, dd ? dd->id : 0);
         return FALSE;
+    }
     wi = lorieGateAObserveWriteIndex(&pvfb->state->gpuCopyQueue.writeIndex);
     ri = lorieGateAObserveReadIndex(&pvfb->state->gpuCopyQueue.readIndex);
     if (wi - ri >= LORIE_GPU_COPY_QUEUE_CAPACITY)
@@ -3434,12 +3507,16 @@ static inline __always_inline Bool lorieNeedsGpuLock(PixmapPtr pPix, LoriePixmap
 Bool loriePrepareAccess(PixmapPtr pPix, int index) {
     LoriePixmapPriv *priv = exaGetPixmapDriverPrivate(pPix);
     Bool needsGpuLock = lorieNeedsGpuLock(pPix, priv, index);
+    int leaseRefuse;
     /* P2: CPU access to a leased endpoint is refused. The lease only lives
      * inside one synchronous Prepare→Done, so reaching here means reentrancy
      * or a missing Done — never a normal path. The SUCCESS-only repair sets a
      * private same-thread bypass after both endpoints are relocked. */
-    if (lorieGateAProtoEnabled() && !gateAInternalRepair
-        && priv && priv->buffer && gateAPairOverlapsBuffer(priv->buffer)) {
+    leaseRefuse = lorieGateAProtoEnabled() && !gateAInternalRepair
+        && priv && priv->buffer && gateAPairOverlapsBuffer(priv->buffer);
+    lorieGateATraceXCallback(LORIE_GATEA_XOP_PREPARE_ACCESS,
+                             leaseRefuse ? 1 : 0, gateACurrentClientSeq());
+    if (leaseRefuse) {
         log(ERROR, "Gate A: CPU access to leased buffer refused");
         return FALSE;
     }
