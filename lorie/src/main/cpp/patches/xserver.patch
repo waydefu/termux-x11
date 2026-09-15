@@ -492,39 +492,53 @@
  
      /* If present_flip failed, we may have to requeue for the next MSC */
      if (vblank->exec_msc == crtc_msc + 1 &&
-@@ -79,12 +96,69 @@
+@@ -79,12 +90,79 @@
          return;
      }
  
 -    present_copy_region(&window->drawable, vblank->pixmap, vblank->update, vblank->x_off, vblank->y_off);
 +    /* lorie: a GPU copy was already scheduled; poll for completion instead of blocking. */
-+    if (vblank->gpu_copy_pending && !lorieGpuCopyIsDone(vblank->gpu_copy_serial) &&
-+        !gpuCopyStalled &&
-+        Success == screen_priv->queue_vblank(screen, window, vblank->crtc, vblank->event_id, crtc_msc + 1)) {
-+        vblank->queued = TRUE;
-+        return;
-+    }
-+
 +    if (vblank->gpu_copy_pending) {
-+        lorieGpuCopyAck(vblank->pixmap, vblank->gpu_copy_dst_buffer);
-+        vblank->gpu_copy_pending = FALSE;
-+        if (gpuCopyStalled && !lorieGpuCopyIsDone(vblank->gpu_copy_serial)) {
-+            /* lorie: the renderer never actually finished this copy - tell the client it was
-+             * skipped instead of falsely reporting it as presented. */
-+            present_vblank_scrap(vblank);
-+            screen_priv->flush(window);
-+            return;
++        uint64_t gpuCopySerial = vblank->gpu_copy_serial;
++        uint64_t gpuCopyDstId = lorieGateAPixmapBufferId(gpuCopyDst);
++
++        if (!lorieGpuCopyIsDone(gpuCopySerial)) {
++            if (!gpuCopyStalled &&
++                Success == screen_priv->queue_vblank(screen, window, vblank->crtc,
++                                                     vblank->event_id, crtc_msc + 1)) {
++                vblank->queued = TRUE;
++                return;
++            }
++            if (!gpuCopyStalled) {
++                /* Natural queue_vblank failure after a prior schedule follows
++                 * the same completion-before-ACK contract as the R6 one-shot. */
++                lorieGateATracePresentRequeueFailed(gpuCopySerial, gpuCopyDstId);
++                present_gpu_copy_retire_or_fatal(vblank);
++                lorieGateATracePresentAckAfterCompleted(gpuCopySerial, gpuCopyDstId);
++            } else {
++                /* The helper fail-stops if completion is still uncertain. */
++                present_gpu_copy_retire_or_fatal(vblank);
++            }
++        } else {
++            present_gpu_copy_retire_or_fatal(vblank);
 +        }
 +    } else if (lorieTryScheduleGpuCopy(vblank->pixmap, gpuCopyDst, vblank->update, gpuCopyXOff, gpuCopyYOff,
 +                                        &vblank->gpu_copy_serial, &vblank->gpu_copy_dst_buffer)) {
-+        ClientPtr gateAClient = GetCurrentClient();
-+        uint32_t gateAClientSeq = gateAClient ? gateAClient->sequence : 0;
++        uint64_t gpuCopySerial;
++        uint64_t gpuCopyDstId;
++        ClientPtr gateAClient;
++        uint32_t gateAClientSeq;
++        vblank->gpu_copy_pending = TRUE;
++        gpuCopySerial = vblank->gpu_copy_serial;
++        gpuCopyDstId = lorieGateAPixmapBufferId(gpuCopyDst);
++        gateAClient = GetCurrentClient();
++        gateAClientSeq = gateAClient ? gateAClient->sequence : 0;
 +        /* lorie: our GPU blit writes the destination pixmap directly, bypassing the normal GC
 +         * ops that Damage tracking hooks into, so report it manually - same drawable and region
 +         * present_scmd.c's flip success path already uses, so this also reaches Composite's
 +         * per-window damage for redirected windows, not just lorie's own root damage. */
 +        RegionPtr damage = vblank->update ? vblank->update : &window->clipList;
-+        lorieGateATraceXCallback(4u, vblank->gpu_copy_serial, gateAClientSeq);
++        lorieGateATraceXCallback(4u, gpuCopySerial, gateAClientSeq);
 +        if (vblank->update)
 +            RegionIntersect(damage, damage, &window->clipList);
 +        DamageDamageRegion(&window->drawable, damage);
@@ -538,19 +552,15 @@
 +        }
 +        if (!lorieGateAPresentRequeueShouldFail() &&
 +            Success == screen_priv->queue_vblank(screen, window, vblank->crtc, vblank->event_id, crtc_msc + 1)) {
-+            vblank->gpu_copy_pending = TRUE;
 +            vblank->queued = TRUE;
 +            return;
 +        }
 +        /* Post-schedule requeue failed (OOM or R6 one-shot). Keep pending
 +         * refs until GPU completion is proven, then ACK. Timeout or renderer
 +         * loss fail-stops without releasing ownership. */
-+        lorieGateATracePresentRequeueFailed(
-+            vblank->gpu_copy_serial, lorieGateAPixmapBufferId(gpuCopyDst));
-+        lorieGpuCopyWaitForPresentOrFatal(vblank->gpu_copy_serial);
-+        lorieGpuCopyAck(vblank->pixmap, vblank->gpu_copy_dst_buffer);
-+        lorieGateATracePresentAckAfterCompleted(
-+            vblank->gpu_copy_serial, lorieGateAPixmapBufferId(gpuCopyDst));
++        lorieGateATracePresentRequeueFailed(gpuCopySerial, gpuCopyDstId);
++        present_gpu_copy_retire_or_fatal(vblank);
++        lorieGateATracePresentAckAfterCompleted(gpuCopySerial, gpuCopyDstId);
 +    } else {
 +        present_copy_region(&window->drawable, vblank->pixmap, vblank->update, vblank->x_off, vblank->y_off);
 +
@@ -576,7 +586,7 @@
  #include <X11/X.h>
  #include "scrnintstr.h"
  #include "misc.h"
-@@ -90,8 +91,38 @@
+@@ -90,8 +91,39 @@
      Bool                abort_flip;     /* aborting this flip */
      PresentFlipReason   reason;         /* reason for which flip is not possible */
      Bool                has_suboptimal; /* whether client can support SuboptimalCopy mode */
@@ -596,6 +606,7 @@
 +extern Bool lorieGpuCopyIsDone(uint64_t serial);
 +extern void lorieGpuCopyAck(PixmapPtr pixmap, void *dst_buffer);
 +extern void lorieGpuCopyWaitForPresentOrFatal(uint64_t serial);
++void present_gpu_copy_retire_or_fatal(present_vblank_ptr vblank);
 +extern uint64_t lorieGateAPixmapBufferId(PixmapPtr pixmap);
 +extern void lorieGateATraceXCallback(uint32_t xop, uint64_t gpuSerial, uint32_t clientSeq);
 +extern int lorieGateAPresentRequeueShouldFail(void);
@@ -643,31 +654,41 @@
              }
  
 +++ ./present/present_vblank.c
-@@ -188,6 +188,14 @@
+@@ -183,0 +184,20 @@
++present_gpu_copy_retire_or_fatal(present_vblank_ptr vblank)
++{
++    uint64_t serial;
++
++    if (!vblank)
++        FatalError("Present GPU-copy retirement received NULL vblank");
++    if (!vblank->gpu_copy_pending)
++        return;
++
++    serial = vblank->gpu_copy_serial;
++    if (serial == 0 || !lorieGpuCopyIsDone(serial))
++        lorieGpuCopyWaitForPresentOrFatal(serial);
++
++    lorieGpuCopyAck(vblank->pixmap, vblank->gpu_copy_dst_buffer);
++    vblank->gpu_copy_pending = FALSE;
++    vblank->gpu_copy_dst_buffer = NULL;
++    vblank->gpu_copy_serial = 0;
++}
++
++void
+@@ -188,6 +208,8 @@
                    vblank->pixmap->drawable.id, vblank->window->drawable.id,
                    vblank->crtc));
  
-+    /* lorie: an offloaded copy into vblank->pixmap may still be in flight - ack it now, while
-+     * the pixmap is still valid, or the extra buffer references lorieTryScheduleGpuCopy took
-+     * leak forever. */
-+    if (vblank->gpu_copy_pending) {
-+        lorieGpuCopyAck(vblank->pixmap, vblank->gpu_copy_dst_buffer);
-+        vblank->gpu_copy_pending = FALSE;
-+    }
++    present_gpu_copy_retire_or_fatal(vblank);
 +
      present_pixmap_idle(vblank->pixmap, vblank->window, vblank->serial, vblank->idle_fence);
      present_fence_destroy(vblank->idle_fence);
      dixDestroyPixmap(vblank->pixmap, vblank->pixmap->drawable.id);
-@@ -200,6 +208,13 @@
+@@ -200,6 +222,8 @@
  void
  present_vblank_destroy(present_vblank_ptr vblank)
  {
-+    /* lorie: same as in present_vblank_scrap() - must run before vblank->pixmap is dropped below,
-+     * for the destroy paths that reach a still-pending vblank without going through scrap first. */
-+    if (vblank->gpu_copy_pending) {
-+        lorieGpuCopyAck(vblank->pixmap, vblank->gpu_copy_dst_buffer);
-+        vblank->gpu_copy_pending = FALSE;
-+    }
++    present_gpu_copy_retire_or_fatal(vblank);
 +
      /* Remove vblank from window and screen lists */
      xorg_list_del(&vblank->window_list);
