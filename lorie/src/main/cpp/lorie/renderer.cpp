@@ -872,18 +872,19 @@ int Renderer::consumeGateAComposite(const LorieGpuCopyEntry *entry, bool *fboSet
 
 /* Fence one drained batch containing Gate A work and publish its terminal
  * watermark. FINITE wait only — EGL_FOREVER is forbidden here. Halts on any
- * unproven completion. Returns silently (no publication) only when a sticky
- * fatal is observed after a satisfied fence: X applies the same
- * observation order and halts itself. Post-fence GL errors CAS
- * firstFailedSerial so X derives FAILED_QUIESCED, never SUCCESS. */
-static void gateAFencePublishGateA(struct lorie_shared_server_state *st,
+ * unproven completion. Returns true only after publishing completedSerial;
+ * returns false when a sticky fatal suppresses publication. Post-fence GL
+ * errors CAS firstFailedSerial so X derives FAILED_QUIESCED, never SUCCESS.
+ * The caller sends the completion notification only after state->lock is
+ * released, so socket backpressure cannot block while owning that lock. */
+static bool gateAFencePublishGateA(struct lorie_shared_server_state *st,
                                    EGLDisplay dpy, uint64_t generation,
                                    uint64_t lastSerial, uint64_t srcId,
                                    uint64_t dstId, uint32_t batchGlError) {
     EGLSync fence;
     EGLint wait_result;
     if (st == NULL || lastSerial == 0)
-        return;
+        return false;
     fence = lorieEglCreateSyncKHR(dpy, EGL_SYNC_FENCE_KHR, nullptr);
     if (fence == EGL_NO_SYNC) {
         lorieGateATrace(st, LORIE_GATEA_ROLE_RENDERER,
@@ -910,7 +911,7 @@ static void gateAFencePublishGateA(struct lorie_shared_server_state *st,
                     LORIE_GATEA_EVENT_FENCE_SATISFIED,
                     generation, lastSerial, srcId, dstId);
     if (lorieGateAObserveFatal(&st->gateA) != 0)
-        return;
+        return false;
     if (batchGlError != GL_NO_ERROR) {
         if (!lorieGateAFirstFailedCAS(&st->gateA, lastSerial,
                                       LORIE_GATEA_FAIL_DRAW))
@@ -925,7 +926,7 @@ static void gateAFencePublishGateA(struct lorie_shared_server_state *st,
     lorieGateATrace(st, LORIE_GATEA_ROLE_RENDERER,
                     LORIE_GATEA_EVENT_COMPLETED_SERIAL,
                     generation, lastSerial, srcId, dstId);
-    notifyGpuCopyDone();
+    return true;
 }
 
 void Renderer::bindTexture(GLuint id) const {
@@ -1794,6 +1795,7 @@ struct LorieGateABatchOut Renderer::applyPendingGpuCopiesLocked() {
 // non-empty - see lorieTryScheduleGpuCopy), so it has to take the lock and fence/unlock itself.
 void Renderer::applyPendingGpuCopies() {
     struct LorieGateABatchOut out;
+    bool gateANotify = false;
     if (!state
         || lorieGateAObserveReadIndex(&state->gpuCopyQueue.readIndex)
             == lorieGateAObserveWriteIndex(&state->gpuCopyQueue.writeIndex))
@@ -1807,9 +1809,12 @@ void Renderer::applyPendingGpuCopies() {
     if (out.lastSerial != 0 && !out.stopOnFailure) {
         if (out.gateASeen) {
             /* P2: finite wait only; halts on unproven completion. */
-            gateAFencePublishGateA(state, egl_display, out.generation,
-                                   out.lastSerial, out.lastSrcId,
-                                   out.lastDstId, out.batchGlError);
+            gateANotify = gateAFencePublishGateA(state, egl_display,
+                                                 out.generation,
+                                                 out.lastSerial,
+                                                 out.lastSrcId,
+                                                 out.lastDstId,
+                                                 out.batchGlError);
         } else {
         EGLSync fence = lorieEglCreateSyncKHR(egl_display, EGL_SYNC_FENCE_KHR, nullptr);
         if (fence == EGL_NO_SYNC) {
@@ -1837,6 +1842,8 @@ void Renderer::applyPendingGpuCopies() {
         }
     }
     lorie_mutex_unlock(&state->lock, &state->lockingPid);
+    if (gateANotify)
+        notifyGpuCopyDone();
 }
 
 // Keeps the shown region still while the cursor stays inside it, panning only when the cursor
@@ -1855,6 +1862,7 @@ void Renderer::redrawLocked(bool* waitingForBuffers) {
     const LorieBuffer_Desc *desc = nullptr;
     EGLSync fence;
     EGLint wait_result;
+    bool gateANotify = false;
 
     if (!lorieEglHasFence() || !lorieEglCreateSyncKHR ||
         !lorieEglClientWaitSyncKHR || !lorieEglDestroySyncKHR) {
@@ -2078,7 +2086,7 @@ void Renderer::redrawLocked(bool* waitingForBuffers) {
                                 LORIE_GATEA_EVENT_COMPLETED_SERIAL,
                                 gpuCopyOut.generation, gpuCopySerial,
                                 gpuCopyOut.lastSrcId, gpuCopyOut.lastDstId);
-                notifyGpuCopyDone();
+                gateANotify = true;
             }
         } else {
         lorieGateAPublishCompleted(&state->gpuCopyQueue.completedSerial, gpuCopySerial);
@@ -2089,6 +2097,8 @@ void Renderer::redrawLocked(bool* waitingForBuffers) {
     }
     state->waitForNextFrame = true;
     lorie_mutex_unlock(&state->lock, &state->lockingPid);
+    if (gateANotify)
+        notifyGpuCopyDone();
 
     if (eglSwapBuffers(egl_display, sfc) != EGL_TRUE)
         printEglError("Failed to swap buffers", __LINE__);

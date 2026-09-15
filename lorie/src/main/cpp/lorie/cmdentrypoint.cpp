@@ -1246,27 +1246,43 @@ static void handleLorieEventsProto(int fd, int ready) {
         return;
     if (!gateARecordDecoderReady)
         gateAInitRecordDecoder();
-    result = lorieRecordDecoderNext(fd, &gateARecordDecoder, &record);
-    if (result == LORIE_RECORD_PROGRESSED) {
-        if (record.isGate)
-            handleGateARecord(&record);
-        else if (handleLegacyRecord(&record, 1) != 0 && lorieGateAActive())
-            gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL,
-                                "x-legacy-record-dispatch");
-        lorieRecordRelease(&record);
-    } else if (result == LORIE_RECORD_PEER_CLOSED
-               || result == LORIE_RECORD_IO_ERROR
-               || result == LORIE_RECORD_PROTOCOL_FATAL) {
-        if (lorieGateAActive())
-            gateAFatalFromInput(result == LORIE_RECORD_PEER_CLOSED
-                ? LORIE_GATEA_FAIL_GENERATION : LORIE_GATEA_FAIL_PROTOCOL,
-                result == LORIE_RECORD_PEER_CLOSED ? "x-eof" : "x-record-error");
-        else {
-            closeLorieConnection(fd);
-            lorieRecordDecoderDestroy(&gateARecordDecoder);
-            gateARecordDecoderReady = 0;
-            lorieGateACancelDeferred(0, 0);
+    /* The incremental decoder may consume only the prefix in one call even
+     * when the rest of that record is already queued. Drain phases and
+     * complete records until the nonblocking receive actually would block;
+     * otherwise one 24-byte completion record needs two main-loop wakeups and
+     * tiny sk_buffs eventually apply backpressure to the renderer writer. */
+    for (;;) {
+        result = lorieRecordDecoderNext(fd, &gateARecordDecoder, &record);
+        if (result == LORIE_RECORD_INCOMPLETE)
+            continue;
+        if (result == LORIE_RECORD_WOULD_BLOCK)
+            return;
+        if (result == LORIE_RECORD_PROGRESSED) {
+            if (record.isGate)
+                handleGateARecord(&record);
+            else if (handleLegacyRecord(&record, 1) != 0 && lorieGateAActive())
+                gateAFatalFromInput(LORIE_GATEA_FAIL_PROTOCOL,
+                                    "x-legacy-record-dispatch");
+            lorieRecordRelease(&record);
+            if (conn_fd != fd)
+                return;
+            continue;
         }
+        if (result == LORIE_RECORD_PEER_CLOSED
+            || result == LORIE_RECORD_IO_ERROR
+            || result == LORIE_RECORD_PROTOCOL_FATAL) {
+            if (lorieGateAActive())
+                gateAFatalFromInput(result == LORIE_RECORD_PEER_CLOSED
+                    ? LORIE_GATEA_FAIL_GENERATION : LORIE_GATEA_FAIL_PROTOCOL,
+                    result == LORIE_RECORD_PEER_CLOSED ? "x-eof" : "x-record-error");
+            else {
+                closeLorieConnection(fd);
+                lorieRecordDecoderDestroy(&gateARecordDecoder);
+                gateARecordDecoderReady = 0;
+                lorieGateACancelDeferred(0, 0);
+            }
+        }
+        return;
     }
 }
 
