@@ -379,6 +379,8 @@ typedef enum {
     LORIE_GATEA_EVENT_CALLBACK_EXECUTED,
     LORIE_GATEA_EVENT_DIRECT_ADMIT_REJECT,
     LORIE_GATEA_EVENT_PRESENT_EARLY_ACK,
+    LORIE_GATEA_EVENT_PRESENT_REQUEUE_FAILED,
+    LORIE_GATEA_EVENT_PRESENT_ACK_AFTER_COMPLETED,
     LORIE_GATEA_EVENT_MAX,
 } LorieGateAEvent;
 
@@ -395,6 +397,8 @@ void lorieGateATraceXRequest(int major, int minor, uint32_t clientSeq);
 void lorieGateATraceXCallback(uint32_t xop, uint64_t gpuSerial, uint32_t clientSeq);
 int lorieGateAPresentRequeueShouldFail(void);
 void lorieGateATracePresentEarlyAck(uint64_t gpuSerial, uint64_t dstId);
+void lorieGateATracePresentRequeueFailed(uint64_t gpuSerial, uint64_t dstId);
+void lorieGateATracePresentAckAfterCompleted(uint64_t gpuSerial, uint64_t dstId);
 
 typedef enum {
     LORIE_GATEA_COUNTER_DIRECT_PUBLISH = 0,
@@ -476,7 +480,9 @@ LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_EVENT_REQUEST_ARRIVED == 29, "r6 request-a
 LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_EVENT_CALLBACK_EXECUTED == 30, "r6 callback");
 LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_EVENT_DIRECT_ADMIT_REJECT == 31, "r6 admit-reject");
 LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_EVENT_PRESENT_EARLY_ACK == 32, "r6 present-early-ack");
-LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_EVENT_MAX == 33, "r6 event max");
+LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_EVENT_PRESENT_REQUEUE_FAILED == 33, "r6 present-requeue-failed");
+LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_EVENT_PRESENT_ACK_AFTER_COMPLETED == 34, "r6 present-ack-after-completed");
+LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_EVENT_MAX == 35, "r6 event max");
 LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_COUNTER_MAX == 28, "counter ABI frozen");
 LORIE_GATEA_STATIC_ASSERT(__atomic_always_lock_free(4, (const volatile void *)0)
     && __atomic_always_lock_free(8, (const volatile void *)0), "gatea atomics lock-free");

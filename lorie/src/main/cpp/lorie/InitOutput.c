@@ -1891,6 +1891,13 @@ static Bool lorieGpuCopyWait(uint64_t serial, int timeout_ms) {
     return TRUE;
 }
 
+void lorieGpuCopyWaitForPresentOrFatal(uint64_t serial) {
+    if (serial == 0)
+        gateAXFatal("x-present-copy-wait", LORIE_GATEA_FAIL_PROTOCOL, 0);
+    if (!lorieGpuCopyWait(serial, 2000))
+        gateAXFatal("x-present-copy-wait", LORIE_GATEA_FAIL_TIMEOUT, serial);
+}
+
 static struct {
     PixmapPtr src;
     PixmapPtr dst;
@@ -2303,6 +2310,13 @@ static uint64_t gateABufferId(LorieBuffer *buf) {
     return d ? d->id : 0;
 }
 
+uint64_t lorieGateAPixmapBufferId(PixmapPtr pixmap) {
+    LoriePixmapPriv *priv = LORIE_PIXMAP_PRIV_FROM_PIXMAP(pixmap);
+    if (!priv)
+        return 0;
+    return gateABufferId(priv->buffer);
+}
+
 static uint32_t gateACurrentClientSeq(void) {
     ClientPtr client = GetCurrentClient();
     return client ? client->sequence : 0;
@@ -2351,6 +2365,22 @@ void lorieGateATracePresentEarlyAck(uint64_t gpuSerial, uint64_t dstId) {
     if (!st)
         return;
     lorieGateATrace(st, LORIE_GATEA_ROLE_X, LORIE_GATEA_EVENT_PRESENT_EARLY_ACK,
+                    gateACurrentGeneration(), gpuSerial, 0, dstId);
+}
+
+void lorieGateATracePresentRequeueFailed(uint64_t gpuSerial, uint64_t dstId) {
+    struct lorie_shared_server_state *st = pvfb ? pvfb->state : NULL;
+    if (!st)
+        return;
+    lorieGateATrace(st, LORIE_GATEA_ROLE_X, LORIE_GATEA_EVENT_PRESENT_REQUEUE_FAILED,
+                    gateACurrentGeneration(), gpuSerial, 0, dstId);
+}
+
+void lorieGateATracePresentAckAfterCompleted(uint64_t gpuSerial, uint64_t dstId) {
+    struct lorie_shared_server_state *st = pvfb ? pvfb->state : NULL;
+    if (!st)
+        return;
+    lorieGateATrace(st, LORIE_GATEA_ROLE_X, LORIE_GATEA_EVENT_PRESENT_ACK_AFTER_COMPLETED,
                     gateACurrentGeneration(), gpuSerial, 0, dstId);
 }
 

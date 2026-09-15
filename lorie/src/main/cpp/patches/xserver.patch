@@ -542,10 +542,15 @@
 +            vblank->queued = TRUE;
 +            return;
 +        }
-+        /* Failed to requeue for polling (e.g. OOM) or R6 one-shot env — release
-+         * extra ref and treat the presumably still in-flight GPU copy as done. */
-+        lorieGateATracePresentEarlyAck(vblank->gpu_copy_serial, 0);
++        /* Post-schedule requeue failed (OOM or R6 one-shot). Keep pending
++         * refs until GPU completion is proven, then ACK. Timeout or renderer
++         * loss fail-stops without releasing ownership. */
++        lorieGateATracePresentRequeueFailed(
++            vblank->gpu_copy_serial, lorieGateAPixmapBufferId(gpuCopyDst));
++        lorieGpuCopyWaitForPresentOrFatal(vblank->gpu_copy_serial);
 +        lorieGpuCopyAck(vblank->pixmap, vblank->gpu_copy_dst_buffer);
++        lorieGateATracePresentAckAfterCompleted(
++            vblank->gpu_copy_serial, lorieGateAPixmapBufferId(gpuCopyDst));
 +    } else {
 +        present_copy_region(&window->drawable, vblank->pixmap, vblank->update, vblank->x_off, vblank->y_off);
 +
@@ -590,9 +595,13 @@
 +                                     uint64_t *out_serial, void **out_dst_buffer);
 +extern Bool lorieGpuCopyIsDone(uint64_t serial);
 +extern void lorieGpuCopyAck(PixmapPtr pixmap, void *dst_buffer);
++extern void lorieGpuCopyWaitForPresentOrFatal(uint64_t serial);
++extern uint64_t lorieGateAPixmapBufferId(PixmapPtr pixmap);
 +extern void lorieGateATraceXCallback(uint32_t xop, uint64_t gpuSerial, uint32_t clientSeq);
 +extern int lorieGateAPresentRequeueShouldFail(void);
 +extern void lorieGateATracePresentEarlyAck(uint64_t gpuSerial, uint64_t dstId);
++extern void lorieGateATracePresentRequeueFailed(uint64_t gpuSerial, uint64_t dstId);
++extern void lorieGateATracePresentAckAfterCompleted(uint64_t gpuSerial, uint64_t dstId);
 +/* lorie: implemented in lorie/cmdentrypoint.c. Avoids waiting forever on a GPU copy that a dead renderer will never finish. */
 +extern bool lorieConnectionAlive(void);
 +/* lorie: implemented in lorie/InitOutput.c. Renderer can be connected but still unable to
