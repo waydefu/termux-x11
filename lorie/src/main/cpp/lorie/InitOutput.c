@@ -70,6 +70,7 @@ static int gateARetireBuffer(LorieBuffer *buf);
 static void gateACloseGeneration(void);
 static uint32_t gateACurrentClientSeq(void);
 static void gateATraceAdmitReject(uint64_t reason, uint64_t dstId);
+static void lorieGateATestFaultPublishFromEnv(struct lorie_shared_server_state *st);
 __attribute__((noreturn)) static void gateAXFatal(const char *what,
                                                    uint32_t reason,
                                                    uint64_t serial);
@@ -504,6 +505,7 @@ void OsVendorInit(void) {
     memset(lorieScreen.state, 0, sizeof(*lorieScreen.state));
     lorieScreen.state->b3aTelemetry.schema_version = LORIE_B3A_SCHEMA_VERSION;
     lorieB3aCaptureProcessStart(&lorieScreen.state->b3aTelemetry, false);
+    lorieGateATestFaultPublishFromEnv(lorieScreen.state);
 
     if (lorieGateAProtoEnabled()) {
         /* P1 generation identity: exact-length randomness only. Raw syscall
@@ -1220,6 +1222,8 @@ static Bool lorieCloseScreen(ScreenPtr pScreen) {
      * conditions inside the drain terminate before normal resource release. */
     if (lorieGateAProtoEnabled())
         gateACloseGeneration();
+    if (pvfb->state)
+        lorieGateADumpSummary(pvfb->state, "x-close-screen");
 
     if (pvfb->xrenderProbeInstalled && ps &&
         ps->Composite == lorieCompositeProbe && pvfb->xrenderSavedComposite)
@@ -2317,6 +2321,10 @@ uint64_t lorieGateAPixmapBufferId(PixmapPtr pixmap) {
     return gateABufferId(priv->buffer);
 }
 
+uint64_t lorieGateACopyBufferId(void *buf) {
+    return gateABufferId((LorieBuffer *)buf);
+}
+
 static uint32_t gateACurrentClientSeq(void) {
     ClientPtr client = GetCurrentClient();
     return client ? client->sequence : 0;
@@ -2382,6 +2390,145 @@ void lorieGateATracePresentAckAfterCompleted(uint64_t gpuSerial, uint64_t dstId)
         return;
     lorieGateATrace(st, LORIE_GATEA_ROLE_X, LORIE_GATEA_EVENT_PRESENT_ACK_AFTER_COMPLETED,
                     gateACurrentGeneration(), gpuSerial, 0, dstId);
+}
+
+void lorieGateATracePresentRetire(uint64_t gpuSerial, uint64_t dstId, uint32_t waited) {
+    struct lorie_shared_server_state *st = pvfb ? pvfb->state : NULL;
+    if (!st)
+        return;
+    lorieGateATrace(st, LORIE_GATEA_ROLE_X, LORIE_GATEA_EVENT_PRESENT_RETIRE,
+                    gateACurrentGeneration(), gpuSerial, (uint64_t)waited, dstId);
+}
+
+static const char *const gateATestCellNames[] = {
+    NULL,
+    "src-ready-miss",
+    "dst-ready-miss",
+    "tuple-mismatch",
+    "fbo-incomplete",
+    "post-draw-gl",
+    "fence-create-fail",
+    "fence-timeout",
+    "renderer-fatal-pre-fence",
+    "wrong-generation-frame",
+    "renderer-exit-after-consume",
+    "serial-wrap",
+    "present-hold-complete",
+    "present-renderer-exit",
+    "destroy-while-gpu-owned",
+    "close-while-lease",
+    "stale-ready-replay",
+};
+
+static uint32_t gateATestCellFromName(const char *name) {
+    uint32_t i;
+    if (name == NULL)
+        return 0;
+    for (i = 1; i <= LORIE_GATEA_TEST_STALE_READY_REPLAY; i++)
+        if (strcmp(name, gateATestCellNames[i]) == 0)
+            return i;
+    return 0;
+}
+
+static void lorieGateATestFaultPublishFromEnv(struct lorie_shared_server_state *st) {
+    const char *fault;
+    const char *arm;
+    const char *r6;
+    uint32_t cell;
+    int faultSet;
+    int armSet;
+    if (st == NULL)
+        return;
+    fault = getenv("TERMUX_X11_GATEA_TEST_FAULT");
+    arm = getenv("TERMUX_X11_GATEA_TEST_ARM");
+    r6 = getenv("TERMUX_X11_GATEA_R6_PRESENT_REQUEUE_FAIL");
+    faultSet = fault != NULL && fault[0] != '\0';
+    armSet = arm != NULL && arm[0] != '\0';
+    if (!faultSet && !armSet)
+        return;
+    cell = gateATestCellFromName(fault);
+    if (!faultSet || !armSet
+        || arm == NULL || arm[0] != '1' || arm[1] != '\0'
+        || !lorieGateAProtoEnabled()
+        || !lorieGateATelemetryRequested()
+        || r6 != NULL
+        || cell == 0)
+        lorieGateAFatalHalt("x-test-fault-env", LORIE_GATEA_FAIL_PROTOCOL);
+    st->gateATestFault.magic = LORIE_GATEA_TEST_MAGIC;
+    st->gateATestFault.version = LORIE_GATEA_TEST_VERSION;
+    st->gateATestFault.cell = cell;
+    st->gateATestFault.armed = 1;
+    st->gateATestFault.consumed = 0;
+    st->gateATestFault.pad = 0;
+    st->gateATestFault.targetGeneration = 0;
+    st->gateATestFault.targetOrdinal = 0;
+}
+
+void lorieGateADumpSummary(struct lorie_shared_server_state *st, const char *where) {
+    char line[4096];
+    size_t used = 0;
+    uint32_t i;
+    FILE *f;
+    uint64_t nonce, generation, next, firstFailed;
+    uint32_t overflow, genFatal, fatalReason;
+    int n;
+    if (st == NULL)
+        return;
+    nonce = lorieGateALoadU64Acquire(&st->gateA.sessionNonce);
+    generation = lorieGateALoadU64Acquire(&st->gateA.generation);
+    next = __atomic_load_n(&st->gateATelemetry.nextSequence, __ATOMIC_RELAXED);
+    overflow = lorieGateALoadU32Acquire(&st->gateATelemetry.overflow);
+    firstFailed = lorieGateAObserveFirstFailed(&st->gateA);
+    genFatal = lorieGateAObserveFatal(&st->gateA);
+    fatalReason = lorieGateALoadU32Acquire(&st->gateA.fatalReason);
+    n = snprintf(line, sizeof(line),
+        "GATEA_SUMMARY where=%s nonce=%llu generation=%llu nextSequence=%llu overflow=%u firstFailed=%llu generationFatal=%u fatalReason=%u",
+        where ? where : "?",
+        (unsigned long long)nonce, (unsigned long long)generation,
+        (unsigned long long)next, overflow,
+        (unsigned long long)firstFailed, genFatal, fatalReason);
+    if (n < 0)
+        return;
+    used = (size_t)n;
+    if (used >= sizeof(line))
+        used = sizeof(line) - 1;
+    for (i = 0; i < LORIE_GATEA_COUNTER_MAX && used + 32 < sizeof(line); i++) {
+        uint64_t c = __atomic_load_n(&st->gateATelemetry.counters[i], __ATOMIC_RELAXED);
+        n = snprintf(line + used, sizeof(line) - used, " c%u=%llu",
+                     i, (unsigned long long)c);
+        if (n < 0)
+            break;
+        used += (size_t)n;
+        if (used >= sizeof(line)) {
+            used = sizeof(line) - 1;
+            break;
+        }
+    }
+    line[sizeof(line) - 1] = '\0';
+    __android_log_print(ANDROID_LOG_INFO, "gatea-a1", "%s", line);
+    f = fopen(LORIE_GATEA_SUMMARY_PATH, "w");
+    if (f) {
+        fprintf(f, "%s\n", line);
+        fclose(f);
+    }
+    f = fopen(LORIE_GATEA_RING_PATH, "w");
+    if (!f)
+        return;
+    for (i = 0; i < LORIE_GATEA_TRACE_CAPACITY; i++) {
+        uint32_t ev = lorieGateALoadU32Acquire(&st->gateATelemetry.records[i].event);
+        if (ev == LORIE_GATEA_EVENT_NONE)
+            continue;
+        fprintf(f,
+            "GATEA_EVENT seq=%llu role=%u event=%u generation=%llu serial=%llu src=%llu dst=%llu\n",
+            (unsigned long long)st->gateATelemetry.records[i].sequence,
+            (unsigned)st->gateATelemetry.records[i].role,
+            (unsigned)ev,
+            (unsigned long long)st->gateATelemetry.records[i].generation,
+            (unsigned long long)st->gateATelemetry.records[i].serial,
+            (unsigned long long)st->gateATelemetry.records[i].srcId,
+            (unsigned long long)st->gateATelemetry.records[i].dstId);
+    }
+    fclose(f);
 }
 
 static void gateATraceAdmitReject(uint64_t reason, uint64_t dstId) {
@@ -2878,6 +3025,8 @@ __attribute__((noreturn)) static void gateAXFatal(const char *what,
     lorieGateATrace(st, LORIE_GATEA_ROLE_X,
                     LORIE_GATEA_EVENT_GENERATION_FATAL,
                     generation, serial, gateAPair.srcId, gateAPair.dstId);
+    if (st != NULL)
+        lorieGateADumpSummary(st, what);
     lorieGateAFatalHalt(what, reason);
 }
 
@@ -3063,9 +3212,23 @@ static Bool gateADirectPublishRect(int srcX, int srcY, int dstX, int dstY,
         lorieGateATrace(pvfb->state, LORIE_GATEA_ROLE_X,
                         LORIE_GATEA_EVENT_LEASE_GPU_OWNED,
                         gateAPair.generation, 0, gateAPair.srcId, gateAPair.dstId);
+        if (lorieGateATestFaultConsume(pvfb->state,
+                                       LORIE_GATEA_TEST_DESTROY_WHILE_GPU_OWNED,
+                                       LORIE_GATEA_ROLE_X, 0,
+                                       gateAPair.generation))
+            gateAXFatal("x-destroy-in-lease", LORIE_GATEA_FAIL_UNREGISTER, 0);
+        if (lorieGateATestFaultConsume(pvfb->state,
+                                       LORIE_GATEA_TEST_CLOSE_WHILE_LEASE,
+                                       LORIE_GATEA_ROLE_X, 0,
+                                       gateAPair.generation))
+            gateACloseGeneration();
     }
     entry = &pvfb->state->gpuCopyQueue.entries[wi % LORIE_GPU_COPY_QUEUE_CAPACITY];
     memset(entry, 0, sizeof(*entry));
+    if (lorieGateATestFaultConsume(pvfb->state, LORIE_GATEA_TEST_SERIAL_WRAP,
+                                   LORIE_GATEA_ROLE_X, 0,
+                                   gateACurrentGeneration()))
+        pvfb->gpuCopySerialCounter = UINT64_MAX;
     if (++pvfb->gpuCopySerialCounter == 0)
         gateAXFatal("x-serial-wrap", LORIE_GATEA_FAIL_GENERATION, 0);
     entry->serial = pvfb->gpuCopySerialCounter;
@@ -3506,7 +3669,7 @@ void lorieExaDestroyPixmap(__unused ScreenPtr pScreen, void *driverPriv) {
      * single X server thread — treat it as protocol corruption, fail-stop. */
     if (lorieGateAProtoEnabled() && priv && priv->buffer
         && gateAPairOverlapsBuffer(priv->buffer))
-        lorieGateAFatalHalt("x-destroy-in-lease", LORIE_GATEA_FAIL_UNREGISTER);
+        gateAXFatal("x-destroy-in-lease", LORIE_GATEA_FAIL_UNREGISTER, 0);
     if (priv->buffer) {
         if (lorieGateAProtoEnabled() && gateARetireBuffer(priv->buffer) != 0)
             gateAXFatal("x-retire-buffer", LORIE_GATEA_FAIL_UNREGISTER, 0);

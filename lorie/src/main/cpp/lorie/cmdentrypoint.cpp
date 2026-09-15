@@ -590,12 +590,15 @@ static int gateAFrameTupleMatch(const struct LorieGateAFrame *fr) {
  * waiter FAILED, then halt without normal cleanup. */
 static void gateAFatalFromInput(uint32_t reason, const char *what) {
     struct LorieGateAProtocol *shared = lorieGateAShared();
+    struct lorie_shared_server_state *st = lorieGateASharedState();
     if (shared != NULL) {
         lorieGateAPublishFatal(shared, reason);
-        lorieGateATrace(lorieGateASharedState(), LORIE_GATEA_ROLE_X,
+        lorieGateATrace(st, LORIE_GATEA_ROLE_X,
                         LORIE_GATEA_EVENT_GENERATION_FATAL,
                         lorieGateALoadU64Acquire(&shared->generation), 0, 0, 0);
     }
+    if (st != NULL)
+        lorieGateADumpSummary(st, what);
     gateABroadcastGateAFailed();
     lorieGateAFatalHalt(what, reason);
 }
@@ -607,6 +610,12 @@ static void handleGateARecord(const struct LorieDecodedRecord *record) {
     int active = lorieGateAActive();
     if (!active)
         return;
+    if (lorieGateATestFaultConsume(lorieGateASharedState(),
+                                   LORIE_GATEA_TEST_WRONG_GENERATION_FRAME,
+                                   LORIE_GATEA_ROLE_X, 0, fr->generation)) {
+        gateAFatalFromInput(LORIE_GATEA_FAIL_GENERATION, "x-wrong-generation");
+        return;
+    }
     if (!gateAFrameTupleMatch(fr)) {
         gateAFatalFromInput(LORIE_GATEA_FAIL_GENERATION, "x-wrong-generation");
         return;
@@ -786,6 +795,7 @@ static void handleLorieEventsLegacy(int fd, __unused int ready, __unused void *i
             struct LorieGateAProtocol *gp = lorieGateAShared();
             if (gp != NULL)
                 lorieGateAPublishFatal(gp, LORIE_GATEA_FAIL_GENERATION);
+            lorieGateADumpSummary(lorieGateASharedState(), "x-hup");
             gateABroadcastGateAFailed();
             lorieGateAFatalHalt("x-hup", LORIE_GATEA_FAIL_GENERATION);
         }

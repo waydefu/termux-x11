@@ -381,6 +381,9 @@ typedef enum {
     LORIE_GATEA_EVENT_PRESENT_EARLY_ACK,
     LORIE_GATEA_EVENT_PRESENT_REQUEUE_FAILED,
     LORIE_GATEA_EVENT_PRESENT_ACK_AFTER_COMPLETED,
+    /* Artifact B / R7. Numbers 1..34 stay frozen. Event 32 stays unused. */
+    LORIE_GATEA_EVENT_TEST_FAULT_FIRED,
+    LORIE_GATEA_EVENT_PRESENT_RETIRE,
     LORIE_GATEA_EVENT_MAX,
 } LorieGateAEvent;
 
@@ -399,6 +402,9 @@ int lorieGateAPresentRequeueShouldFail(void);
 void lorieGateATracePresentEarlyAck(uint64_t gpuSerial, uint64_t dstId);
 void lorieGateATracePresentRequeueFailed(uint64_t gpuSerial, uint64_t dstId);
 void lorieGateATracePresentAckAfterCompleted(uint64_t gpuSerial, uint64_t dstId);
+void lorieGateATracePresentRetire(uint64_t gpuSerial, uint64_t dstId, uint32_t waited);
+uint64_t lorieGateACopyBufferId(void *buf);
+void lorieGateADumpSummary(struct lorie_shared_server_state *st, const char *where);
 
 typedef enum {
     LORIE_GATEA_COUNTER_DIRECT_PUBLISH = 0,
@@ -482,7 +488,9 @@ LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_EVENT_DIRECT_ADMIT_REJECT == 31, "r6 admit
 LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_EVENT_PRESENT_EARLY_ACK == 32, "r6 present-early-ack");
 LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_EVENT_PRESENT_REQUEUE_FAILED == 33, "r6 present-requeue-failed");
 LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_EVENT_PRESENT_ACK_AFTER_COMPLETED == 34, "r6 present-ack-after-completed");
-LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_EVENT_MAX == 35, "r6 event max");
+LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_EVENT_TEST_FAULT_FIRED == 35, "r7 test-fault-fired");
+LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_EVENT_PRESENT_RETIRE == 36, "r7 present-retire");
+LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_EVENT_MAX == 37, "r7 event max");
 LORIE_GATEA_STATIC_ASSERT(LORIE_GATEA_COUNTER_MAX == 28, "counter ABI frozen");
 LORIE_GATEA_STATIC_ASSERT(__atomic_always_lock_free(4, (const volatile void *)0)
     && __atomic_always_lock_free(8, (const volatile void *)0), "gatea atomics lock-free");
@@ -1471,6 +1479,50 @@ static inline __always_inline void lorieGateAReleaseAhb(AHardwareBuffer *ahb) {
 int lorieGateABoundTuple(uint64_t *nonce, uint64_t *generation);
 int lorieGateAUnbindTuple(uint64_t nonce, uint64_t generation);
 
+#define LORIE_GATEA_TEST_MAGIC 0x47374146u /* 'G7AF' */
+#define LORIE_GATEA_TEST_VERSION 1u
+/* X-only getenv TERMUX_X11_GATEA_TEST_FAULT + TERMUX_X11_GATEA_TEST_ARM=1.
+ * Renderer never getenv; it reads gateATestFault from the shared tail. */
+#define LORIE_GATEA_SUMMARY_PATH "/data/data/com.termux/files/usr/tmp/gatea-summary.txt"
+#define LORIE_GATEA_RING_PATH "/data/data/com.termux/files/usr/tmp/gatea-ring.txt"
+
+enum {
+    LORIE_GATEA_TEST_NONE = 0,
+    LORIE_GATEA_TEST_SRC_READY_MISS = 1,
+    LORIE_GATEA_TEST_DST_READY_MISS = 2,
+    LORIE_GATEA_TEST_TUPLE_MISMATCH = 3,
+    LORIE_GATEA_TEST_FBO_INCOMPLETE = 4,
+    LORIE_GATEA_TEST_POST_DRAW_GL = 5,
+    LORIE_GATEA_TEST_FENCE_CREATE_FAIL = 6,
+    LORIE_GATEA_TEST_FENCE_TIMEOUT = 7,
+    LORIE_GATEA_TEST_RENDERER_FATAL_PRE_FENCE = 8,
+    LORIE_GATEA_TEST_WRONG_GENERATION_FRAME = 9,
+    LORIE_GATEA_TEST_RENDERER_EXIT_AFTER_CONSUME = 10,
+    LORIE_GATEA_TEST_SERIAL_WRAP = 11,
+    LORIE_GATEA_TEST_PRESENT_HOLD_COMPLETE = 12,
+    LORIE_GATEA_TEST_PRESENT_RENDERER_EXIT = 13,
+    LORIE_GATEA_TEST_DESTROY_WHILE_GPU_OWNED = 14,
+    LORIE_GATEA_TEST_CLOSE_WHILE_LEASE = 15,
+    LORIE_GATEA_TEST_STALE_READY_REPLAY = 16,
+};
+
+struct LorieGateATestFault {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t cell;
+    uint32_t armed;
+    uint32_t consumed;
+    uint32_t pad;
+    uint64_t targetGeneration;
+    uint64_t targetOrdinal;
+};
+
+LORIE_GATEA_STATIC_ASSERT(sizeof(struct LorieGateATestFault) == 40, "r7 test-fault size");
+LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateATestFault, magic) == 0, "r7 test-fault magic off");
+LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateATestFault, targetGeneration) == 24, "r7 test-fault gen off");
+LORIE_GATEA_STATIC_ASSERT((offsetof(struct LorieGateATestFault, targetGeneration) % 8) == 0, "r7 test-fault gen aligned");
+LORIE_GATEA_STATIC_ASSERT((offsetof(struct LorieGateATestFault, consumed) % 4) == 0, "r7 test-fault consumed aligned");
+
 struct lorie_shared_server_state {
     /*
      * Renderer and X server are separated into 2 different processes.
@@ -1549,6 +1601,8 @@ struct lorie_shared_server_state {
      * frozen 40-byte result sideband. */
     struct LorieGateADirectMeta gateADirect[LORIE_GPU_COPY_QUEUE_CAPACITY];
     struct LorieGateATelemetry gateATelemetry;
+    /* Artifact B tail. Existing field offsets unchanged. */
+    struct LorieGateATestFault gateATestFault;
 };
 
 static inline __always_inline bool lorieGateASharedAtomicsLockFree(
@@ -1567,7 +1621,11 @@ static inline __always_inline bool lorieGateASharedAtomicsLockFree(
         && __atomic_is_lock_free(sizeof(state->gateATelemetry.overflow),
                                  &state->gateATelemetry.overflow)
         && __atomic_is_lock_free(sizeof(state->gateATelemetry.reserved),
-                                 &state->gateATelemetry.reserved);
+                                 &state->gateATelemetry.reserved)
+        && __atomic_is_lock_free(sizeof(state->gateATestFault.armed),
+                                 &state->gateATestFault.armed)
+        && __atomic_is_lock_free(sizeof(state->gateATestFault.consumed),
+                                 &state->gateATestFault.consumed);
 }
 
 /* Renderer/Activity enable authority: bound generation + published word.
@@ -1649,6 +1707,48 @@ static inline __always_inline void lorieGateATrace(
         (unsigned long long)sequence, role, event,
         (unsigned long long)generation, (unsigned long long)serial,
         (unsigned long long)srcId, (unsigned long long)dstId);
+}
+
+/* Qualification-only. Unarmed returns after the armed load; no I/O. */
+static inline __always_inline int lorieGateATestFaultArmed(
+        const struct lorie_shared_server_state *st, uint32_t cell) {
+    uint32_t armed, magic, version, got;
+    if (st == NULL)
+        return 0;
+    armed = __atomic_load_n(&st->gateATestFault.armed, __ATOMIC_ACQUIRE);
+    if (armed == 0)
+        return 0;
+    magic = __atomic_load_n(&st->gateATestFault.magic, __ATOMIC_ACQUIRE);
+    version = __atomic_load_n(&st->gateATestFault.version, __ATOMIC_ACQUIRE);
+    got = __atomic_load_n(&st->gateATestFault.cell, __ATOMIC_ACQUIRE);
+    return magic == LORIE_GATEA_TEST_MAGIC
+        && version == LORIE_GATEA_TEST_VERSION
+        && got == cell;
+}
+
+/* One-shot: CAS consumed 0→1, then event 35, then the caller injects. */
+static inline __always_inline int lorieGateATestFaultConsume(
+        struct lorie_shared_server_state *st, uint32_t cell,
+        uint32_t role, uint64_t serial, uint64_t generation) {
+    uint32_t expected;
+    uint64_t targetGen, targetOrd;
+    if (!lorieGateATestFaultArmed(st, cell))
+        return 0;
+    targetGen = __atomic_load_n(&st->gateATestFault.targetGeneration,
+                                __ATOMIC_ACQUIRE);
+    targetOrd = __atomic_load_n(&st->gateATestFault.targetOrdinal,
+                                __ATOMIC_ACQUIRE);
+    if (targetGen != 0 && targetGen != generation)
+        return 0;
+    if (targetOrd != 0 && targetOrd != serial)
+        return 0;
+    expected = 0;
+    if (!__atomic_compare_exchange_n(&st->gateATestFault.consumed, &expected, 1u,
+                                     0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        return 0;
+    lorieGateATrace(st, role, LORIE_GATEA_EVENT_TEST_FAULT_FIRED,
+                    generation, serial, (uint64_t)cell, (uint64_t)role);
+    return 1;
 }
 
 #ifdef __cplusplus

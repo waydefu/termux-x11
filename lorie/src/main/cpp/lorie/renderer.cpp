@@ -381,6 +381,8 @@ __attribute__((noreturn)) static void gateARendererFatal(
     lorieGateATrace(st, LORIE_GATEA_ROLE_RENDERER,
                     LORIE_GATEA_EVENT_GENERATION_FATAL,
                     generation, serial, srcId, dstId);
+    if (st != NULL)
+        lorieGateADumpSummary(st, what);
     lorieGateAFatalHalt(what, reason);
 }
 
@@ -578,6 +580,12 @@ static void gateAValidateImport(struct lorie_shared_server_state *st, uint64_t i
         gateAValidateStage(st, generation, id, "VALIDATE_TERMINAL_FATAL", 0, errn, t0);
         gateARendererFatal(st, "r-ready-send", LORIE_GATEA_FAIL_PROTOCOL,
                            0, id, 0);
+    }
+    if (lorieGateATestFaultConsume(st, LORIE_GATEA_TEST_STALE_READY_REPLAY,
+                                   LORIE_GATEA_ROLE_RENDERER, 0, generation)) {
+        uint64_t oldGen = generation > 0 ? generation - 1 : 0;
+        uint64_t oldNonce = nonce > 0 ? nonce - 1 : 0;
+        (void)gateASendReady(id, oldNonce, oldGen, fingerprint);
     }
     lorieGateACounterAdd(st, LORIE_GATEA_COUNTER_RENDERER_REGISTRY_CURRENT, 1);
     lorieGateATrace(st, LORIE_GATEA_ROLE_RENDERER,
@@ -811,6 +819,18 @@ int Renderer::consumeGateAComposite(const LorieGpuCopyEntry *entry, bool *fboSet
     int i;
     if (!entry || !fboSetUp || !boundDstId || !prevViewport)
         return 1;
+    if (lorieGateATestFaultConsume(state, LORIE_GATEA_TEST_SRC_READY_MISS,
+                                   LORIE_GATEA_ROLE_RENDERER, entry->serial,
+                                   generation)
+        || lorieGateATestFaultConsume(state, LORIE_GATEA_TEST_DST_READY_MISS,
+                                      LORIE_GATEA_ROLE_RENDERER, entry->serial,
+                                      generation)) {
+        lorieGateATrace(state, LORIE_GATEA_ROLE_RENDERER,
+                        LORIE_GATEA_EVENT_DIRECT_LOOKUP_FAIL,
+                        generation, entry->serial,
+                        entry->srcBufferId, entry->dstBufferId);
+        return 2;
+    }
     if (gateALookupDirect(entry->srcBufferId, entry->dstBufferId,
                           &srcTex, &dstTex, &srcW, &srcH, &dstW, &dstH) != 0) {
         lorieGateATrace(state, LORIE_GATEA_ROLE_RENDERER,
@@ -836,6 +856,10 @@ int Renderer::consumeGateAComposite(const LorieGpuCopyEntry *entry, bool *fboSet
         glViewport(0, 0, (GLsizei)dstW, (GLsizei)dstH);
         *boundDstId = entry->dstBufferId;
     }
+    if (lorieGateATestFaultConsume(state, LORIE_GATEA_TEST_FBO_INCOMPLETE,
+                                   LORIE_GATEA_ROLE_RENDERER, entry->serial,
+                                   generation))
+        return 3;
     if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
         return 3;
     /* XRender ARGB is premultiplied: Cout = Cs + Cd*(1-As) (same as legacy). */
@@ -867,6 +891,11 @@ int Renderer::consumeGateAComposite(const LorieGpuCopyEntry *entry, bool *fboSet
         if (e != GL_NO_ERROR)
             *glErrorOut = e;
     }
+    if (lorieGateATestFaultConsume(state, LORIE_GATEA_TEST_POST_DRAW_GL,
+                                   LORIE_GATEA_ROLE_RENDERER, entry->serial,
+                                   generation)
+        && glErrorOut != NULL)
+        *glErrorOut = GL_INVALID_OPERATION;
     return 0;
 }
 
@@ -885,7 +914,12 @@ static bool gateAFencePublishGateA(struct lorie_shared_server_state *st,
     EGLint wait_result;
     if (st == NULL || lastSerial == 0)
         return false;
-    fence = lorieEglCreateSyncKHR(dpy, EGL_SYNC_FENCE_KHR, nullptr);
+    if (lorieGateATestFaultConsume(st, LORIE_GATEA_TEST_FENCE_CREATE_FAIL,
+                                   LORIE_GATEA_ROLE_RENDERER, lastSerial,
+                                   generation))
+        fence = EGL_NO_SYNC;
+    else
+        fence = lorieEglCreateSyncKHR(dpy, EGL_SYNC_FENCE_KHR, nullptr);
     if (fence == EGL_NO_SYNC) {
         lorieGateATrace(st, LORIE_GATEA_ROLE_RENDERER,
                         LORIE_GATEA_EVENT_FENCE_ERROR, generation,
@@ -894,8 +928,13 @@ static bool gateAFencePublishGateA(struct lorie_shared_server_state *st,
                            lastSerial, srcId, dstId);
     }
     glFlush();
-    wait_result = lorieEglClientWaitSyncKHR(dpy, fence, 0,
-                                            (EGLTimeKHR)LORIE_GATEA_FENCE_TIMEOUT_NS);
+    if (lorieGateATestFaultConsume(st, LORIE_GATEA_TEST_FENCE_TIMEOUT,
+                                   LORIE_GATEA_ROLE_RENDERER, lastSerial,
+                                   generation))
+        wait_result = EGL_TIMEOUT_EXPIRED_KHR;
+    else
+        wait_result = lorieEglClientWaitSyncKHR(dpy, fence, 0,
+                                                (EGLTimeKHR)LORIE_GATEA_FENCE_TIMEOUT_NS);
     if (wait_result != EGL_CONDITION_SATISFIED_KHR) {
         lorieEglDestroySyncKHR(dpy, fence);
         lorieGateATrace(st, LORIE_GATEA_ROLE_RENDERER,
@@ -1624,6 +1663,26 @@ struct LorieGateABatchOut Renderer::applyPendingGpuCopiesLocked() {
                             LORIE_GATEA_EVENT_CONSUME_DIRECT,
                             directMeta.generation, entry.serial,
                             entry.srcBufferId, entry.dstBufferId);
+            if (lorieGateATestFaultConsume(state,
+                                           LORIE_GATEA_TEST_RENDERER_FATAL_PRE_FENCE,
+                                           LORIE_GATEA_ROLE_RENDERER, entry.serial,
+                                           directMeta.generation))
+                gateARendererFatal(state, "r-test-fatal-pre-fence",
+                                   LORIE_GATEA_FAIL_GENERATION, entry.serial,
+                                   entry.srcBufferId, entry.dstBufferId);
+            if (lorieGateATestFaultConsume(state,
+                                           LORIE_GATEA_TEST_RENDERER_EXIT_AFTER_CONSUME,
+                                           LORIE_GATEA_ROLE_RENDERER, entry.serial,
+                                           directMeta.generation)) {
+                lorieGateADumpSummary(state, "r-exit-after-consume");
+                _exit(127);
+            }
+            if (lorieGateATestFaultConsume(state, LORIE_GATEA_TEST_TUPLE_MISMATCH,
+                                           LORIE_GATEA_ROLE_RENDERER, entry.serial,
+                                           directMeta.generation))
+                gateARendererFatal(state, "r-gatea-direct-identity",
+                                   LORIE_GATEA_FAIL_PROTOCOL, entry.serial,
+                                   entry.srcBufferId, entry.dstBufferId);
             if (!lorieGateABoundTuple(&bn, &bg)
                 || bn != directMeta.nonce || bg != directMeta.generation
                 || entry.op != LORIE_GPU_OP_COMPOSITE
@@ -1799,6 +1858,14 @@ struct LorieGateABatchOut Renderer::applyPendingGpuCopiesLocked() {
         out.lastSrcId = entry.srcBufferId;
         out.lastDstId = entry.dstBufferId;
         lorieGateAPublishReadIndex(&state->gpuCopyQueue.readIndex, ri + 1);
+        if (entry.op == LORIE_GPU_OP_COPY
+            && lorieGateATestFaultConsume(state,
+                                          LORIE_GATEA_TEST_PRESENT_RENDERER_EXIT,
+                                          LORIE_GATEA_ROLE_RENDERER, entry.serial,
+                                          lorieGateALoadU64Acquire(&state->gateA.generation))) {
+            lorieGateADumpSummary(state, "r-exit-present");
+            _exit(127);
+        }
         } /* end legacy-entry else */
     }
 
@@ -1855,6 +1922,12 @@ void Renderer::applyPendingGpuCopies() {
         lorieEglDestroySyncKHR(egl_display, fence);
         // Only now that the GPU has actually finished (not just been told to start) is it safe to
         // let present_execute_copy release/idle the source pixmap back to the client.
+        if (lorieGateATestFaultConsume(state, LORIE_GATEA_TEST_PRESENT_HOLD_COMPLETE,
+                                       LORIE_GATEA_ROLE_RENDERER, out.lastSerial,
+                                       lorieGateALoadU64Acquire(&state->gateA.generation))) {
+            lorie_mutex_unlock(&state->lock, &state->lockingPid);
+            return;
+        }
         lorieGateAPublishCompleted(&state->gpuCopyQueue.completedSerial, out.lastSerial);
         gateATraceLegacyCompleted(state, out.lastSerial, out.lastSrcId, out.lastDstId);
         state->rendererSolidComplete = state->rendererSolidSubmits;
@@ -2015,7 +2088,13 @@ void Renderer::redrawLocked(bool* waitingForBuffers) {
                (sourceLeft + sourceWidth) / (float) desc->width * xfactor,
                (sourceTop + sourceHeight) / (float) desc->height,
                LorieBuffer_isRgba(buffer));
-    fence = lorieEglCreateSyncKHR(egl_display, EGL_SYNC_FENCE_KHR, nullptr);
+    if (gpuCopyOut.gateASeen
+        && lorieGateATestFaultConsume(state, LORIE_GATEA_TEST_FENCE_CREATE_FAIL,
+                                       LORIE_GATEA_ROLE_RENDERER, gpuCopySerial,
+                                       gpuCopyOut.generation))
+        fence = EGL_NO_SYNC;
+    else
+        fence = lorieEglCreateSyncKHR(egl_display, EGL_SYNC_FENCE_KHR, nullptr);
     if (fence == EGL_NO_SYNC) {
         loge("redraw completion fence creation failed; completion not published");
         if (gpuCopyOut.gateASeen)
@@ -2055,7 +2134,13 @@ void Renderer::redrawLocked(bool* waitingForBuffers) {
      * hanging there stalls the renderer, which X bounds via its Done wait. */
     EGLTimeKHR gateaTimeout = gpuCopyOut.gateASeen
         ? (EGLTimeKHR)LORIE_GATEA_FENCE_TIMEOUT_NS : EGL_FOREVER;
-    wait_result = lorieEglClientWaitSyncKHR(egl_display, fence, 0, gateaTimeout);
+    if (gpuCopyOut.gateASeen
+        && lorieGateATestFaultConsume(state, LORIE_GATEA_TEST_FENCE_TIMEOUT,
+                                       LORIE_GATEA_ROLE_RENDERER, gpuCopySerial,
+                                       gpuCopyOut.generation))
+        wait_result = EGL_TIMEOUT_EXPIRED_KHR;
+    else
+        wait_result = lorieEglClientWaitSyncKHR(egl_display, fence, 0, gateaTimeout);
     if (wait_result != EGL_CONDITION_SATISFIED_KHR) {
         loge("redraw completion fence wait failed: 0x%x; completion not published", wait_result);
         lorieEglDestroySyncKHR(egl_display, fence);
@@ -2109,6 +2194,13 @@ void Renderer::redrawLocked(bool* waitingForBuffers) {
                 gateANotify = true;
             }
         } else {
+        if (lorieGateATestFaultConsume(state, LORIE_GATEA_TEST_PRESENT_HOLD_COMPLETE,
+                                       LORIE_GATEA_ROLE_RENDERER, gpuCopySerial,
+                                       lorieGateALoadU64Acquire(&state->gateA.generation))) {
+            state->rendererSolidComplete = state->rendererSolidSubmits;
+            lorie_mutex_unlock(&state->lock, &state->lockingPid);
+            return;
+        }
         lorieGateAPublishCompleted(&state->gpuCopyQueue.completedSerial, gpuCopySerial);
         gateATraceLegacyCompleted(state, gpuCopySerial,
                                   gpuCopyOut.lastSrcId, gpuCopyOut.lastDstId);

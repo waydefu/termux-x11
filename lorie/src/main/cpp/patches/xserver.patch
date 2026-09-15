@@ -586,7 +586,7 @@
  #include <X11/X.h>
  #include "scrnintstr.h"
  #include "misc.h"
-@@ -90,8 +91,39 @@
+@@ -90,8 +91,41 @@
      Bool                abort_flip;     /* aborting this flip */
      PresentFlipReason   reason;         /* reason for which flip is not possible */
      Bool                has_suboptimal; /* whether client can support SuboptimalCopy mode */
@@ -613,6 +613,8 @@
 +extern void lorieGateATracePresentEarlyAck(uint64_t gpuSerial, uint64_t dstId);
 +extern void lorieGateATracePresentRequeueFailed(uint64_t gpuSerial, uint64_t dstId);
 +extern void lorieGateATracePresentAckAfterCompleted(uint64_t gpuSerial, uint64_t dstId);
++extern uint64_t lorieGateACopyBufferId(void *buf);
++extern void lorieGateATracePresentRetire(uint64_t gpuSerial, uint64_t dstId, uint32_t waited);
 +/* lorie: implemented in lorie/cmdentrypoint.c. Avoids waiting forever on a GPU copy that a dead renderer will never finish. */
 +extern bool lorieConnectionAlive(void);
 +/* lorie: implemented in lorie/InitOutput.c. Renderer can be connected but still unable to
@@ -654,10 +656,12 @@
              }
  
 +++ ./present/present_vblank.c
-@@ -183,0 +184,20 @@
+@@ -183,0 +184,25 @@
 +present_gpu_copy_retire_or_fatal(present_vblank_ptr vblank)
 +{
 +    uint64_t serial;
++    uint64_t dstId;
++    uint32_t waited;
 +
 +    if (!vblank)
 +        FatalError("Present GPU-copy retirement received NULL vblank");
@@ -665,6 +669,9 @@
 +        return;
 +
 +    serial = vblank->gpu_copy_serial;
++    dstId = lorieGateACopyBufferId(vblank->gpu_copy_dst_buffer);
++    waited = (serial != 0 && lorieGpuCopyIsDone(serial)) ? 0 : 1;
++    lorieGateATracePresentRetire(serial, dstId, waited);
 +    if (serial == 0 || !lorieGpuCopyIsDone(serial))
 +        lorieGpuCopyWaitForPresentOrFatal(serial);
 +
@@ -675,7 +682,7 @@
 +}
 +
 +void
-@@ -188,6 +208,8 @@
+@@ -188,6 +213,8 @@
                    vblank->pixmap->drawable.id, vblank->window->drawable.id,
                    vblank->crtc));
  
@@ -684,7 +691,7 @@
      present_pixmap_idle(vblank->pixmap, vblank->window, vblank->serial, vblank->idle_fence);
      present_fence_destroy(vblank->idle_fence);
      dixDestroyPixmap(vblank->pixmap, vblank->pixmap->drawable.id);
-@@ -200,6 +222,8 @@
+@@ -200,6 +227,8 @@
  void
  present_vblank_destroy(present_vblank_ptr vblank)
  {
