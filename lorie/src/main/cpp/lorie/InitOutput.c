@@ -1902,6 +1902,18 @@ void lorieGpuCopyWaitForPresentOrFatal(uint64_t serial) {
         gateAXFatal("x-present-copy-wait", LORIE_GATEA_FAIL_TIMEOUT, serial);
 }
 
+/* Legacy EXA Composite: no completion proof → no client-visible Done.
+ * Timeout/loss must not repair, ack, or emit Gcomp Done. */
+static void lorieGpuCopyWaitForCompositeOrFatal(uint64_t serial, int scheduled) {
+    if (serial == 0)
+        gateAXFatal("x-exa-composite-wait", LORIE_GATEA_FAIL_PROTOCOL, 0);
+    if (!lorieGpuCopyWait(serial, 2000)) {
+        log(ERROR, "EXA GPU composite wait timeout serial=%llu scheduled=%d",
+            (unsigned long long) serial, scheduled);
+        gateAXFatal("x-exa-composite-wait", LORIE_GATEA_FAIL_TIMEOUT, serial);
+    }
+}
+
 static struct {
     PixmapPtr src;
     PixmapPtr dst;
@@ -3547,9 +3559,7 @@ static void lorieExaDoneComposite(PixmapPtr dst) {
     }
 
     if (exaGpuComp.scheduled) {
-        if (!lorieGpuCopyWait(exaGpuComp.lastSerial, 2000))
-            log(ERROR, "EXA GPU composite wait timeout serial=%llu scheduled=%d",
-                (unsigned long long) exaGpuComp.lastSerial, exaGpuComp.scheduled);
+        lorieGpuCopyWaitForCompositeOrFatal(exaGpuComp.lastSerial, exaGpuComp.scheduled);
         if (dst && dst->drawable.depth < 32) {
             if (exaGpuComp.nrepair > 0 && exaGpuComp.nrepair < 32)
                 lorieExaRepairDestXByteZero(dst, exaGpuComp.repair, exaGpuComp.nrepair);
