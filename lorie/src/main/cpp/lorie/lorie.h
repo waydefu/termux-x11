@@ -657,12 +657,22 @@ static inline __always_inline uint32_t lorieGateAObserveFirstFailureCode(const s
  * completion; anything else is FATAL unless quiescence is proven separately. */
 #define LORIE_GATEA_FENCE_TIMEOUT_NS 2000000000ull
 
-/* Renderer idle wait while waitForNextFrame is set. X lorieGpuCopyWait is a
- * usleep poll with no AChoreographer pump, so waitForNextFrame stays true for
- * the whole EXA Done-wait. X cannot take Activity stateLock (process-private);
- * publish + pthread_cond_signal(rendererCond) can lose the wakeup if GLES has
- * already decided to wait. 8 ms is far below the 2000 ms EXA budget and is
- * NOT a change to that budget. */
+/* Renderer idle recheck interval while waitForNextFrame is set.
+ *
+ * Invariant: if GPU-copy work becomes visible in the sticky queue while the
+ * renderer is frame-gated, the renderer must re-evaluate the queue within this
+ * interval even if the associated condvar signal is lost.
+ *
+ * This is NOT a GPU completion timeout and is NOT a change to
+ * LORIE_GATEA_FENCE_TIMEOUT_NS or lorieGpuCopyWait(..., 2000). Those remain
+ * the outer EXA fail-stop.
+ *
+ * X lorieGpuCopyWait is a usleep poll with no AChoreographer pump, so
+ * waitForNextFrame stays true for the whole EXA Done-wait. X cannot take
+ * Activity stateLock (process-private); publish + pthread_cond_signal can
+ * lose the wakeup if GLES has already decided to wait. The cond itself is
+ * process-shared (mmap) with CLOCK_MONOTONIC so the 8 ms bound is not
+ * stretched by a CLOCK_REALTIME rollback. X only signals; it never waits. */
 #define LORIE_RENDERER_FRAME_WAIT_NS 8000000L
 
 /* Gate A P2 drain outcome. Returned by value from

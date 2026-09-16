@@ -1166,16 +1166,28 @@ void Renderer::init(JNIEnv* env) {
     pthread_mutex_init(&stateLock, nullptr);
 
     // Created once, never recreated; only the fd is (re)sent to the X server whenever it (re)connects.
+    // PROCESS_SHARED so X can signal; CLOCK_MONOTONIC so frame-gated timedwait
+    // is not stretched by a realtime clock rollback. X never waits on this
+    // object (InitOutput.c only pthread_cond_signal). Clock is a flag bit in
+    // existing pthread_cond_t; sizeof and shared-state ABI are unchanged.
     pthread_condattr_t cond_attr;
     pthread_condattr_init(&cond_attr);
     pthread_condattr_setpshared(&cond_attr, PTHREAD_PROCESS_SHARED);
+    if (pthread_condattr_setclock(&cond_attr, CLOCK_MONOTONIC) != 0) {
+        loge("Failed to set renderer wakeup cond CLOCK_MONOTONIC, aborting");
+        abort();
+    }
     stateCondFd = LorieBuffer_createRegion("renderer-cond", sizeof(pthread_cond_t));
     stateCond = stateCondFd == -1 ? (pthread_cond_t*) MAP_FAILED : (pthread_cond_t*) mmap(nullptr, sizeof(pthread_cond_t), PROT_READ|PROT_WRITE, MAP_SHARED, stateCondFd, 0);
     if (stateCond == MAP_FAILED) {
         loge("Failed to allocate renderer wakeup cond var, aborting");
         abort();
     }
-    pthread_cond_init(stateCond, &cond_attr);
+    if (pthread_cond_init(stateCond, &cond_attr) != 0) {
+        loge("Failed to init renderer wakeup cond var, aborting");
+        abort();
+    }
+    pthread_condattr_destroy(&cond_attr);
 
     pthread_cond_init(&stateChangeFinishCond, nullptr);
     pthread_spin_init(&bufferLock, false);
@@ -2282,10 +2294,11 @@ void Renderer::waitWhileIdle(bool *waitingForBuffers) {
             break;
         if (state && state->waitForNextFrame) {
             struct timespec deadline;
-            /* Default pthread cond clock is CLOCK_REALTIME; keep it so X's
-             * process-shared signal still matches. 8 ms is short enough that a
-             * wall-clock step is not a 2000 ms stall. */
-            clock_gettime(CLOCK_REALTIME, &deadline);
+            /* stateCond is initialized CLOCK_MONOTONIC. Signal does not use
+             * the clock; X can keep signaling. Do not fall back to unbounded
+             * wait if the deadline cannot be formed. */
+            if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
+                abort();
             deadline.tv_nsec += LORIE_RENDERER_FRAME_WAIT_NS;
             if (deadline.tv_nsec >= 1000000000L) {
                 deadline.tv_sec++;
