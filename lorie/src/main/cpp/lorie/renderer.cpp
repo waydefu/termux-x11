@@ -1951,7 +1951,9 @@ static float panToCursor(float offset, float cursor, float shown, float total) {
 }
 
 /* Observe-only stall phase markers for redrawLocked's presentation path.
- * CLOCK_MONOTONIC atomic observes only: no extra locks, waits, or EGL. */
+ * CLOCK_MONOTONIC atomic observes only: no extra locks, waits, or EGL.
+ * NOTIFY wraps the post-completion notifyGpuCopyDone() that sits before
+ * SWAP_ENTER (legacy in-lock vs Gate A post-unlock; mutually exclusive). */
 static uint64_t stallPhaseMonoNs(void) {
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
@@ -2236,13 +2238,19 @@ void Renderer::redrawLocked(bool* waitingForBuffers) {
                                   gpuCopyOut.lastSrcId, gpuCopyOut.lastDstId);
         }
         state->rendererSolidComplete = state->rendererSolidSubmits;
-        if (!gpuCopyOut.gateASeen)
+        if (!gpuCopyOut.gateASeen) {
+            stallPhaseLog(state, "NOTIFY_ENTER", nullptr);
             notifyGpuCopyDone();
+            stallPhaseLog(state, "NOTIFY_EXIT", nullptr);
+        }
     }
     state->waitForNextFrame = true;
     lorie_mutex_unlock(&state->lock, &state->lockingPid);
-    if (gateANotify)
+    if (gateANotify) {
+        stallPhaseLog(state, "NOTIFY_ENTER", nullptr);
         notifyGpuCopyDone();
+        stallPhaseLog(state, "NOTIFY_EXIT", nullptr);
+    }
 
     {
         EGLBoolean swap_result;
