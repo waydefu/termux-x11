@@ -1950,6 +1950,36 @@ static float panToCursor(float offset, float cursor, float shown, float total) {
     return fmaxf(0.f, fminf(offset, total - shown));
 }
 
+/* Observe-only stall phase markers for redrawLocked's presentation path.
+ * CLOCK_MONOTONIC atomic observes only: no extra locks, waits, or EGL. */
+static uint64_t stallPhaseMonoNs(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+        return 0;
+    return (uint64_t) ts.tv_sec * 1000000000ull + (uint64_t) ts.tv_nsec;
+}
+
+static void stallPhaseLog(struct lorie_shared_server_state *st, const char *phase,
+                          const int *result) {
+    uint64_t completed = 0;
+    uint32_t rd = 0, wr = 0;
+    if (st) {
+        completed = lorieGateAObserveCompleted(&st->gpuCopyQueue.completedSerial);
+        rd = lorieGateAObserveReadIndex(&st->gpuCopyQueue.readIndex);
+        wr = lorieGateAObserveWriteIndex(&st->gpuCopyQueue.writeIndex);
+    }
+    if (result)
+        __android_log_print(ANDROID_LOG_INFO, "LorieNative",
+            "STALL_PHASE phase=%s mono_ns=%llu tid=%d result=%d completedSerial=%llu readIndex=%u writeIndex=%u",
+            phase, (unsigned long long) stallPhaseMonoNs(), (int) gettid(), *result,
+            (unsigned long long) completed, rd, wr);
+    else
+        __android_log_print(ANDROID_LOG_INFO, "LorieNative",
+            "STALL_PHASE phase=%s mono_ns=%llu tid=%d completedSerial=%llu readIndex=%u writeIndex=%u",
+            phase, (unsigned long long) stallPhaseMonoNs(), (int) gettid(),
+            (unsigned long long) completed, rd, wr);
+}
+
 void Renderer::redrawLocked(bool* waitingForBuffers) {
     float xfactor = 1.f;
     const LorieBuffer_Desc *desc = nullptr;
@@ -2214,8 +2244,17 @@ void Renderer::redrawLocked(bool* waitingForBuffers) {
     if (gateANotify)
         notifyGpuCopyDone();
 
-    if (eglSwapBuffers(egl_display, sfc) != EGL_TRUE)
-        printEglError("Failed to swap buffers", __LINE__);
+    {
+        EGLBoolean swap_result;
+        stallPhaseLog(state, "SWAP_ENTER", nullptr);
+        swap_result = eglSwapBuffers(egl_display, sfc);
+        {
+            int swap_result_i = (int) swap_result;
+            stallPhaseLog(state, "SWAP_EXIT", &swap_result_i);
+        }
+        if (swap_result != EGL_TRUE)
+            printEglError("Failed to swap buffers", __LINE__);
+    }
 
     // Perform a little drawing operation to make sure the next buffer is ready on the next invocation of drawing
     glEnable(GL_SCISSOR_TEST);
@@ -2228,7 +2267,12 @@ void Renderer::redrawLocked(bool* waitingForBuffers) {
         loge("next-buffer fence creation failed; readiness wait skipped");
         return;
     }
+    stallPhaseLog(state, "NEXT_FENCE_ENTER", nullptr);
     wait_result = lorieEglClientWaitSyncKHR(egl_display, fence, EGL_SYNC_FLUSH_COMMANDS_BIT_KHR, EGL_FOREVER);
+    {
+        int wait_result_i = (int) wait_result;
+        stallPhaseLog(state, "NEXT_FENCE_EXIT", &wait_result_i);
+    }
     if (wait_result != EGL_CONDITION_SATISFIED_KHR)
         loge("next-buffer fence wait failed: 0x%x", wait_result);
     lorieEglDestroySyncKHR(egl_display, fence);
