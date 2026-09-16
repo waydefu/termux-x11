@@ -3032,8 +3032,16 @@ __attribute__((noreturn)) static void gateAXFatal(const char *what,
     struct lorie_shared_server_state *st = pvfb ? pvfb->state : NULL;
     uint64_t generation = st
         ? lorieGateALoadU64Acquire(&st->gateA.generation) : gateAPair.generation;
-    if (st != NULL)
+    if (st != NULL) {
+        uint32_t published = lorieGateAObserveFatal(&st->gateA);
+        if (published != 0) {
+            /* Renderer (or an earlier X publisher) already owns the fatal
+             * identity. Do not emit a second GATEA_FATAL_HALT. */
+            lorieGateADumpSummary(st, "x-observe-fatal");
+            _exit(127);
+        }
         lorieGateAPublishFatal(&st->gateA, reason);
+    }
     lorieGateATrace(st, LORIE_GATEA_ROLE_X,
                     LORIE_GATEA_EVENT_GENERATION_FATAL,
                     generation, serial, gateAPair.srcId, gateAPair.dstId);
@@ -3313,6 +3321,7 @@ static void gateAPairRelockCpu(void) {
 static void gateADoneDirect(PixmapPtr dst) {
     LorieGateAResult r;
     uint32_t reason;
+    LorieGateADoneClass cls;
     if (exaGpuComp.scheduled == 0) {
         /* Nothing published (all-CPU or empty op): ownership never left. */
         gateAPairUndoReserve();
@@ -3321,12 +3330,12 @@ static void gateADoneDirect(PixmapPtr dst) {
         return;
     }
     r = gateAWaitTerminal(exaGpuComp.lastSerial);
-    if (r != LORIE_GATEA_RESULT_SUCCESS) {
-        reason = (r == LORIE_GATEA_RESULT_FAILED_QUIESCED)
-            ? lorieGateAObserveFirstFailureCode(&pvfb->state->gateA)
-            : (uint32_t)LORIE_GATEA_FAIL_TIMEOUT;
-        if (reason == 0)
-            reason = LORIE_GATEA_FAIL_TIMEOUT;
+    cls = lorieGateAClassifyDirectDone(
+            r,
+            lorieGateAObserveFatal(&pvfb->state->gateA),
+            lorieGateAObserveFirstFailureCode(&pvfb->state->gateA),
+            &reason);
+    if (cls != LORIE_GATEA_DONE_SUCCESS) {
         gateAXFatal("x-direct-not-success", reason, exaGpuComp.lastSerial);
     }
     lorieGateATrace(pvfb->state, LORIE_GATEA_ROLE_X,

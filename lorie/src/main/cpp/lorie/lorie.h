@@ -302,6 +302,8 @@ static inline __always_inline LorieGateAResult lorieGateADeriveResult(uint64_t c
     return completed >= serial ? LORIE_GATEA_RESULT_SUCCESS : LORIE_GATEA_RESULT_NONE;
 }
 
+#include "lorie_gatea_done_class.h"
+
 /* Frozen 40-byte shared result sideband, appended to lorie_shared_server_state.
  * Plain fields on purpose: every cross-process access MUST use the accessors
  * below (release/acquire). Direct or volatile-only access is forbidden. */
