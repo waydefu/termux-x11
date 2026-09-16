@@ -135,9 +135,17 @@ static const char solidFragmentShaderSrc[] =
 // GPU copy batch finishes instead of it waiting for the next vblank-tick poll.
 extern "C" volatile int conn_fd;
 
-static void notifyGpuCopyDone() {
+static void stallPhaseLog(struct lorie_shared_server_state *st, const char *phase,
+                          const int *result);
+
+/* Observe-only: every real notifyGpuCopyDone() invocation logs one ENTER/EXIT
+ * pair around the existing writer-mutex / send body. No socket, timeout, or
+ * ABI change. st is used only for lock-free completedSerial/index observes. */
+static void notifyGpuCopyDone(struct lorie_shared_server_state *st) {
+    stallPhaseLog(st, "NOTIFY_ENTER", nullptr);
     lorieEvent e = { .type = EVENT_GPU_COPY_DONE };
     (void)lorieActivitySendLegacyRecord(&e);
+    stallPhaseLog(st, "NOTIFY_EXIT", nullptr);
 }
 
 /* The renderer drains one ring batch at a time. Keep its record indices local
@@ -1552,7 +1560,7 @@ void Renderer::refreshContext() {
         eglMakeCurrent(egl_display, defaultSfc, defaultSfc, ctx);
         if (state)
             state->surfaceAvailable = false;
-        notifyGpuCopyDone(); // Wake up any GPU copy stuck waiting on a surface we no longer have.
+        notifyGpuCopyDone(state); // Wake up any GPU copy stuck waiting on a surface we no longer have.
         return;
     }
 
@@ -1563,7 +1571,7 @@ void Renderer::refreshContext() {
     if (eglMakeCurrent(egl_display, sfc, sfc, ctx) != EGL_TRUE) {
         if (state)
             state->surfaceAvailable = false;
-        notifyGpuCopyDone();
+        notifyGpuCopyDone(state);
         return vprintEglError("eglMakeCurrent failed", __LINE__);
     }
 
@@ -1931,12 +1939,12 @@ void Renderer::applyPendingGpuCopies() {
         lorieGateAPublishCompleted(&state->gpuCopyQueue.completedSerial, out.lastSerial);
         gateATraceLegacyCompleted(state, out.lastSerial, out.lastSrcId, out.lastDstId);
         state->rendererSolidComplete = state->rendererSolidSubmits;
-        notifyGpuCopyDone();
+        notifyGpuCopyDone(state);
         }
     }
     lorie_mutex_unlock(&state->lock, &state->lockingPid);
     if (gateANotify)
-        notifyGpuCopyDone();
+        notifyGpuCopyDone(state);
 }
 
 // Keeps the shown region still while the cursor stays inside it, panning only when the cursor
@@ -1950,10 +1958,11 @@ static float panToCursor(float offset, float cursor, float shown, float total) {
     return fmaxf(0.f, fminf(offset, total - shown));
 }
 
-/* Observe-only stall phase markers for redrawLocked's presentation path.
+/* Observe-only stall phase markers.
  * CLOCK_MONOTONIC atomic observes only: no extra locks, waits, or EGL.
- * NOTIFY wraps the post-completion notifyGpuCopyDone() that sits before
- * SWAP_ENTER (legacy in-lock vs Gate A post-unlock; mutually exclusive). */
+ * NOTIFY is owned by notifyGpuCopyDone() itself (one pair per invocation).
+ * SWAP / NEXT_FENCE remain around eglSwapBuffers and the post-swap
+ * eglClientWaitSync(EGL_FOREVER) in redrawLocked. */
 static uint64_t stallPhaseMonoNs(void) {
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
@@ -2239,17 +2248,13 @@ void Renderer::redrawLocked(bool* waitingForBuffers) {
         }
         state->rendererSolidComplete = state->rendererSolidSubmits;
         if (!gpuCopyOut.gateASeen) {
-            stallPhaseLog(state, "NOTIFY_ENTER", nullptr);
-            notifyGpuCopyDone();
-            stallPhaseLog(state, "NOTIFY_EXIT", nullptr);
+            notifyGpuCopyDone(state);
         }
     }
     state->waitForNextFrame = true;
     lorie_mutex_unlock(&state->lock, &state->lockingPid);
     if (gateANotify) {
-        stallPhaseLog(state, "NOTIFY_ENTER", nullptr);
-        notifyGpuCopyDone();
-        stallPhaseLog(state, "NOTIFY_EXIT", nullptr);
+        notifyGpuCopyDone(state);
     }
 
     {

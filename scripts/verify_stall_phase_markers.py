@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Static gate: redrawLocked has observe-only stall markers.
+"""Static gate: stall-phase markers with function-body NOTIFY coverage.
 
 Claims:
 1. SWAP / NEXT_FENCE still wrap eglSwapBuffers and the post-swap
    next-buffer eglClientWaitSync(EGL_FOREVER) without changing those
    calls' arguments, control flow, timeout, or other EGL wait sites.
-2. NOTIFY_ENTER / NOTIFY_EXIT wrap the two mutually exclusive
-   notifyGpuCopyDone() calls after GPU-copy completion and before
-   SWAP_ENTER (legacy in-lock vs Gate A post-unlock). Other notify
-   sites stay unwrapped. notifyGpuCopyDone itself is unchanged.
+2. NOTIFY_ENTER / NOTIFY_EXIT live inside notifyGpuCopyDone() and
+   surround the existing EVENT_GPU_COPY_DONE / SendLegacyRecord body.
+   Every source caller reaches that one function. Call-site wrapping
+   is forbidden (one logical pair per real invocation).
+3. Socket/write/mutex/timeout/ABI semantics are unchanged.
 """
 from __future__ import annotations
 
@@ -36,13 +37,19 @@ def matching_brace(text: str, open_idx: int) -> int:
 
 
 def extract_function(text: str, sig: str) -> str:
-    start = text.find(sig)
-    if start < 0:
-        raise ValueError(f"missing {sig}")
-    brace = text.find("{", start)
-    if brace < 0:
-        raise ValueError(f"missing body for {sig}")
-    return text[start : matching_brace(text, brace) + 1]
+    start = 0
+    while True:
+        found = text.find(sig, start)
+        if found < 0:
+            raise ValueError(f"missing {sig}")
+        brace = text.find("{", found)
+        if brace < 0:
+            raise ValueError(f"missing body for {sig}")
+        semi = text.find(";", found)
+        if 0 <= semi < brace:
+            start = semi + 1
+            continue
+        return text[found : matching_brace(text, brace) + 1]
 
 
 def verify(repo: Path) -> list[str]:
@@ -65,7 +72,7 @@ def verify(repo: Path) -> list[str]:
 
     try:
         body = extract_function(raw, "void Renderer::redrawLocked(bool* waitingForBuffers)")
-        notify_fn = extract_function(raw, "static void notifyGpuCopyDone()")
+        notify_fn = extract_function(raw, "static void notifyGpuCopyDone(")
         apply_fn = extract_function(raw, "void Renderer::applyPendingGpuCopies()")
         refresh_fn = extract_function(raw, "void Renderer::refreshContext()")
         log_fn = extract_function(raw, "static void stallPhaseLog(")
@@ -73,21 +80,40 @@ def verify(repo: Path) -> list[str]:
         failures.append(f"extract:{exc}")
         return failures
 
+    if "NOTIFY_ENTER" not in notify_fn or "NOTIFY_EXIT" not in notify_fn:
+        failures.append("notify:function-body-not-instrumented")
+        return failures
+
+    enter = notify_fn.find('stallPhaseLog(st, "NOTIFY_ENTER", nullptr)')
+    event = notify_fn.find("lorieEvent e = { .type = EVENT_GPU_COPY_DONE };")
+    send = notify_fn.find("(void)lorieActivitySendLegacyRecord(&e);")
+    exit_m = notify_fn.find('stallPhaseLog(st, "NOTIFY_EXIT", nullptr)')
+    need(enter >= 0, "notify:function-body-NOTIFY_ENTER", failures)
+    need(event >= 0, "notify:body-event", failures)
+    need(send >= 0, "notify:body-send-legacy", failures)
+    need(exit_m >= 0, "notify:function-body-NOTIFY_EXIT", failures)
     need(
-        "lorieEvent e = { .type = EVENT_GPU_COPY_DONE };" in notify_fn
-        and "(void)lorieActivitySendLegacyRecord(&e);" in notify_fn
-        and "stallPhaseLog" not in notify_fn
-        and "O_NONBLOCK" not in notify_fn
-        and "fcntl" not in notify_fn,
-        "notify:fn-unchanged",
+        0 <= enter < event < send < exit_m,
+        "notify:function-body-surround",
         failures,
     )
+    need(notify_fn.count("NOTIFY_ENTER") == 1, "notify:one-ENTER", failures)
+    need(notify_fn.count("NOTIFY_EXIT") == 1, "notify:one-EXIT", failures)
+    need("O_NONBLOCK" not in notify_fn, "notify:no-nonblock", failures)
+    need("fcntl" not in notify_fn, "notify:no-fcntl", failures)
+    need("sleep" not in notify_fn, "notify:no-sleep", failures)
+    need("pthread_mutex_lock" not in notify_fn, "notify:no-extra-mutex", failures)
     need(notify_fn.count("notifyGpuCopyDone") == 1, "notify:fn-no-recurse", failures)
+    need(
+        "struct lorie_shared_server_state *st" in notify_fn.split("{", 1)[0],
+        "notify:st-arg-observe-only",
+        failures,
+    )
 
     enter_swap = body.find('stallPhaseLog(state, "SWAP_ENTER", nullptr)')
     swap_call = body.find("swap_result = eglSwapBuffers(egl_display, sfc);")
     exit_swap = body.find('stallPhaseLog(state, "SWAP_EXIT", &swap_result_i)')
-    err_swap = body.find('if (swap_result != EGL_TRUE)')
+    err_swap = body.find("if (swap_result != EGL_TRUE)")
     err_print = body.find('printEglError("Failed to swap buffers"')
     enter_fence = body.find('stallPhaseLog(state, "NEXT_FENCE_ENTER", nullptr)')
     fence_call = body.find(
@@ -106,41 +132,27 @@ def verify(repo: Path) -> list[str]:
     need(exit_fence >= 0, "redraw:NEXT_FENCE_EXIT", failures)
     need(err_fence >= 0, "redraw:next-fence-error-path", failures)
 
-    legacy_enter = body.find('stallPhaseLog(state, "NOTIFY_ENTER", nullptr)')
-    legacy_call = body.find("notifyGpuCopyDone();", legacy_enter)
-    legacy_exit = body.find('stallPhaseLog(state, "NOTIFY_EXIT", nullptr)', legacy_call)
-    unlock = body.find("lorie_mutex_unlock(&state->lock, &state->lockingPid);", legacy_exit)
-    gatea_enter = body.find('stallPhaseLog(state, "NOTIFY_ENTER", nullptr)', unlock)
-    gatea_call = body.find("notifyGpuCopyDone();", gatea_enter)
-    gatea_exit = body.find('stallPhaseLog(state, "NOTIFY_EXIT", nullptr)', gatea_call)
+    legacy_guard = body.find("if (!gpuCopyOut.gateASeen)")
+    legacy_call = body.find("notifyGpuCopyDone(state);", legacy_guard)
+    unlock = body.find("lorie_mutex_unlock(&state->lock, &state->lockingPid);", legacy_call)
+    gatea_guard = body.find("if (gateANotify)", unlock)
+    gatea_call = body.find("notifyGpuCopyDone(state);", gatea_guard)
 
-    need(legacy_enter >= 0, "redraw:legacy-NOTIFY_ENTER", failures)
+    need(legacy_guard >= 0, "redraw:legacy-guard", failures)
     need(legacy_call >= 0, "redraw:legacy-notify-call", failures)
-    need(legacy_exit >= 0, "redraw:legacy-NOTIFY_EXIT", failures)
     need(unlock >= 0, "redraw:unlock-after-legacy-notify", failures)
-    need(gatea_enter >= 0, "redraw:gatea-NOTIFY_ENTER", failures)
+    need(gatea_guard >= 0, "redraw:gatea-guard", failures)
     need(gatea_call >= 0, "redraw:gatea-notify-call", failures)
-    need(gatea_exit >= 0, "redraw:gatea-NOTIFY_EXIT", failures)
-    need("if (!gpuCopyOut.gateASeen)" in body[max(0, legacy_enter - 80):legacy_enter],
-         "redraw:legacy-guard", failures)
-    need("if (gateANotify)" in body[max(0, gatea_enter - 80):gatea_enter],
-         "redraw:gatea-guard", failures)
-    need("result=" not in body[legacy_enter:legacy_exit + 40],
-         "redraw:legacy-notify-omit-result", failures)
-    need("result=" not in body[gatea_enter:gatea_exit + 40],
-         "redraw:gatea-notify-omit-result", failures)
-
+    need("NOTIFY_" not in body, "redraw:no-callsite-NOTIFY", failures)
     need(
-        legacy_enter < legacy_call < legacy_exit < unlock < gatea_enter
-        < gatea_call < gatea_exit < enter_swap < swap_call < exit_swap
-        < err_swap < err_print < enter_fence < fence_call < exit_fence
-        < err_fence,
+        legacy_guard < legacy_call < unlock < gatea_guard < gatea_call
+        < enter_swap < swap_call < exit_swap < err_swap < err_print
+        < enter_fence < fence_call < exit_fence < err_fence,
         "redraw:marker-order",
         failures,
     )
 
-    # Only this site is wrapped. Other swaps and the GPU-copy fence stay bare.
-    need(raw.count('eglSwapBuffers(egl_display, sfc)') == 2, "swap:sfc-sites", failures)
+    need(raw.count("eglSwapBuffers(egl_display, sfc)") == 2, "swap:sfc-sites", failures)
     need(raw.count("eglSwapBuffers(egl_display, *esfc)") == 1, "swap:release-unwrapped", failures)
     need(
         raw.count("lorieEglClientWaitSyncKHR(egl_display, fence, 0, EGL_FOREVER)") == 1,
@@ -155,16 +167,25 @@ def verify(repo: Path) -> list[str]:
          "string:NEXT_FENCE_ENTER-once", failures)
     need(raw.count('stallPhaseLog(state, "NEXT_FENCE_EXIT", &wait_result_i)') == 1,
          "string:NEXT_FENCE_EXIT-once", failures)
-    need(raw.count('stallPhaseLog(state, "NOTIFY_ENTER", nullptr)') == 2,
-         "string:NOTIFY_ENTER-twice-exclusive", failures)
-    need(raw.count('stallPhaseLog(state, "NOTIFY_EXIT", nullptr)') == 2,
-         "string:NOTIFY_EXIT-twice-exclusive", failures)
-    need(body.count("notifyGpuCopyDone();") == 2, "redraw:notify-two-sites", failures)
-    need(apply_fn.count("notifyGpuCopyDone();") == 2, "apply:notify-unwrapped-count", failures)
+    need(raw.count('stallPhaseLog(st, "NOTIFY_ENTER", nullptr)') == 1,
+         "string:NOTIFY_ENTER-once-in-fn", failures)
+    need(raw.count('stallPhaseLog(st, "NOTIFY_EXIT", nullptr)') == 1,
+         "string:NOTIFY_EXIT-once-in-fn", failures)
+    need(raw.count('stallPhaseLog(state, "NOTIFY_ENTER"') == 0,
+         "string:no-caller-NOTIFY_ENTER", failures)
+    need(raw.count('stallPhaseLog(state, "NOTIFY_EXIT"') == 0,
+         "string:no-caller-NOTIFY_EXIT", failures)
+    need(body.count("notifyGpuCopyDone(state);") == 2, "redraw:notify-two-sites", failures)
+    need(apply_fn.count("notifyGpuCopyDone(state);") == 2, "apply:notify-two-sites", failures)
     need("NOTIFY_" not in apply_fn, "apply:no-notify-markers", failures)
-    need(refresh_fn.count("notifyGpuCopyDone();") == 2, "refresh:notify-unwrapped-count", failures)
+    need(refresh_fn.count("notifyGpuCopyDone(state);") == 2, "refresh:notify-two-sites", failures)
     need("NOTIFY_" not in refresh_fn, "refresh:no-notify-markers", failures)
-    need(raw.count("notifyGpuCopyDone();") == 6, "notify:six-call-sites", failures)
+    need(raw.count("notifyGpuCopyDone(state);") == 6, "notify:six-call-sites", failures)
+    need(raw.count("static void notifyGpuCopyDone(") == 1, "notify:one-definition", failures)
+    need("notifyGpuCopyDone();" not in raw, "notify:no-zero-arg-calls", failures)
+    need("if (!win)" in refresh_fn, "refresh:no-win-guard", failures)
+    need("eglMakeCurrent failed" in refresh_fn, "refresh:makecurrent-fail-path", failures)
+    need("if (gateANotify)" in apply_fn, "apply:gatea-guard", failures)
     need("COND_WAIT" not in raw, "no:cond-wait-markers", failures)
     need("O_NONBLOCK" not in raw, "socket:no-nonblock-renderer", failures)
     try:
@@ -190,6 +211,7 @@ def verify(repo: Path) -> list[str]:
     need("lorieGateAObserveCompleted" in log_fn, "fields:completedSerial", failures)
     need("lorieGateAObserveReadIndex" in log_fn, "fields:readIndex", failures)
     need("lorieGateAObserveWriteIndex" in log_fn, "fields:writeIndex", failures)
+    need("lorieActivitySendLegacyRecord" in send_legacy, "socket:send-legacy-body", failures)
     return failures
 
 
