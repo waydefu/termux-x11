@@ -1884,11 +1884,27 @@ static Bool lorieGpuCopyWait(uint64_t serial, int timeout_ms) {
     struct timespec t0, now;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     while (!lorieGpuCopyIsDone(serial)) {
-        if (!lorieConnectionAlive() || !lorieRendererAvailable())
-            return FALSE;
+        uint32_t published = (pvfb && pvfb->state)
+            ? lorieGateAObserveFatal(&pvfb->state->gateA) : 0;
+        uint32_t wakeReason = 0;
+        LorieGateAWaitWakeClass wake;
+        long elapsed;
         clock_gettime(CLOCK_MONOTONIC, &now);
-        long elapsed = (now.tv_sec - t0.tv_sec) * 1000L + (now.tv_nsec - t0.tv_nsec) / 1000000L;
-        if (elapsed > timeout_ms)
+        elapsed = (now.tv_sec - t0.tv_sec) * 1000L
+            + (now.tv_nsec - t0.tv_nsec) / 1000000L;
+        wake = lorieGateAClassifyWaitWake(
+                lorieConnectionAlive() ? 1 : 0,
+                lorieRendererAvailable() ? 1 : 0,
+                elapsed > timeout_ms ? 1 : 0,
+                published, &wakeReason);
+        if (wake == LORIE_GATEA_WAIT_WAKE_X_HUP) {
+            if (lorieGateAActive())
+                gateAXFatal("x-hup", LORIE_GATEA_FAIL_GENERATION, serial);
+            return FALSE;
+        }
+        if (wake == LORIE_GATEA_WAIT_WAKE_PRESERVE_FATAL)
+            gateAXFatal("x-hup", wakeReason, serial);
+        if (wake != LORIE_GATEA_WAIT_WAKE_CONTINUE)
             return FALSE;
         usleep(200);
     }
@@ -2999,8 +3015,10 @@ static Bool gateADirectTryPrepare(int op, PicturePtr pSrc, PicturePtr pMask, Pic
 }
 
 /* Terminal wait for one published serial: fatal-first observation order.
- * Returns the derived result; FATAL also covers timeout and renderer death
- * (both mean quiescence is unproven — never SUCCESS, never fallback). */
+ * Returns SUCCESS / QUIESCED / published FATAL. Peer socket death is not a
+ * timeout: with publishedFatal==0 it fail-stops as x-hup / FAIL_GENERATION.
+ * Surface loss and genuine elapsed timeout still return FATAL for the Done
+ * classifier (never SUCCESS, never fallback). */
 static LorieGateAResult gateAWaitTerminal(uint64_t serial) {
     struct lorie_shared_server_state *st = pvfb->state;
     struct timespec t0, now;
@@ -3013,14 +3031,25 @@ static LorieGateAResult gateAWaitTerminal(uint64_t serial) {
         uint64_t done = lorieGateAObserveCompleted(&st->gpuCopyQueue.completedSerial);
         uint64_t failed = lorieGateAObserveFirstFailed(&st->gateA);
         LorieGateAResult r = lorieGateADeriveResult(done, failed, fatal, serial);
+        uint32_t wakeReason = 0;
+        LorieGateAWaitWakeClass wake;
         if (r != LORIE_GATEA_RESULT_NONE)
             return r;
-        if (!lorieConnectionAlive() || !lorieRendererAvailable())
-            return LORIE_GATEA_RESULT_FATAL;
         clock_gettime(CLOCK_MONOTONIC, &now);
         elapsed = (now.tv_sec - t0.tv_sec) * 1000L
             + (now.tv_nsec - t0.tv_nsec) / 1000000L;
-        if (elapsed > 2000)
+        wake = lorieGateAClassifyWaitWake(
+                lorieConnectionAlive() ? 1 : 0,
+                lorieRendererAvailable() ? 1 : 0,
+                elapsed > 2000 ? 1 : 0,
+                lorieGateAObserveFatal(&st->gateA),
+                &wakeReason);
+        if (wake == LORIE_GATEA_WAIT_WAKE_X_HUP)
+            gateAXFatal("x-hup", LORIE_GATEA_FAIL_GENERATION, serial);
+        if (wake == LORIE_GATEA_WAIT_WAKE_PRESERVE_FATAL)
+            gateAXFatal("x-hup", wakeReason, serial);
+        if (wake == LORIE_GATEA_WAIT_WAKE_TIMEOUT
+            || wake == LORIE_GATEA_WAIT_WAKE_SURFACE_LOSS)
             return LORIE_GATEA_RESULT_FATAL;
         usleep(200);
     }

@@ -303,6 +303,7 @@ static inline __always_inline LorieGateAResult lorieGateADeriveResult(uint64_t c
 }
 
 #include "lorie_gatea_done_class.h"
+#include "lorie_gatea_wait_wake_class.h"
 
 /* Frozen 40-byte shared result sideband, appended to lorie_shared_server_state.
  * Plain fields on purpose: every cross-process access MUST use the accessors
