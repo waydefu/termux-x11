@@ -16,6 +16,7 @@
 #include <arpa/inet.h>
 #include <poll.h>
 #include "lorie.h"
+#include "lorie_gatea_hup_class.h"
 
 #pragma clang diagnostic ignored "-Wunknown-pragmas"
 #pragma ide diagnostic ignored "cppcoreguidelines-narrowing-conversions"
@@ -136,6 +137,21 @@ static pthread_mutex_t gateABindMutex = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t gateABoundNonce = 0;
 static uint64_t gateABoundGeneration = 0;
 static int gateABound = 0;
+/* Activity-thread view of the MAP_SHARED protocol mapping. Renderer::setSharedState
+ * waits for the GL thread and must not be used from HUP to observe fatal.
+ * Closing the memfd does not unmap this pointer; X _exit does not unmap it. */
+static struct lorie_shared_server_state *gateAMappedState = NULL;
+
+__attribute__((noreturn)) static void gateAHupPreserve(uint32_t published,
+                                                       uint64_t nonce,
+                                                       uint64_t generation) {
+    /* Diagnostic only. Must not emit the frozen halt token; the judge
+     * would treat that as a new last halt. */
+    log(FATAL, "GATEA_HUP_PRESERVE published=%u nonce=%llu generation=%llu",
+        (unsigned)published, (unsigned long long)nonce,
+        (unsigned long long)generation);
+    _exit(127);
+}
 
 int lorieGateABoundTuple(uint64_t *nonce, uint64_t *generation) {
     int bound;
@@ -390,11 +406,24 @@ static int xcallback(int fd, int events, __unused void* data) {
             env->CallVoidMethod(instance, MainActivity.clientConnectedStateChanged);
 
         /* Bound tuple is the Activity-side enable signal. The APK process
-         * never inherits TERMUX_X11_GATEA_PROTO from the X launcher. */
+         * never inherits TERMUX_X11_GATEA_PROTO from the X launcher.
+         * If X already published generationFatal (R7-05 QUIESCED → X halt),
+         * preserve that identity: fail-stop without a second r-hup halt.
+         * Genuine bound HUP with published==0 still emits r-hup/6. */
         {
             uint64_t bn = 0, bg = 0;
-            if (lorieGateABoundTuple(&bn, &bg))
+            int bound = lorieGateABoundTuple(&bn, &bg);
+            uint32_t published = 0;
+            LorieGateAHupClass hcls;
+            if (bound && gateAMappedState != NULL)
+                published = lorieGateAObserveFatal(&gateAMappedState->gateA);
+            hcls = lorieGateAClassifyPeerHup(bound, published);
+            if (hcls == LORIE_GATEA_HUP_PRESERVE) {
+                gateAHupPreserve(published, bn, bg);
+            }
+            if (hcls == LORIE_GATEA_HUP_R_HUP) {
                 lorieGateAFatalHalt("r-hup", LORIE_GATEA_FAIL_GENERATION);
+            }
         }
 
         ALooper_removeFd(ALooper_forThread(), fd);
@@ -470,6 +499,8 @@ static int xcallback(int fd, int events, __unused void* data) {
                     /* Bind from the mapped tuple, not Activity getenv. X is
                      * the only process that sees TERMUX_X11_GATEA_PROTO=1;
                      * a zero generation leaves the previous binding untouched. */
+                    if (state != NULL)
+                        gateAMappedState = state;
                     gateABindFromState(state);
 
                     g_renderer.setSharedState(state);
