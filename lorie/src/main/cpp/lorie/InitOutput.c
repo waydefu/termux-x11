@@ -1554,7 +1554,7 @@ bool lorieRendererAvailable(void) {
 }
 
 static Bool lorieTryScheduleGpuBlit(PixmapPtr pixmap, PixmapPtr dst, RegionPtr update, int16_t x_off, int16_t y_off,
-                                    uint8_t gpuOp, uint64_t *out_serial, void **out_dst_buffer);
+                                    uint8_t gpuOp, int presentTarget, uint64_t *out_serial, void **out_dst_buffer);
 
 // Tries to offload a Present "copy" operation (present_execute_copy) to the renderer's GPU
 // context instead of doing a CPU CopyArea here. dst is whatever GetWindowPixmap(window) is - root
@@ -1563,7 +1563,16 @@ static Bool lorieTryScheduleGpuBlit(PixmapPtr pixmap, PixmapPtr dst, RegionPtr u
 // GPU-sampleable, or the deferred copy queue is currently full.
 Bool lorieTryScheduleGpuCopy(PixmapPtr pixmap, PixmapPtr dst, RegionPtr update, int16_t x_off, int16_t y_off,
                               uint64_t *out_serial, void **out_dst_buffer) {
-    return lorieTryScheduleGpuBlit(pixmap, dst, update, x_off, y_off, LORIE_GPU_OP_COPY,
+    return lorieTryScheduleGpuBlit(pixmap, dst, update, x_off, y_off, LORIE_GPU_OP_COPY, 0,
+                                   out_serial, out_dst_buffer);
+}
+
+/* Present COPY only. Test-only Present-bound fault cells arm on this path
+ * after serial assignment and before writeIndex publish. CopyArea must not
+ * call this. Product blit is otherwise identical to lorieTryScheduleGpuCopy. */
+Bool lorieTryScheduleGpuPresentCopy(PixmapPtr pixmap, PixmapPtr dst, RegionPtr update, int16_t x_off, int16_t y_off,
+                                    uint64_t *out_serial, void **out_dst_buffer) {
+    return lorieTryScheduleGpuBlit(pixmap, dst, update, x_off, y_off, LORIE_GPU_OP_COPY, 1,
                                    out_serial, out_dst_buffer);
 }
 
@@ -1727,7 +1736,7 @@ static LorieBuffer *lorieCloneBgraAhbToFd(PixmapPtr pixmap) {
 }
 
 static Bool lorieTryScheduleGpuBlit(PixmapPtr pixmap, PixmapPtr dst, RegionPtr update, int16_t x_off, int16_t y_off,
-                                    uint8_t gpuOp, uint64_t *out_serial, void **out_dst_buffer) {
+                                    uint8_t gpuOp, int presentTarget, uint64_t *out_serial, void **out_dst_buffer) {
     LorieBuffer *srcBuffer, *dstBuffer;
     LoriePixmapPriv *priv;
     const LorieBuffer_Desc *desc, *dstDesc;
@@ -1841,6 +1850,13 @@ static Bool lorieTryScheduleGpuBlit(PixmapPtr pixmap, PixmapPtr dst, RegionPtr u
     entry->color = 0;
     for (i = 0; i < numRects; i++)
         entry->rects[i] = (LorieGpuCopyRect) { box[i].x1, box[i].y1, box[i].x2, box[i].y2 };
+
+    /* Test-only: Present-bound cells become eligible for this serial before
+     * the renderer can observe writeIndex. CopyArea presentTarget==0. */
+    if (presentTarget && pvfb->state)
+        lorieGateATestFaultArmPresentTarget(
+            pvfb->state, entry->serial,
+            lorieGateALoadU64Acquire(&pvfb->state->gateA.generation));
 
     __sync_synchronize(); // publish entry contents before the renderer can see the new writeIndex
     if (pvfb->state && entry->telemetryIndex != LORIE_B3A_INVALID_INDEX) {
@@ -2381,6 +2397,11 @@ void lorieGateATraceXCallback(uint32_t xop, uint64_t gpuSerial, uint32_t clientS
         return;
     lorieGateATrace(st, LORIE_GATEA_ROLE_X, LORIE_GATEA_EVENT_CALLBACK_EXECUTED,
                     gateACurrentGeneration(), gpuSerial, xop, clientSeq);
+    /* Backup Present-target arm. Primary arm is before writeIndex in the
+     * Present schedule path. Same identity is idempotent; a different serial
+     * is refused. CopyArea xop=1 does not arm. */
+    if (xop == LORIE_GATEA_XOP_PRESENT && gpuSerial != 0)
+        lorieGateATestFaultArmPresentTarget(st, gpuSerial, gateACurrentGeneration());
 }
 
 int lorieGateAPresentRequeueShouldFail(void) {
@@ -2485,11 +2506,14 @@ static void lorieGateATestFaultPublishFromEnv(struct lorie_shared_server_state *
     st->gateATestFault.magic = LORIE_GATEA_TEST_MAGIC;
     st->gateATestFault.version = LORIE_GATEA_TEST_VERSION;
     st->gateATestFault.cell = cell;
-    st->gateATestFault.armed = 1;
     st->gateATestFault.consumed = 0;
     st->gateATestFault.pad = 0;
     st->gateATestFault.targetGeneration = 0;
     st->gateATestFault.targetOrdinal = 0;
+    /* Present-bound cells 12/13: selector configured, not eligible until the
+     * Present schedule site arms a nonzero target serial. Other cells keep
+     * startup armed=1. */
+    st->gateATestFault.armed = lorieGateATestFaultIsPresentBoundCell(cell) ? 0u : 1u;
 }
 
 void lorieGateADumpSummary(struct lorie_shared_server_state *st, const char *where) {
@@ -3534,12 +3558,12 @@ static void lorieExaComposite(PixmapPtr dst, int srcX, int srcY, unused int mask
 #endif
     scheduled = lorieTryScheduleGpuBlit(exaGpuComp.src, dst, &region,
                                         (int16_t) (dstX - srcX), (int16_t) (dstY - srcY),
-                                        LORIE_GPU_OP_COMPOSITE, &serial, &dstBuf);
+                                        LORIE_GPU_OP_COMPOSITE, 0, &serial, &dstBuf);
     if (!scheduled && exaGpuComp.scheduled) {
         lorieGpuCopyWait(exaGpuComp.lastSerial, 2000);
         scheduled = lorieTryScheduleGpuBlit(exaGpuComp.src, dst, &region,
                                             (int16_t) (dstX - srcX), (int16_t) (dstY - srcY),
-                                            LORIE_GPU_OP_COMPOSITE, &serial, &dstBuf);
+                                            LORIE_GPU_OP_COMPOSITE, 0, &serial, &dstBuf);
     }
     RegionUninit(&region);
     if (scheduled) {

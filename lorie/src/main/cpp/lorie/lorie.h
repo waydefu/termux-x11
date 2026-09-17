@@ -1544,6 +1544,8 @@ LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateATestFault, targetGeneration)
 LORIE_GATEA_STATIC_ASSERT((offsetof(struct LorieGateATestFault, targetGeneration) % 8) == 0, "r7 test-fault gen aligned");
 LORIE_GATEA_STATIC_ASSERT((offsetof(struct LorieGateATestFault, consumed) % 4) == 0, "r7 test-fault consumed aligned");
 
+#include "lorie_gatea_test_fault_class.h"
+
 struct lorie_shared_server_state {
     /*
      * Renderer and X server are separated into 2 different processes.
@@ -1733,43 +1735,34 @@ static inline __always_inline void lorieGateATrace(
 /* Qualification-only. Unarmed returns after the armed load; no I/O. */
 static inline __always_inline int lorieGateATestFaultArmed(
         const struct lorie_shared_server_state *st, uint32_t cell) {
-    uint32_t armed, magic, version, got;
     if (st == NULL)
         return 0;
-    armed = __atomic_load_n(&st->gateATestFault.armed, __ATOMIC_ACQUIRE);
-    if (armed == 0)
-        return 0;
-    magic = __atomic_load_n(&st->gateATestFault.magic, __ATOMIC_ACQUIRE);
-    version = __atomic_load_n(&st->gateATestFault.version, __ATOMIC_ACQUIRE);
-    got = __atomic_load_n(&st->gateATestFault.cell, __ATOMIC_ACQUIRE);
-    return magic == LORIE_GATEA_TEST_MAGIC
-        && version == LORIE_GATEA_TEST_VERSION
-        && got == cell;
+    return lorieGateATestFaultClassArmed(&st->gateATestFault, cell);
 }
 
 /* One-shot: CAS consumed 0→1, then event 35, then the caller injects. */
 static inline __always_inline int lorieGateATestFaultConsume(
         struct lorie_shared_server_state *st, uint32_t cell,
         uint32_t role, uint64_t serial, uint64_t generation) {
-    uint32_t expected;
-    uint64_t targetGen, targetOrd;
-    if (!lorieGateATestFaultArmed(st, cell))
+    if (st == NULL)
         return 0;
-    targetGen = __atomic_load_n(&st->gateATestFault.targetGeneration,
-                                __ATOMIC_ACQUIRE);
-    targetOrd = __atomic_load_n(&st->gateATestFault.targetOrdinal,
-                                __ATOMIC_ACQUIRE);
-    if (targetGen != 0 && targetGen != generation)
-        return 0;
-    if (targetOrd != 0 && targetOrd != serial)
-        return 0;
-    expected = 0;
-    if (!__atomic_compare_exchange_n(&st->gateATestFault.consumed, &expected, 1u,
-                                     0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+    if (!lorieGateATestFaultClassConsume(&st->gateATestFault, cell, serial,
+                                         generation))
         return 0;
     lorieGateATrace(st, role, LORIE_GATEA_EVENT_TEST_FAULT_FIRED,
                     generation, serial, (uint64_t)cell, (uint64_t)role);
     return 1;
+}
+
+/* Test-only. Present-bound cells 12/13 only. No-op if unconfigured, consumed,
+ * or already armed for a different serial. */
+static inline __always_inline int lorieGateATestFaultArmPresentTarget(
+        struct lorie_shared_server_state *st, uint64_t serial,
+        uint64_t generation) {
+    if (st == NULL)
+        return 0;
+    return lorieGateATestFaultClassArmPresentTarget(&st->gateATestFault, serial,
+                                                    generation);
 }
 
 #ifdef __cplusplus
