@@ -30,6 +30,9 @@
 #include "lorie.h"
 #include "egl_dispatch.h"
 #include "gatea_a1_microprobe.h"
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+#include "lorie_r8_obs.h"
+#endif
 
 #define log(...) __android_log_print(ANDROID_LOG_DEBUG, "gles-renderer", __VA_ARGS__)
 #define loge(...) __android_log_print(ANDROID_LOG_ERROR, "gles-renderer", __VA_ARGS__)
@@ -135,9 +138,19 @@ static const char solidFragmentShaderSrc[] =
 // GPU copy batch finishes instead of it waiting for the next vblank-tick poll.
 extern "C" volatile int conn_fd;
 
-static void notifyGpuCopyDone() {
+static void notifyGpuCopyDoneCause(const char *cause) {
     lorieEvent e = { .type = EVENT_GPU_COPY_DONE };
-    (void)lorieActivitySendLegacyRecord(&e);
+    int rc = lorieActivitySendLegacyRecord(&e);
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+    lorieR8WakeSent(cause ? cause : "unspecified", rc == 0, 0);
+#else
+    (void)cause;
+    (void)rc;
+#endif
+}
+
+static void notifyGpuCopyDone() {
+    notifyGpuCopyDoneCause("unspecified");
 }
 
 /* The renderer drains one ring batch at a time. Keep its record indices local
@@ -408,9 +421,31 @@ static void gateADestroyGlObjects(struct lorie_shared_server_state *st,
 
 static void gateADestroyReadyImport(struct lorie_shared_server_state *st,
                                     struct GateAReadyImport *e) {
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+    char fields[256];
+    int tex = e->texture != 0;
+    int img = e->image != NULL;
+    int ahb = e->ahb != NULL;
+#endif
     gateADestroyGlObjects(st, e->texture, e->image);
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+    snprintf(fields, sizeof(fields),
+             "\"bufferId\":%llu,\"texture_deleted\":%s,\"image_destroyed\":%s,"
+             "\"ahb_released\":false",
+             (unsigned long long)e->id, tex ? "true" : "false",
+             img ? "true" : "false");
+    lorieR8Obs("r", "R_DESTROY_STAGE", fields);
+#endif
     if (e->ahb != NULL)
         gateAReleaseTrackedAhb(st, e->ahb);
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+    snprintf(fields, sizeof(fields),
+             "\"bufferId\":%llu,\"texture_deleted\":%s,\"image_destroyed\":%s,"
+             "\"ahb_released\":%s",
+             (unsigned long long)e->id, tex ? "true" : "false",
+             img ? "true" : "false", ahb ? "true" : "false");
+    lorieR8Obs("r", "R_DESTROY_STAGE", fields);
+#endif
     lorieGateATrace(st, LORIE_GATEA_ROLE_RENDERER,
                     LORIE_GATEA_EVENT_RESOURCE_DESTROY, e->generation, 0,
                     e->id, 0);
@@ -728,6 +763,17 @@ static void gateADrainPendingControls(struct lorie_shared_server_state *st) {
                 gateARendererFatal(st, "r-unregister-ack-send",
                                    LORIE_GATEA_FAIL_UNREGISTER,
                                    ctl->lastSerial, ctl->id, 0);
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+            {
+                char fields[192];
+                snprintf(fields, sizeof(fields),
+                         "\"bufferId\":%llu,\"nonce\":%llu,\"generation\":%llu",
+                         (unsigned long long)ctl->id,
+                         (unsigned long long)ctl->nonce,
+                         (unsigned long long)ctl->generation);
+                lorieR8Obs("r", "R_ACK_SETTLED", fields);
+            }
+#endif
             continue;
         }
         if (ctl->type == LORIE_GATEA_MSG_GENERATION_CLOSE) {
@@ -746,6 +792,11 @@ static void gateADrainPendingControls(struct lorie_shared_server_state *st) {
                 gateARendererFatal(st, "r-generation-unbind",
                                    LORIE_GATEA_FAIL_CLOSE,
                                    ctl->lastSerial, 0, 0);
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+            lorieR8Obs("r", "R_UNBOUND_FINAL",
+                       "\"ready\":0,\"pending\":0");
+            lorieR8ObsEnd("r");
+#endif
             continue;
         }
         gateARendererFatal(st, "r-control-type", LORIE_GATEA_FAIL_PROTOCOL,
@@ -1564,7 +1615,7 @@ void Renderer::refreshContext() {
         eglMakeCurrent(egl_display, defaultSfc, defaultSfc, ctx);
         if (state)
             state->surfaceAvailable = false;
-        notifyGpuCopyDone(); // Wake up any GPU copy stuck waiting on a surface we no longer have.
+        notifyGpuCopyDoneCause("surface_loss"); // Wake up any GPU copy stuck waiting on a surface we no longer have.
         return;
     }
 
@@ -1575,7 +1626,7 @@ void Renderer::refreshContext() {
     if (eglMakeCurrent(egl_display, sfc, sfc, ctx) != EGL_TRUE) {
         if (state)
             state->surfaceAvailable = false;
-        notifyGpuCopyDone();
+        notifyGpuCopyDoneCause("surface_loss");
         return vprintEglError("eglMakeCurrent failed", __LINE__);
     }
 
@@ -1943,7 +1994,7 @@ void Renderer::applyPendingGpuCopies() {
         lorieGateAPublishCompleted(&state->gpuCopyQueue.completedSerial, out.lastSerial);
         gateATraceLegacyCompleted(state, out.lastSerial, out.lastSrcId, out.lastDstId);
         state->rendererSolidComplete = state->rendererSolidSubmits;
-        notifyGpuCopyDone();
+        notifyGpuCopyDoneCause("fence_completed");
         }
     }
     lorie_mutex_unlock(&state->lock, &state->lockingPid);
@@ -2219,7 +2270,7 @@ void Renderer::redrawLocked(bool* waitingForBuffers) {
         }
         state->rendererSolidComplete = state->rendererSolidSubmits;
         if (!gpuCopyOut.gateASeen)
-            notifyGpuCopyDone();
+            notifyGpuCopyDoneCause("fence_completed");
     }
     state->waitForNextFrame = true;
     lorie_mutex_unlock(&state->lock, &state->lockingPid);

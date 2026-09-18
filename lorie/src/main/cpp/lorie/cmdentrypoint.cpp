@@ -30,7 +30,12 @@ extern "C" {
 #include <arpa/inet.h>
 #include <poll.h>
 #include <pthread.h>
+#include <cstdio>
 #include "lorie.h"
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+#include "lorie_r8_obs.h"
+#include "lorie_r8_test.h"
+#endif
 
 #define log(prio, ...) __android_log_print(ANDROID_LOG_ ## prio, "LorieNative", __VA_ARGS__)
 
@@ -341,6 +346,22 @@ int lorieGateARegistrySnapshot(uint64_t nonce, uint64_t generation,
     pthread_mutex_unlock(&gateARegistryMutex);
     return (int)count;
 }
+
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+int lorieGateAR8CopyRegistry(struct LorieGateABufferMeta *out, uint32_t cap) {
+    uint32_t count = 0;
+    if (out == NULL || cap == 0)
+        return 0;
+    pthread_mutex_lock(&gateARegistryMutex);
+    for (int i = 0; i < LORIE_GATEA_XREGISTRY_SIZE && count < cap; i++) {
+        if (gateAXRegistry[i].inUse)
+            out[count++] = gateAXRegistry[i].meta;
+    }
+    pthread_mutex_unlock(&gateARegistryMutex);
+    return (int)count;
+}
+#endif
+
 static void gateABroadcastGateAFailed(void) {
     int i;
     pthread_mutex_lock(&gateARegistryMutex);
@@ -718,6 +739,22 @@ static int gateAQueueDeferredRecord(struct LorieDecodedRecord *record) {
     if (queued == NULL)
         return -1;
     lorieDeferredLegacyAdoptDecoded(queued, record);
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+    queued->r8LocalId = lorieR8DeferAllocId();
+    queued->r8Type = record->event.type;
+    {
+        char fields[256];
+        snprintf(fields, sizeof(fields),
+                 "\"local_id\":%llu,\"type\":%u,\"nonce\":%llu,\"generation\":%llu",
+                 (unsigned long long)queued->r8LocalId,
+                 (unsigned)queued->r8Type,
+                 (unsigned long long)queued->nonce,
+                 (unsigned long long)queued->generation);
+        lorieR8Obs("x", "DEFER_ENQUEUE", fields);
+    }
+    if (record->event.type == EVENT_GPU_COPY_DONE)
+        lorieR8WakeReceived(0);
+#endif
     shared = lorieGateAShared();
     if (shared != NULL) {
         queued->nonce = lorieGateALoadU64Acquire(&shared->sessionNonce);
@@ -741,8 +778,20 @@ static int gateAQueueDeferredRecord(struct LorieDecodedRecord *record) {
  * queued closure from dereferencing freed memory. */
 void lorieGateACancelDeferred(uint64_t nonce, uint64_t generation) {
     struct LorieDeferredLegacyRecord *record;
-    for (record = gateADeferredHead; record != NULL; record = record->next)
+    for (record = gateADeferredHead; record != NULL; record = record->next) {
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+        if (!record->cancelled && record->nonce == nonce
+            && record->generation == generation) {
+            char fields[192];
+            snprintf(fields, sizeof(fields),
+                     "\"local_id\":%llu,\"type\":%u",
+                     (unsigned long long)record->r8LocalId,
+                     (unsigned)record->r8Type);
+            lorieR8Obs("x", "DEFER_CANCEL", fields);
+        }
+#endif
         lorieDeferredLegacyCancelIfMatch(record, nonce, generation);
+    }
 }
 
 static Bool gateADeferredWorkProc(__unused ClientPtr client, void *closure) {
@@ -761,6 +810,16 @@ static Bool gateADeferredWorkProc(__unused ClientPtr client, void *closure) {
     record.receivedFd = queued->receivedFd;
     queued->payload = NULL;
     queued->receivedFd = -1;
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+    {
+        char fields[192];
+        snprintf(fields, sizeof(fields),
+                 "\"local_id\":%llu,\"type\":%u",
+                 (unsigned long long)queued->r8LocalId,
+                 (unsigned)record.event.type);
+        lorieR8Obs("x", "DEFER_DISPATCH", fields);
+    }
+#endif
     if (record.event.type == EVENT_SCREEN_SIZE)
         record.event.screenSize.name = (char *)record.payload;
     handleLegacyRecord(&record, 0);
@@ -1142,6 +1201,9 @@ static int handleLegacyRecord(struct LorieDecodedRecord *record, int queueWork) 
         }
         return 0;
     case EVENT_GPU_COPY_DONE:
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+        lorieR8Obs("x", "RECHECK", "\"site\":\"handleLegacyRecord\"");
+#endif
         lorieRecheckGpuCopies();
         return 0;
     case EVENT_LOCK_KEYS_STATE:
@@ -1541,6 +1603,16 @@ Java_com_termux_x11_CmdEntryPoint_listenForConnections(JNIEnv *env, jobject thiz
         close(client);
     }
 }
+
+#if defined(LORIE_ENABLE_R8_TEST_SUPPORT) && !defined(__ANDROID__)
+extern "C" int lorieR8HostInjectGpuCopyDone(void) {
+    struct LorieDecodedRecord rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.event.type = EVENT_GPU_COPY_DONE;
+    rec.receivedFd = -1;
+    return gateAQueueDeferredRecord(&rec);
+}
+#endif
 
 void abort(void) {
     _exit(134);

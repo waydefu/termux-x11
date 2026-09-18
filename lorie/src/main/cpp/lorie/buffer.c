@@ -58,6 +58,10 @@ bool LorieBuffer_hasGpuCopyPending(LorieBuffer* buffer) {
     return buffer && buffer->gpuCopyPending;
 }
 
+int32_t LorieBuffer_gpuCopyPendingCount(const LorieBuffer* buffer) {
+    return buffer ? buffer->gpuCopyPending : 0;
+}
+
 __attribute__((unused))
 static int memfd_create(const char *name, unsigned int flags) {
 #ifndef __NR_memfd_create

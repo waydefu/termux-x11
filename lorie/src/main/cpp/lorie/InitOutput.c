@@ -50,6 +50,10 @@
 #include <pixman.h>
 
 #include "lorie.h"
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+#include "lorie_r8_obs.h"
+#include "lorie_r8_test.h"
+#endif
 
 #define DRM_FORMAT_MOD_LINEAR 0
 
@@ -1216,12 +1220,19 @@ static Bool lorieCreateScreenResources(ScreenPtr pScreen) {
 static Bool lorieCloseScreen(ScreenPtr pScreen) {
     PictureScreenPtr ps = GetPictureScreenIfSet(pScreen);
 
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+    lorieR8Obs("x", "X_CLOSE_ENTER", "\"path\":\"lorieCloseScreen\"");
+#endif
     if (pvfb->state)
         lorieB3aDump(&pvfb->state->b3aTelemetry, "CloseScreen");
     /* Clean close is a protocol drain, never a fatal-shaped cleanup. Fatal
      * conditions inside the drain terminate before normal resource release. */
     if (lorieGateAProtoEnabled())
         gateACloseGeneration();
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+    lorieR8Obs("x", "X_CLOSE_RESULT", "\"generation_close\":\"invoked\"");
+    lorieR8ObsEnd("x");
+#endif
     if (pvfb->state)
         lorieGateADumpSummary(pvfb->state, "x-close-screen");
 
@@ -1425,6 +1436,10 @@ static Bool lorieScreenInit(ScreenPtr pScreen, unused int argc, unused char **ar
           || !present_screen_init(pScreen, &loriePresentInfo))
         return FALSE;
 
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+    LorieR8TestExtensionInit();
+#endif
+
     lorieInstallXRenderProbe(pScreen);
 
     pvfb->CloseScreen = pScreen->CloseScreen;
@@ -1555,6 +1570,7 @@ bool lorieRendererAvailable(void) {
 
 static Bool lorieTryScheduleGpuBlit(PixmapPtr pixmap, PixmapPtr dst, RegionPtr update, int16_t x_off, int16_t y_off,
                                     uint8_t gpuOp, int presentTarget, uint64_t *out_serial, void **out_dst_buffer);
+uint64_t lorieGateAPixmapBufferId(PixmapPtr pixmap);
 
 // Tries to offload a Present "copy" operation (present_execute_copy) to the renderer's GPU
 // context instead of doing a CPU CopyArea here. dst is whatever GetWindowPixmap(window) is - root
@@ -1572,8 +1588,19 @@ Bool lorieTryScheduleGpuCopy(PixmapPtr pixmap, PixmapPtr dst, RegionPtr update, 
  * call this. Product blit is otherwise identical to lorieTryScheduleGpuCopy. */
 Bool lorieTryScheduleGpuPresentCopy(PixmapPtr pixmap, PixmapPtr dst, RegionPtr update, int16_t x_off, int16_t y_off,
                                     uint64_t *out_serial, void **out_dst_buffer) {
-    return lorieTryScheduleGpuBlit(pixmap, dst, update, x_off, y_off, LORIE_GPU_OP_COPY, 1,
-                                   out_serial, out_dst_buffer);
+    Bool ok = lorieTryScheduleGpuBlit(pixmap, dst, update, x_off, y_off, LORIE_GPU_OP_COPY, 1,
+                                      out_serial, out_dst_buffer);
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+    if (ok && out_serial) {
+        char fields[256];
+        snprintf(fields, sizeof(fields),
+                 "\"gpu_serial\":%llu,\"dst_id\":%llu",
+                 (unsigned long long)*out_serial,
+                 (unsigned long long)lorieGateAPixmapBufferId(dst));
+        lorieR8Obs("x", "PRESENT_SUBMIT", fields);
+    }
+#endif
+    return ok;
 }
 
 /* FD snapshot of a locked BGRA AHB src so the renderer can glTexSubImage2D as GLES
@@ -2443,6 +2470,19 @@ void lorieGateATracePresentAckAfterCompleted(uint64_t gpuSerial, uint64_t dstId)
     struct lorie_shared_server_state *st = pvfb ? pvfb->state : NULL;
     if (!st)
         return;
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+    {
+        char fields[320];
+        uint64_t done = lorieGateAObserveCompleted(&st->gpuCopyQueue.completedSerial);
+        snprintf(fields, sizeof(fields),
+                 "\"gpu_serial\":%llu,\"dst_id\":%llu,\"completedSerial\":%llu,"
+                 "\"generationFatal\":%u",
+                 (unsigned long long)gpuSerial, (unsigned long long)dstId,
+                 (unsigned long long)done,
+                 (unsigned)lorieGateAObserveFatal(&st->gateA));
+        lorieR8Obs("x", "PRESENT_POST_ACK", fields);
+    }
+#endif
     lorieGateATrace(st, LORIE_GATEA_ROLE_X, LORIE_GATEA_EVENT_PRESENT_ACK_AFTER_COMPLETED,
                     gateACurrentGeneration(), gpuSerial, 0, dstId);
 }
@@ -2451,6 +2491,21 @@ void lorieGateATracePresentRetire(uint64_t gpuSerial, uint64_t dstId, uint32_t w
     struct lorie_shared_server_state *st = pvfb ? pvfb->state : NULL;
     if (!st)
         return;
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+    {
+        char fields[320];
+        uint64_t done = lorieGateAObserveCompleted(&st->gpuCopyQueue.completedSerial);
+        snprintf(fields, sizeof(fields),
+                 "\"gpu_serial\":%llu,\"dst_id\":%llu,\"waited\":%u,"
+                 "\"completedSerial\":%llu,\"firstFailed\":%llu,"
+                 "\"generationFatal\":%u",
+                 (unsigned long long)gpuSerial, (unsigned long long)dstId,
+                 (unsigned)waited, (unsigned long long)done,
+                 (unsigned long long)lorieGateAObserveFirstFailed(&st->gateA),
+                 (unsigned)lorieGateAObserveFatal(&st->gateA));
+        lorieR8Obs("x", "PRESENT_PRE_ACK", fields);
+    }
+#endif
     lorieGateATrace(st, LORIE_GATEA_ROLE_X, LORIE_GATEA_EVENT_PRESENT_RETIRE,
                     gateACurrentGeneration(), gpuSerial, (uint64_t)waited, dstId);
 }
@@ -2761,6 +2816,44 @@ static Bool gateAEnsureReady(LorieBuffer *buf) {
     return TRUE;
 }
 
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+Bool lorieGateAR8EnsureReadyForBuffer(LorieBuffer *buf) {
+    return gateAEnsureReady(buf);
+}
+
+LorieBuffer *lorieGateAR8EnsureGpuSampleableAhb(PixmapPtr pixmap) {
+    return lorieEnsureGpuSampleable(pixmap, LORIEBUFFER_AHARDWAREBUFFER);
+}
+
+int lorieGateAR8PairSnapshot(int *state, uint64_t *srcId, uint64_t *dstId,
+                             uint64_t *nonce, uint64_t *generation) {
+    if (state)
+        *state = gateAPair.state;
+    if (srcId)
+        *srcId = gateAPair.srcId;
+    if (dstId)
+        *dstId = gateAPair.dstId;
+    if (nonce)
+        *nonce = gateAPair.nonce;
+    if (generation)
+        *generation = gateAPair.generation;
+    return gateAPair.state;
+}
+
+int32_t lorieGateAR8RootPending(void) {
+    return pvfb ? (int32_t)pvfb->rootGpuCopyPending : 0;
+}
+
+int lorieGateAR8PixmapReject(PixmapPtr pixmap) {
+    LoriePixmapPriv *priv = LORIE_PIXMAP_PRIV_FROM_PIXMAP(pixmap);
+    if (!priv || priv->mem)
+        return 4; /* LORIE_R8_REFUSE_NOT_OFFSCREEN */
+    if (priv->imported)
+        return 6; /* LORIE_R8_REFUSE_IMPORTED */
+    return 0;
+}
+#endif
+
 /* Undo a RESERVED pair (pre-publish only): refs released, lease cleared,
  * CPU ownership untouched. Never valid once GPU_OWNED. */
 static void gateAPairUndoReserve(void) {
@@ -3055,6 +3148,15 @@ static LorieGateAResult gateAWaitTerminal(uint64_t serial) {
     long elapsed;
     if (!st || serial == 0)
         return LORIE_GATEA_RESULT_FATAL;
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+    {
+        char fields[160];
+        snprintf(fields, sizeof(fields),
+                 "\"serial\":%llu,\"kind\":\"completedSerial\"",
+                 (unsigned long long)serial);
+        lorieR8Obs("x", "X_TERMINAL_WAIT_ENTER", fields);
+    }
+#endif
     clock_gettime(CLOCK_MONOTONIC, &t0);
     for (;;) {
         uint32_t fatal = lorieGateAObserveFatal(&st->gateA);
@@ -3130,6 +3232,16 @@ static int gateARetireBufferId(uint64_t id) {
         return 0; /* never registered */
     if (rc != 0)
         gateAXFatal("x-retire-state", LORIE_GATEA_FAIL_UNREGISTER, 0);
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+    if (meta.lastSubmittedSerial != 0) {
+        char fields[192];
+        snprintf(fields, sizeof(fields),
+                 "\"bufferId\":%llu,\"serial\":%llu,\"kind\":\"unregister\"",
+                 (unsigned long long)id,
+                 (unsigned long long)meta.lastSubmittedSerial);
+        lorieR8Obs("x", "X_TERMINAL_WAIT_ENTER", fields);
+    }
+#endif
     if (meta.lastSubmittedSerial != 0) {
         result = gateAWaitTerminal(meta.lastSubmittedSerial);
         if (result != LORIE_GATEA_RESULT_SUCCESS)
@@ -3294,13 +3406,34 @@ static Bool gateADirectPublishRect(int srcX, int srcY, int dstX, int dstY,
         if (lorieGateATestFaultConsume(pvfb->state,
                                        LORIE_GATEA_TEST_DESTROY_WHILE_GPU_OWNED,
                                        LORIE_GATEA_ROLE_X, 0,
-                                       gateAPair.generation))
+                                       gateAPair.generation)) {
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+            LoriePixmapPriv *hookPriv = LORIE_PIXMAP_PRIV_FROM_PIXMAP(exaGpuComp.src);
+            lorieR8Obs("x", "P1_DESTRUCTOR_CALL",
+                       "\"guard\":\"lorieExaDestroyPixmap\"");
+            lorieExaDestroyPixmap(pScreenPtr, hookPriv);
+            lorieR8Obs("x", "R8_HOOK_UNEXPECTED_RETURN",
+                       "\"guard\":\"lorieExaDestroyPixmap\"");
+            gateAXFatal("r8-hook-unexpected-return", LORIE_GATEA_FAIL_UNREGISTER, 0);
+#else
             gateAXFatal("x-destroy-in-lease", LORIE_GATEA_FAIL_UNREGISTER, 0);
+#endif
+        }
         if (lorieGateATestFaultConsume(pvfb->state,
                                        LORIE_GATEA_TEST_CLOSE_WHILE_LEASE,
                                        LORIE_GATEA_ROLE_X, 0,
-                                       gateAPair.generation))
+                                       gateAPair.generation)) {
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+            lorieR8Obs("x", "X_CLOSE_ENTER",
+                       "\"guard\":\"gateACloseGeneration\"");
             gateACloseGeneration();
+            lorieR8Obs("x", "R8_HOOK_UNEXPECTED_RETURN",
+                       "\"guard\":\"gateACloseGeneration\"");
+            gateAXFatal("r8-hook-unexpected-return", LORIE_GATEA_FAIL_CLOSE, 0);
+#else
+            gateACloseGeneration();
+#endif
+        }
     }
     entry = &pvfb->state->gpuCopyQueue.entries[wi % LORIE_GPU_COPY_QUEUE_CAPACITY];
     memset(entry, 0, sizeof(*entry));
@@ -3743,6 +3876,19 @@ void *lorieCreatePixmap(__unused ScreenPtr pScreen, int width, int height, int d
 
 void lorieExaDestroyPixmap(__unused ScreenPtr pScreen, void *driverPriv) {
     LoriePixmapPriv *priv = driverPriv;
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+    {
+        char fields[256];
+        uint64_t id = (priv && priv->buffer)
+            ? LorieBuffer_description(priv->buffer)->id : 0;
+        snprintf(fields, sizeof(fields),
+                 "\"bufferId\":%llu,\"overlap\":%s",
+                 (unsigned long long)id,
+                 gateAPairOverlapsBuffer(priv && priv->buffer ? priv->buffer : NULL)
+                    ? "true" : "false");
+        lorieR8Obs("x", "X_DESTRUCTOR_ENTER", fields);
+    }
+#endif
     /* P2: destroying a leased endpoint mid-transaction is impossible on the
      * single X server thread — treat it as protocol corruption, fail-stop. */
     if (lorieGateAProtoEnabled() && priv && priv->buffer
@@ -3756,6 +3902,9 @@ void lorieExaDestroyPixmap(__unused ScreenPtr pScreen, void *driverPriv) {
         lorieUnregisterBuffer(priv->buffer);
         LorieBuffer_release(priv->buffer);
     }
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+    lorieR8Obs("x", "X_DESTRUCTOR_EXIT", "\"released\":true");
+#endif
     free(priv);
 }
 

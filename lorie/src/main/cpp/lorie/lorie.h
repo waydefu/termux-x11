@@ -1327,6 +1327,10 @@ struct LorieDeferredLegacyRecord {
     uint64_t generation;
     int cancelled;
     struct LorieDeferredLegacyRecord *next;
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+    uint64_t r8LocalId;
+    uint8_t r8Type;
+#endif
 };
 
 static inline __always_inline void lorieDeferredLegacyDisposeOwned(

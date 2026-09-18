@@ -1,0 +1,566 @@
+{
+  "schema_version": 1,
+  "status": "PROPOSED_NOT_IMPLEMENTED_NOT_RUN",
+  "base_sha": "ece9f3f228b0ea2e406544c85346246559fe5095",
+  "source_sha": "fdfb1ce44b429897eda17c43bf33fbd37afe67f3",
+  "design_acceptance": null,
+  "implementation_sha": null,
+  "artifact_manifest": null,
+  "runtime_authorization": null,
+  "aggregate_verdict": "NOT_RUN",
+  "dependencies": {
+    "before_design": "Current authority and exact decisive source",
+    "before_implementation": "Explicit acceptance of R8-A01 through R8-A10 and bounded implementation grant",
+    "before_runtime": [
+      "R7 overall GATE_PASS on eligible lineage",
+      "support HOST_VERIFIED",
+      "qualified exact fork CI/artifact",
+      "separately granted installation with read-back if candidate changes",
+      "explicit named runtime cells and attempt count"
+    ]
+  },
+  "policy": {
+    "attempts_per_cell": 1,
+    "fresh_x_per_cell": true,
+    "fail_fast": true,
+    "stable_package": "com.termux.x11",
+    "stable_display": ":1",
+    "experimental_package": "com.waydefu.x11gpu",
+    "experimental_display": ":3",
+    "android_display": 0,
+    "adb_lane": 5038,
+    "product_wait_ms": 2000,
+    "case_loop_recovery_ms": 8,
+    "proposed_collection_deadline_s": 12,
+    "existing_event_max": 36,
+    "existing_counters": 28,
+    "shared_abi_change": false,
+    "device_completion_injection": false,
+    "diagnostic_missing": "INVALID",
+    "missing_overlap": "INVALID_CONSTRUCTION",
+    "null_means": "unknown, never zero or pass",
+    "aggregate": "all ten cells PASS plus full provenance, evidence completeness, Stable unchanged, cleanup; no cell waived by a successful host model"
+  },
+  "capacities": {
+    "unit": "buffer",
+    "x_registry": 16,
+    "renderer_ready": 16,
+    "renderer_pending_import": 8,
+    "c5_baseline": "Require zero unrelated registered buffers; if baseline contains a necessary root slot, record it and require accepted fixture allocation/amendment rather than blindly allocating16 new ones.",
+    "deferred_queue": "Dynamic allocation; no fixed numeric capacity claimed"
+  },
+  "runtime_environment": {
+    "common": {
+      "TERMUX_X11_GATEA_PROTO": "1",
+      "TERMUX_X11_GATEA_TELEMETRY": "1",
+      "TERMUX_X11_R8_ARM": "1",
+      "TERMUX_X11_R8_CASE": "<exact cell.id>"
+    },
+    "clean_absent": [
+      "TERMUX_X11_GATEA_TEST_FAULT",
+      "TERMUX_X11_GATEA_TEST_ARM",
+      "TERMUX_X11_GATEA_R6_PRESENT_REQUEUE_FAIL"
+    ],
+    "fault_extra": {
+      "TERMUX_X11_GATEA_TEST_FAULT": "<cell.fault>",
+      "TERMUX_X11_GATEA_TEST_ARM": "1"
+    }
+  },
+  "cell_order": [
+    "R8-C1",
+    "R8-C2",
+    "R8-C3-window",
+    "R8-C3-disconnect",
+    "R8-C4",
+    "R8-C5-full",
+    "R8-C5-overflow",
+    "R8-D",
+    "R8-P1",
+    "R8-P2"
+  ],
+  "cells": [
+    {
+      "id": "R8-C1",
+      "name": "clean Destroy and fresh pair recovery",
+      "kind": "clean",
+      "direct": 2,
+      "present": 0,
+      "ctrl": false,
+      "construction": [
+        "direct_exact_pair_A",
+        "free_picture_then_pixmap_src_A",
+        "free_picture_then_pixmap_dst_A",
+        "pair_A_actual_destructors",
+        "new_distinct_pair_B_direct_exact"
+      ],
+      "require": [
+        "tuple_object_bound_retire_A",
+        "renderer_destroy_before_x_ack",
+        "x_slot_remove_before_owner_release",
+        "live_pending_zero_after_A",
+        "pair_B_ready_success",
+        "clean_final_resources_zero"
+      ],
+      "forbid": [
+        "unexpected_fatal",
+        "preterminal_release",
+        "stale_pair_A_reuse_as_pair_B"
+      ],
+      "fatal": null,
+      "exit": "X alive after B; requested clean shutdown afterwards",
+      "decision": [
+        "R8-A01",
+        "R8-A02",
+        "R8-A06"
+      ],
+      "attempts": 1,
+      "fixture_cli": "p_r8_lifecycle --display :3 --cell R8-C1 --spec \"$SPEC\" --client-log \"$NEW/client.jsonl\"",
+      "runner_cli": "bash tests/r8/run-r8-one-cell.sh --manifest \"$MANIFEST\" --spec \"$SPEC\" --cell R8-C1 --evidence \"$NEW\"",
+      "judge_cli": "python3 tests/r8/judge-r8.py --manifest \"$NEW/manifest.json\" --spec \"$SPEC\" --evidence \"$NEW\" --output \"$NEW/judge.json\"",
+      "runtime_verdict": "NOT_RUN",
+      "evidence_directory": "evidence/session/gate-a-a1/p2-r8-runtime/runtime-<support-sha>/r8-c1/<explicit-attempt-id>/",
+      "pass_requires": "All construction and require predicates true; all forbid predicates false; exact artifact/env/identity, complete raw evidence, Stable unchanged and actual owned cleanup.",
+      "blocked": "No grant/dependency/tool/binding; existing evidence destination or preexisting X3; do not start.",
+      "invalid": "Wrong identity/env/artifact or missing required trace/schedule, null mandatory metric; freeze attempt.",
+      "fail": "Complete bound trace proves forbidden behavior or violated required product predicate.",
+      "cleanup": "Capture final clean X and renderer observations; actual process and socket/lock absence; no broad kill.",
+      "next": "Only next listed cell under already explicit batch grant; any non-PASS stops."
+    },
+    {
+      "id": "R8-C2",
+      "name": "normal CloseScreen lifecycle",
+      "kind": "clean_close",
+      "direct": 1,
+      "present": 0,
+      "ctrl": false,
+      "construction": [
+        "direct_exact_pair_retained",
+        "verified_TERM_request",
+        "actual_CloseScreen_entry_with_recorded_live_registry_or_accepted_source_bound_shutdown_disposition"
+      ],
+      "require": [
+        "no_active_pair_at_close",
+        "submitted_work_terminal",
+        "readIndex_equals_writeIndex",
+        "all_registered_ids_retired_before_generation_close",
+        "generation_closed_and_renderer_unbound",
+        "clean_exit_and_process_socket_absence"
+      ],
+      "forbid": [
+        "fatal_close",
+        "cleanup_kill_labeled_clean",
+        "unproven_live_at_close",
+        "post_close_admission"
+      ],
+      "fatal": null,
+      "exit": "Actual requested clean shutdown; not signal-caused abnormal exit",
+      "decision": [
+        "R8-A02",
+        "R8-A06",
+        "R8-A10"
+      ],
+      "attempts": 1,
+      "fixture_cli": "p_r8_lifecycle --display :3 --cell R8-C2 --spec \"$SPEC\" --client-log \"$NEW/client.jsonl\"",
+      "runner_cli": "bash tests/r8/run-r8-one-cell.sh --manifest \"$MANIFEST\" --spec \"$SPEC\" --cell R8-C2 --evidence \"$NEW\"",
+      "judge_cli": "python3 tests/r8/judge-r8.py --manifest \"$NEW/manifest.json\" --spec \"$SPEC\" --evidence \"$NEW\" --output \"$NEW/judge.json\"",
+      "runtime_verdict": "NOT_RUN",
+      "evidence_directory": "evidence/session/gate-a-a1/p2-r8-runtime/runtime-<support-sha>/r8-c2/<explicit-attempt-id>/",
+      "pass_requires": "All construction and require predicates true; all forbid predicates false; exact artifact/env/identity, complete raw evidence, Stable unchanged and actual owned cleanup.",
+      "blocked": "No grant/dependency/tool/binding; existing evidence destination or preexisting X3; do not start.",
+      "invalid": "Wrong identity/env/artifact or missing required trace/schedule, null mandatory metric; freeze attempt.",
+      "fail": "Complete bound trace proves forbidden behavior or violated required product predicate.",
+      "cleanup": "Capture final clean X and renderer observations; actual process and socket/lock absence; no broad kill.",
+      "next": "Only next listed cell under already explicit batch grant; any non-PASS stops."
+    },
+    {
+      "id": "R8-C3-window",
+      "name": "Present followed by DestroyWindow",
+      "kind": "clean",
+      "direct": 1,
+      "present": 1,
+      "ctrl": false,
+      "construction": [
+        "Present_ASYNC_COPY",
+        "DestroyWindow_without_awaiting_CompleteNotify",
+        "actual_COPY_scheduled_identity",
+        "retire_helper_for_target",
+        "survivor_direct_exact"
+      ],
+      "require": [
+        "pre_ACK_cover_T_gte_S_same_session",
+        "post_ACK_pending_clear",
+        "waited_0_or_1_legal",
+        "no_early_idle_destroy",
+        "survivor_X_usable"
+      ],
+      "forbid": [
+        "event32",
+        "software_present_as_gpu_copy",
+        "event36_as_terminal_proof",
+        "require_notification_to_destroyed_window"
+      ],
+      "fatal": null,
+      "exit": "X stays usable, then clean shutdown",
+      "decision": [
+        "R8-A06",
+        "R8-A09"
+      ],
+      "attempts": 1,
+      "fixture_cli": "p_r8_lifecycle --display :3 --cell R8-C3-window --spec \"$SPEC\" --client-log \"$NEW/client.jsonl\"",
+      "runner_cli": "bash tests/r8/run-r8-one-cell.sh --manifest \"$MANIFEST\" --spec \"$SPEC\" --cell R8-C3-window --evidence \"$NEW\"",
+      "judge_cli": "python3 tests/r8/judge-r8.py --manifest \"$NEW/manifest.json\" --spec \"$SPEC\" --evidence \"$NEW\" --output \"$NEW/judge.json\"",
+      "runtime_verdict": "NOT_RUN",
+      "evidence_directory": "evidence/session/gate-a-a1/p2-r8-runtime/runtime-<support-sha>/r8-c3-window/<explicit-attempt-id>/",
+      "pass_requires": "All construction and require predicates true; all forbid predicates false; exact artifact/env/identity, complete raw evidence, Stable unchanged and actual owned cleanup.",
+      "blocked": "No grant/dependency/tool/binding; existing evidence destination or preexisting X3; do not start.",
+      "invalid": "Wrong identity/env/artifact or missing required trace/schedule, null mandatory metric; freeze attempt.",
+      "fail": "Complete bound trace proves forbidden behavior or violated required product predicate.",
+      "cleanup": "Capture final clean X and renderer observations; actual process and socket/lock absence; no broad kill.",
+      "next": "Only next listed cell under already explicit batch grant; any non-PASS stops."
+    },
+    {
+      "id": "R8-C3-disconnect",
+      "name": "Present client disconnect",
+      "kind": "clean",
+      "direct": 1,
+      "present": 1,
+      "ctrl": false,
+      "construction": [
+        "Present_ASYNC_COPY",
+        "immediate_present_client_disconnect",
+        "actual_COPY_scheduled_identity",
+        "retire_helper_for_target",
+        "separate_survivor_direct_exact"
+      ],
+      "require": [
+        "pre_ACK_cover_T_gte_S_same_session",
+        "post_ACK_pending_clear",
+        "waited_0_or_1_legal",
+        "survivor_X_usable"
+      ],
+      "forbid": [
+        "event32",
+        "require_notification_to_disconnected_client",
+        "unrelated_serial_as_terminal"
+      ],
+      "fatal": null,
+      "exit": "X stays usable, then clean shutdown",
+      "decision": [
+        "R8-A06",
+        "R8-A09"
+      ],
+      "attempts": 1,
+      "fixture_cli": "p_r8_lifecycle --display :3 --cell R8-C3-disconnect --spec \"$SPEC\" --client-log \"$NEW/client.jsonl\"",
+      "runner_cli": "bash tests/r8/run-r8-one-cell.sh --manifest \"$MANIFEST\" --spec \"$SPEC\" --cell R8-C3-disconnect --evidence \"$NEW\"",
+      "judge_cli": "python3 tests/r8/judge-r8.py --manifest \"$NEW/manifest.json\" --spec \"$SPEC\" --evidence \"$NEW\" --output \"$NEW/judge.json\"",
+      "runtime_verdict": "NOT_RUN",
+      "evidence_directory": "evidence/session/gate-a-a1/p2-r8-runtime/runtime-<support-sha>/r8-c3-disconnect/<explicit-attempt-id>/",
+      "pass_requires": "All construction and require predicates true; all forbid predicates false; exact artifact/env/identity, complete raw evidence, Stable unchanged and actual owned cleanup.",
+      "blocked": "No grant/dependency/tool/binding; existing evidence destination or preexisting X3; do not start.",
+      "invalid": "Wrong identity/env/artifact or missing required trace/schedule, null mandatory metric; freeze attempt.",
+      "fail": "Complete bound trace proves forbidden behavior or violated required product predicate.",
+      "cleanup": "Capture final clean X and renderer observations; actual process and socket/lock absence; no broad kill.",
+      "next": "Only next listed cell under already explicit batch grant; any non-PASS stops."
+    },
+    {
+      "id": "R8-C4",
+      "name": "register READY without submit",
+      "kind": "register_only",
+      "direct": 0,
+      "present": 0,
+      "ctrl": true,
+      "construction": [
+        "REGISTER_BUFFER_src",
+        "REGISTER_BUFFER_dst",
+        "READY_both",
+        "no_Composite_request",
+        "free_pictures_then_source_destination"
+      ],
+      "require": [
+        "lastSubmittedSerial_zero_each",
+        "pendingCount_zero_each",
+        "actual_buffer_pending_zero",
+        "queue_indices_and_completed_unchanged",
+        "real_destructors",
+        "renderer_destroy_before_x_ack",
+        "clean_final_resources_zero"
+      ],
+      "forbid": [
+        "LEASE_RESERVED_for_targets",
+        "UNLOCK_for_targets",
+        "PUBLISH_for_targets",
+        "CONSUME_for_targets",
+        "terminal_wait_for_targets",
+        "CPU_or_staging_Composite_hidden_in_registration"
+      ],
+      "fatal": null,
+      "exit": "X alive after frees, then clean shutdown",
+      "decision": [
+        "R8-A01",
+        "R8-A04",
+        "R8-A06"
+      ],
+      "attempts": 1,
+      "fixture_cli": "p_r8_lifecycle --display :3 --cell R8-C4 --spec \"$SPEC\" --client-log \"$NEW/client.jsonl\"",
+      "runner_cli": "bash tests/r8/run-r8-one-cell.sh --manifest \"$MANIFEST\" --spec \"$SPEC\" --cell R8-C4 --evidence \"$NEW\"",
+      "judge_cli": "python3 tests/r8/judge-r8.py --manifest \"$NEW/manifest.json\" --spec \"$SPEC\" --evidence \"$NEW\" --output \"$NEW/judge.json\"",
+      "runtime_verdict": "NOT_RUN",
+      "evidence_directory": "evidence/session/gate-a-a1/p2-r8-runtime/runtime-<support-sha>/r8-c4/<explicit-attempt-id>/",
+      "pass_requires": "All construction and require predicates true; all forbid predicates false; exact artifact/env/identity, complete raw evidence, Stable unchanged and actual owned cleanup.",
+      "blocked": "No grant/dependency/tool/binding; existing evidence destination or preexisting X3; do not start.",
+      "invalid": "Wrong identity/env/artifact or missing required trace/schedule, null mandatory metric; freeze attempt.",
+      "fail": "Complete bound trace proves forbidden behavior or violated required product predicate.",
+      "cleanup": "Capture final clean X and renderer observations; actual process and socket/lock absence; no broad kill.",
+      "next": "Only next listed cell under already explicit batch grant; any non-PASS stops."
+    },
+    {
+      "id": "R8-C5-full",
+      "name": "fill buffer slots and close",
+      "kind": "clean_close",
+      "direct": 0,
+      "present": 0,
+      "ctrl": true,
+      "construction": [
+        "controlled_baseline_no_unrelated_registrations",
+        "sequential_REGISTER_BUFFER_until_X16_R16",
+        "all_client_pixmaps_retained_before_TERM",
+        "normal_shutdown_construction_recorded"
+      ],
+      "require": [
+        "capacity_unit_buffers",
+        "pending_imports_drained",
+        "all_registered_ids_retired",
+        "renderer_final_zero",
+        "X_final_zero",
+        "generation_closed_unbound"
+      ],
+      "forbid": [
+        "16_pairs_interpretation",
+        "concurrent_pending8_overflow_as_capacity",
+        "silent_eviction",
+        "cleanup_process_death_as_resource_balance"
+      ],
+      "fatal": null,
+      "exit": "Actual clean shutdown; source-bound CloseScreen disposition required",
+      "decision": [
+        "R8-A03",
+        "R8-A04",
+        "R8-A06",
+        "R8-A10"
+      ],
+      "attempts": 1,
+      "fixture_cli": "p_r8_lifecycle --display :3 --cell R8-C5-full --spec \"$SPEC\" --client-log \"$NEW/client.jsonl\"",
+      "runner_cli": "bash tests/r8/run-r8-one-cell.sh --manifest \"$MANIFEST\" --spec \"$SPEC\" --cell R8-C5-full --evidence \"$NEW\"",
+      "judge_cli": "python3 tests/r8/judge-r8.py --manifest \"$NEW/manifest.json\" --spec \"$SPEC\" --evidence \"$NEW\" --output \"$NEW/judge.json\"",
+      "runtime_verdict": "NOT_RUN",
+      "evidence_directory": "evidence/session/gate-a-a1/p2-r8-runtime/runtime-<support-sha>/r8-c5-full/<explicit-attempt-id>/",
+      "pass_requires": "All construction and require predicates true; all forbid predicates false; exact artifact/env/identity, complete raw evidence, Stable unchanged and actual owned cleanup.",
+      "blocked": "No grant/dependency/tool/binding; existing evidence destination or preexisting X3; do not start.",
+      "invalid": "Wrong identity/env/artifact or missing required trace/schedule, null mandatory metric; freeze attempt.",
+      "fail": "Complete bound trace proves forbidden behavior or violated required product predicate.",
+      "cleanup": "Capture final clean X and renderer observations; actual process and socket/lock absence; no broad kill.",
+      "next": "Only next listed cell under already explicit batch grant; any non-PASS stops."
+    },
+    {
+      "id": "R8-C5-overflow",
+      "name": "pre-lease full refusal and slot recovery",
+      "kind": "capacity",
+      "direct": 1,
+      "present": 0,
+      "ctrl": true,
+      "construction": [
+        "fill16_sequentially",
+        "registered_BGRA_src_and_new_RGBX_dst",
+        "normal_Composite_direct_refused_prelease",
+        "exact_existing_fallback",
+        "free_one_registered_RGBX_slot",
+        "same_new_dst_admitted",
+        "one_recovery_direct_exact"
+      ],
+      "require": [
+        "no_direct_lease_unlock_publish_for_refused_pair",
+        "no_target_registration_on_full_refusal",
+        "no_unexpected_fatal",
+        "real_slot_recovery",
+        "all_final_resources_zero"
+      ],
+      "forbid": [
+        "broad_no_GPU_rule_rejecting_legal_legacy_fallback",
+        "LRU_required_by_assumption",
+        "post_publish_fallback",
+        "renderer_only_overflow_claim"
+      ],
+      "fatal": null,
+      "exit": "X alive after recovery, then clean shutdown",
+      "decision": [
+        "R8-A03",
+        "R8-A04",
+        "R8-A06"
+      ],
+      "attempts": 1,
+      "fixture_cli": "p_r8_lifecycle --display :3 --cell R8-C5-overflow --spec \"$SPEC\" --client-log \"$NEW/client.jsonl\"",
+      "runner_cli": "bash tests/r8/run-r8-one-cell.sh --manifest \"$MANIFEST\" --spec \"$SPEC\" --cell R8-C5-overflow --evidence \"$NEW\"",
+      "judge_cli": "python3 tests/r8/judge-r8.py --manifest \"$NEW/manifest.json\" --spec \"$SPEC\" --evidence \"$NEW\" --output \"$NEW/judge.json\"",
+      "runtime_verdict": "NOT_RUN",
+      "evidence_directory": "evidence/session/gate-a-a1/p2-r8-runtime/runtime-<support-sha>/r8-c5-overflow/<explicit-attempt-id>/",
+      "pass_requires": "All construction and require predicates true; all forbid predicates false; exact artifact/env/identity, complete raw evidence, Stable unchanged and actual owned cleanup.",
+      "blocked": "No grant/dependency/tool/binding; existing evidence destination or preexisting X3; do not start.",
+      "invalid": "Wrong identity/env/artifact or missing required trace/schedule, null mandatory metric; freeze attempt.",
+      "fail": "Complete bound trace proves forbidden behavior or violated required product predicate.",
+      "cleanup": "Capture final clean X and renderer observations; actual process and socket/lock absence; no broad kill.",
+      "next": "Only next listed cell under already explicit batch grant; any non-PASS stops."
+    },
+    {
+      "id": "R8-D",
+      "name": "real deferred completion wakeup and delivery",
+      "kind": "deferred",
+      "direct": 1,
+      "present": 8,
+      "ctrl": false,
+      "construction": [
+        "one_exact_direct_pair_retained",
+        "present_burst4_flush",
+        "free_source",
+        "present_burst4_flush",
+        "free_destination",
+        "real_wakeup_received_during_UNREGISTER_wait",
+        "actual_DEFER_enqueue_record",
+        "later_workproc_dispatch_same_record"
+      ],
+      "require": [
+        "complete_wakeup_send_receive_ordinals_same_connection",
+        "deferred_wakeup_origin_fence_completed",
+        "completedSerial_covers_real_present_work",
+        "no_semantic_recheck_inside_wait",
+        "exactly_once_dispatch_of_each_target_record",
+        "all8_accepted_Present_notifications_on_live_connection",
+        "no_deferred_records_before_final_close"
+      ],
+      "forbid": [
+        "surface_loss_wakeup_as_completion",
+        "forged_device_GPU_COPY_DONE",
+        "one_wakeup_per_present_assumption",
+        "sleep_or_renderer_delay",
+        "retry_until_overlap"
+      ],
+      "fatal": null,
+      "exit": "X alive after notification drain, then clean shutdown",
+      "decision": [
+        "R8-A02",
+        "R8-A06",
+        "R8-A07"
+      ],
+      "not_constructed": "INVALID_CONSTRUCTION; preserve once-run evidence and stop; no automatic attempt2",
+      "attempts": 1,
+      "fixture_cli": "p_r8_lifecycle --display :3 --cell R8-D --spec \"$SPEC\" --client-log \"$NEW/client.jsonl\"",
+      "runner_cli": "bash tests/r8/run-r8-one-cell.sh --manifest \"$MANIFEST\" --spec \"$SPEC\" --cell R8-D --evidence \"$NEW\"",
+      "judge_cli": "python3 tests/r8/judge-r8.py --manifest \"$NEW/manifest.json\" --spec \"$SPEC\" --evidence \"$NEW\" --output \"$NEW/judge.json\"",
+      "runtime_verdict": "NOT_RUN",
+      "evidence_directory": "evidence/session/gate-a-a1/p2-r8-runtime/runtime-<support-sha>/r8-d/<explicit-attempt-id>/",
+      "pass_requires": "All construction and require predicates true; all forbid predicates false; exact artifact/env/identity, complete raw evidence, Stable unchanged and actual owned cleanup.",
+      "blocked": "No grant/dependency/tool/binding; existing evidence destination or preexisting X3; do not start.",
+      "invalid": "Wrong identity/env/artifact or missing required trace/schedule, null mandatory metric; freeze attempt.",
+      "fail": "Complete bound trace proves forbidden behavior or violated required product predicate.",
+      "cleanup": "Capture final clean X and renderer observations; actual process and socket/lock absence; no broad kill.",
+      "next": "Only next listed cell under already explicit batch grant; any non-PASS stops."
+    },
+    {
+      "id": "R8-P1",
+      "name": "synthetic GPU-owned real destructor guard",
+      "kind": "fault",
+      "direct": 1,
+      "present": 0,
+      "ctrl": false,
+      "fault": "destroy-while-gpu-owned",
+      "fault_enum": 14,
+      "construction": [
+        "same_pair_event5_GPU_OWNED",
+        "event35_once_X_enum14",
+        "actual_lorieExaDestroyPixmap_call_before_first_publish",
+        "actual_guard_entry"
+      ],
+      "require": [
+        "frozen_R7_judge_PASS",
+        "supplemental_R8_guard_oracle_PASS",
+        "X_disappears_by_fatal_path",
+        "no_unexpected_signal"
+      ],
+      "forbid": [
+        "unconditional_fatal_stub_as_guard_proof",
+        "R8_HOOK_UNEXPECTED_RETURN",
+        "UNREGISTER_ACK_after_fault",
+        "normal_release_after_fault",
+        "PUBLISH_after_fault"
+      ],
+      "fatal": {
+        "what": "x-destroy-in-lease",
+        "reason": 7
+      },
+      "exit": "Expected X fatal; process absence observed before cleanup; renderer normal accounting not required",
+      "decision": [
+        "R8-A05",
+        "R8-A06"
+      ],
+      "attempts": 1,
+      "fixture_cli": "p_r8_lifecycle --display :3 --cell R8-P1 --spec \"$SPEC\" --client-log \"$NEW/client.jsonl\"",
+      "runner_cli": "bash tests/r8/run-r8-one-cell.sh --manifest \"$MANIFEST\" --spec \"$SPEC\" --cell R8-P1 --evidence \"$NEW\"",
+      "judge_cli": "python3 tests/r8/judge-r8.py --manifest \"$NEW/manifest.json\" --spec \"$SPEC\" --evidence \"$NEW\" --output \"$NEW/judge.json\"",
+      "runtime_verdict": "NOT_RUN",
+      "evidence_directory": "evidence/session/gate-a-a1/p2-r8-runtime/runtime-<support-sha>/r8-p1/<explicit-attempt-id>/",
+      "pass_requires": "All construction and require predicates true; all forbid predicates false; exact artifact/env/identity, complete raw evidence, Stable unchanged and actual owned cleanup.",
+      "blocked": "No grant/dependency/tool/binding; existing evidence destination or preexisting X3; do not start.",
+      "invalid": "Wrong identity/env/artifact or missing required trace/schedule, null mandatory metric; freeze attempt.",
+      "fail": "Complete bound trace proves forbidden behavior or violated required product predicate.",
+      "cleanup": "Capture fatal/disappearance first; only then owned experimental process cleanup. No normal resource-balance claim from death.",
+      "next": "Only next listed cell under already explicit batch grant; any non-PASS stops."
+    },
+    {
+      "id": "R8-P2",
+      "name": "synthetic active-lease real close guard",
+      "kind": "fault",
+      "direct": 1,
+      "present": 0,
+      "ctrl": false,
+      "fault": "close-while-lease",
+      "fault_enum": 15,
+      "construction": [
+        "same_pair_event5_GPU_OWNED",
+        "event35_once_X_enum15",
+        "actual_gateACloseGeneration_call_before_first_publish"
+      ],
+      "require": [
+        "frozen_R7_judge_PASS",
+        "supplemental_R8_guard_oracle_PASS",
+        "X_disappears_by_fatal_path",
+        "no_unexpected_signal"
+      ],
+      "forbid": [
+        "GENERATION_CLOSED_after_fault",
+        "UNREGISTER_ACK_after_fault",
+        "normal_release_after_fault",
+        "PUBLISH_after_fault"
+      ],
+      "fatal": {
+        "what": "x-close-in-lease",
+        "reason": 8
+      },
+      "exit": "Expected X fatal; process absence observed before cleanup",
+      "decision": [
+        "R8-A05",
+        "R8-A06"
+      ],
+      "attempts": 1,
+      "fixture_cli": "p_r8_lifecycle --display :3 --cell R8-P2 --spec \"$SPEC\" --client-log \"$NEW/client.jsonl\"",
+      "runner_cli": "bash tests/r8/run-r8-one-cell.sh --manifest \"$MANIFEST\" --spec \"$SPEC\" --cell R8-P2 --evidence \"$NEW\"",
+      "judge_cli": "python3 tests/r8/judge-r8.py --manifest \"$NEW/manifest.json\" --spec \"$SPEC\" --evidence \"$NEW\" --output \"$NEW/judge.json\"",
+      "runtime_verdict": "NOT_RUN",
+      "evidence_directory": "evidence/session/gate-a-a1/p2-r8-runtime/runtime-<support-sha>/r8-p2/<explicit-attempt-id>/",
+      "pass_requires": "All construction and require predicates true; all forbid predicates false; exact artifact/env/identity, complete raw evidence, Stable unchanged and actual owned cleanup.",
+      "blocked": "No grant/dependency/tool/binding; existing evidence destination or preexisting X3; do not start.",
+      "invalid": "Wrong identity/env/artifact or missing required trace/schedule, null mandatory metric; freeze attempt.",
+      "fail": "Complete bound trace proves forbidden behavior or violated required product predicate.",
+      "cleanup": "Capture fatal/disappearance first; only then owned experimental process cleanup. No normal resource-balance claim from death.",
+      "next": "Only next listed cell under already explicit batch grant; any non-PASS stops."
+    }
+  ]
+}

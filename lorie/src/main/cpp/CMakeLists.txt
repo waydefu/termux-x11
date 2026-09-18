@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.22)
 project(lorie)
 
+option(LORIE_ENABLE_R8_TEST_SUPPORT
+        "Compile R8 lifecycle test extension and observation sideband (default OFF)"
+        OFF)
+
 set(can_use_assembler TRUE)
 enable_language(ASM)
 

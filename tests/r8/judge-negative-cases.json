@@ -1,0 +1,490 @@
+{
+  "schema_version": 1,
+  "status": "PROPOSED_TEST_VECTORS_NOT_EXECUTED",
+  "real_judge_requirement": "Every runtime vector instantiates complete bound raw input for the implemented judge-r8.py. Change only the named property; assert exact intended reason, not malformed generic failure. HOST-DEFER links actual parser/queue functions and may use synthetic records; its PASS never satisfies device R8-D.",
+  "base_controls": "V01..V11 become complete reproducible fixtures; no hardcoded judge pass tables.",
+  "cases": [
+    {
+      "id": "V01",
+      "cell": "R8-C1",
+      "kind": "valid",
+      "construction_or_mutation": "complete exact pair retire/new-pair recovery",
+      "expected_verdict": "PASS",
+      "expected_reason": "ACCEPT",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "V02",
+      "cell": "R8-C1",
+      "kind": "valid",
+      "construction_or_mutation": "renderer26 before X24 but before X25 due to post-send X logging",
+      "expected_verdict": "PASS",
+      "expected_reason": "ACCEPT",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "V03",
+      "cell": "R8-C1",
+      "kind": "valid",
+      "construction_or_mutation": "X25 precedes renderer25 post-send diagnostic; final renderer settled snapshot present",
+      "expected_verdict": "PASS",
+      "expected_reason": "ACCEPT",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "V04",
+      "cell": "R8-C2",
+      "kind": "valid",
+      "construction_or_mutation": "X28 before renderer28 logging; later renderer UNBOUND_FINAL complete",
+      "expected_verdict": "PASS",
+      "expected_reason": "ACCEPT",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "V05",
+      "cell": "R8-C3-window",
+      "kind": "valid",
+      "construction_or_mutation": "completed T>S before helper entry, waited0 and real pending ACK clear",
+      "expected_verdict": "PASS",
+      "expected_reason": "ACCEPT",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "V06",
+      "cell": "R8-C3-disconnect",
+      "kind": "valid",
+      "construction_or_mutation": "waited1 sampled, completion races before actual wait; cover before ACK",
+      "expected_verdict": "PASS",
+      "expected_reason": "ACCEPT",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "V07",
+      "cell": "R8-C5-overflow",
+      "kind": "valid",
+      "construction_or_mutation": "legacy GPU fallback exact after pre-lease direct refusal; recovery direct succeeds",
+      "expected_verdict": "PASS",
+      "expected_reason": "ACCEPT",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "V08",
+      "cell": "R8-D",
+      "kind": "valid",
+      "construction_or_mutation": "one real post-fence wakeup covers several Present serials; all8 notifications and deferred dispatch proven",
+      "expected_verdict": "PASS",
+      "expected_reason": "ACCEPT",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "V09",
+      "cell": "R8-P1",
+      "kind": "valid",
+      "construction_or_mutation": "real destructor guard with5 then35 enum14, fatal7 and no release",
+      "expected_verdict": "PASS",
+      "expected_reason": "ACCEPT",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "V10",
+      "cell": "R8-P2",
+      "kind": "valid",
+      "construction_or_mutation": "real close guard with5 then35 enum15, fatal8 and no closed",
+      "expected_verdict": "PASS",
+      "expected_reason": "ACCEPT",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N01",
+      "cell": "R8-C1",
+      "kind": "mutation",
+      "construction_or_mutation": "move X ACK before renderer resource destruction on same B",
+      "expected_verdict": "FAIL",
+      "expected_reason": "ACK_BEFORE_DESTROY",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N02",
+      "cell": "R8-C1",
+      "kind": "mutation",
+      "construction_or_mutation": "use another buffer's destruction for target ACK",
+      "expected_verdict": "INVALID",
+      "expected_reason": "RESOURCE_IDENTITY_MISSING",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N03",
+      "cell": "R8-C1",
+      "kind": "mutation",
+      "construction_or_mutation": "wrong generation/nonce on target READY or final observation",
+      "expected_verdict": "INVALID",
+      "expected_reason": "TUPLE_BINDING",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N04",
+      "cell": "R8-C1",
+      "kind": "mutation",
+      "construction_or_mutation": "drop telemetry prefix without ring repair",
+      "expected_verdict": "INVALID",
+      "expected_reason": "TRACE_GAP",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N05",
+      "cell": "R8-C1",
+      "kind": "mutation",
+      "construction_or_mutation": "same telemetry sequence with conflicting payloads",
+      "expected_verdict": "INVALID",
+      "expected_reason": "TRACE_CONFLICT",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "V11",
+      "cell": "R8-C1",
+      "kind": "valid",
+      "construction_or_mutation": "identical duplicate logcat/ring record, deduplicated by full sequence+payload",
+      "expected_verdict": "PASS",
+      "expected_reason": "ACCEPT",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N06",
+      "cell": "R8-C1",
+      "kind": "mutation",
+      "construction_or_mutation": "remove actual destructor evidence, keep only FreePixmap request",
+      "expected_verdict": "INVALID",
+      "expected_reason": "DESTRUCTOR_NOT_OBSERVED",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N07",
+      "cell": "R8-C1",
+      "kind": "mutation",
+      "construction_or_mutation": "X owner release precedes matching unregister ACK",
+      "expected_verdict": "FAIL",
+      "expected_reason": "OWNER_RELEASE_BEFORE_ACK",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N08",
+      "cell": "R8-C1",
+      "kind": "mutation",
+      "construction_or_mutation": "renderer AHB release before texture/image destruction",
+      "expected_verdict": "FAIL",
+      "expected_reason": "REVERSE_DESTRUCTION_ORDER",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N09",
+      "cell": "R8-C2",
+      "kind": "mutation",
+      "construction_or_mutation": "TERM kills X without clean CloseScreen/closed evidence",
+      "expected_verdict": "FAIL",
+      "expected_reason": "ABNORMAL_CLOSE",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N10",
+      "cell": "R8-C2",
+      "kind": "mutation",
+      "construction_or_mutation": "all slots already freed, but report claims live-at-close coverage without accepted disposition",
+      "expected_verdict": "INVALID",
+      "expected_reason": "CLOSE_CONSTRUCTION",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N11",
+      "cell": "R8-C2",
+      "kind": "mutation",
+      "construction_or_mutation": "missing final renderer unbind, accept early zero X summary",
+      "expected_verdict": "INVALID",
+      "expected_reason": "RENDERER_FINAL_MISSING",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N12",
+      "cell": "R8-C3-window",
+      "kind": "mutation",
+      "construction_or_mutation": "event36 present but no covering completion at ACK",
+      "expected_verdict": "FAIL",
+      "expected_reason": "PRESENT_EARLY_ACK",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N13",
+      "cell": "R8-C3-window",
+      "kind": "mutation",
+      "construction_or_mutation": "no actual COPY schedule; software Present stays responsive",
+      "expected_verdict": "INVALID",
+      "expected_reason": "COPY_NOT_CONSTRUCTED",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N14",
+      "cell": "R8-C3-disconnect",
+      "kind": "mutation",
+      "construction_or_mutation": "normal release after fatal generation",
+      "expected_verdict": "FAIL",
+      "expected_reason": "RELEASE_AFTER_FATAL",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N15",
+      "cell": "R8-C4",
+      "kind": "mutation",
+      "construction_or_mutation": "REGISTER-only helper executes Composite/staging while reporting serial0",
+      "expected_verdict": "FAIL",
+      "expected_reason": "REGISTER_ONLY_SUBMITTED",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N16",
+      "cell": "R8-C4",
+      "kind": "mutation",
+      "construction_or_mutation": "terminal wait invoked for zero lastSubmittedSerial",
+      "expected_verdict": "FAIL",
+      "expected_reason": "ZERO_SERIAL_WAIT",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N17",
+      "cell": "R8-C4",
+      "kind": "mutation",
+      "construction_or_mutation": "registration outcome missing but client says success",
+      "expected_verdict": "INVALID",
+      "expected_reason": "READY_MISSING",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N18",
+      "cell": "R8-C5-full",
+      "kind": "mutation",
+      "construction_or_mutation": "capacity interpreted16 pairs or pending8 overflow mistaken for READY16",
+      "expected_verdict": "INVALID",
+      "expected_reason": "CAPACITY_UNIT_OR_CONSTRUCTION",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N19",
+      "cell": "R8-C5-overflow",
+      "kind": "mutation",
+      "construction_or_mutation": "lease acquired or source unlocked before full-registry refusal",
+      "expected_verdict": "FAIL",
+      "expected_reason": "REFUSAL_AFTER_OWNERSHIP",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N20",
+      "cell": "R8-C5-overflow",
+      "kind": "mutation",
+      "construction_or_mutation": "full refusal succeeds but freed slot cannot admit target again",
+      "expected_verdict": "FAIL",
+      "expected_reason": "CAPACITY_RECOVERY",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N21",
+      "cell": "R8-D",
+      "kind": "mutation",
+      "construction_or_mutation": "all notifications received but no real deferred record in UNREGISTER wait",
+      "expected_verdict": "INVALID",
+      "expected_reason": "DEFER_NOT_CONSTRUCTED",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N22",
+      "cell": "R8-D",
+      "kind": "mutation",
+      "construction_or_mutation": "surface-loss wakeup used as post-fence notification",
+      "expected_verdict": "INVALID",
+      "expected_reason": "WAKEUP_ORIGIN",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N23",
+      "cell": "R8-D",
+      "kind": "mutation",
+      "construction_or_mutation": "callback recheck occurs while Gate waiter still owns X request",
+      "expected_verdict": "FAIL",
+      "expected_reason": "REENTRANT_RECHECK",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N24",
+      "cell": "R8-D",
+      "kind": "mutation",
+      "construction_or_mutation": "same local record dispatched twice",
+      "expected_verdict": "FAIL",
+      "expected_reason": "DUPLICATE_DISPATCH",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N25",
+      "cell": "R8-D",
+      "kind": "mutation",
+      "construction_or_mutation": "same local record dispatched across tuple rotation",
+      "expected_verdict": "FAIL",
+      "expected_reason": "STALE_DEFERRED_DISPATCH",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N26",
+      "cell": "R8-D",
+      "kind": "mutation",
+      "construction_or_mutation": "complete raw evidence shows accepted Present serial lacks required final notification",
+      "expected_verdict": "FAIL",
+      "expected_reason": "PRESENT_NOTIFICATION_LOST",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N27",
+      "cell": "R8-D",
+      "kind": "mutation",
+      "construction_or_mutation": "successful wakeup send/receive ordinals missing or reconnection mixed",
+      "expected_verdict": "INVALID",
+      "expected_reason": "CONNECTION_BINDING",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N28",
+      "cell": "R8-P1",
+      "kind": "mutation",
+      "construction_or_mutation": "only event2 before hook, no event5 GPU_OWNED",
+      "expected_verdict": "INVALID",
+      "expected_reason": "GPU_OWNED_NOT_CONSTRUCTED",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N29",
+      "cell": "R8-P1",
+      "kind": "mutation",
+      "construction_or_mutation": "hook unconditionally fatal7 without invoking actual destructor",
+      "expected_verdict": "INVALID",
+      "expected_reason": "REAL_GUARD_NOT_TESTED",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N30",
+      "cell": "R8-P1",
+      "kind": "mutation",
+      "construction_or_mutation": "destructor returns; sentinel exists even if later fatal7 occurs",
+      "expected_verdict": "FAIL",
+      "expected_reason": "GUARD_RETURNED",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N31",
+      "cell": "R8-P2",
+      "kind": "mutation",
+      "construction_or_mutation": "GENERATION_CLOSED after hook15 before X disappears",
+      "expected_verdict": "FAIL",
+      "expected_reason": "NORMAL_CLOSE_AFTER_FATAL",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N32",
+      "cell": "R8-P1",
+      "kind": "mutation",
+      "construction_or_mutation": "configured selector but no one-shot35",
+      "expected_verdict": "INVALID",
+      "expected_reason": "FAULT_NOT_FIRED",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N33",
+      "cell": "R8-C1",
+      "kind": "mutation",
+      "construction_or_mutation": "pending null converted to0 or c11 used as current pending",
+      "expected_verdict": "INVALID",
+      "expected_reason": "PENDING_NOT_OBSERVED",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N34",
+      "cell": "R8-C1",
+      "kind": "mutation",
+      "construction_or_mutation": "final live pending or registry is nonzero with complete settled evidence",
+      "expected_verdict": "FAIL",
+      "expected_reason": "RESOURCE_RESIDUE",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N35",
+      "cell": "R8-C1",
+      "kind": "mutation",
+      "construction_or_mutation": "wrong APK/signer/ELF binding",
+      "expected_verdict": "BLOCKED",
+      "expected_reason": "ARTIFACT_MISMATCH_PRESTART",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N36",
+      "cell": "R8-C1",
+      "kind": "mutation",
+      "construction_or_mutation": "preexisting evidence path or unrelated X3 before runner",
+      "expected_verdict": "BLOCKED",
+      "expected_reason": "UNSAFE_PRESTART",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N37",
+      "cell": "R8-C1",
+      "kind": "mutation",
+      "construction_or_mutation": "missing Stable after-check",
+      "expected_verdict": "INVALID",
+      "expected_reason": "STABLE_EVIDENCE_MISSING",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N38",
+      "cell": "R8-C1",
+      "kind": "mutation",
+      "construction_or_mutation": "bound Stable identity/configuration changed during run",
+      "expected_verdict": "FAIL",
+      "expected_reason": "STABLE_CHANGED",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "N39",
+      "cell": "R8-C1",
+      "kind": "mutation",
+      "construction_or_mutation": "judge supplied post-cleanup process state in place of observed lifecycle outcome",
+      "expected_verdict": "INVALID",
+      "expected_reason": "PROCESS_OBSERVATION",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "H01",
+      "cell": "HOST-DEFER",
+      "kind": "host",
+      "construction_or_mutation": "real parser queues synthetic existing-type record with tuple; after waiter drains dispatch once",
+      "expected_verdict": "PASS",
+      "expected_reason": "HOST_QUEUE_ONLY",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "H02",
+      "cell": "HOST-DEFER",
+      "kind": "host",
+      "construction_or_mutation": "cancelled record releases payload/FD once and never rechecks",
+      "expected_verdict": "PASS",
+      "expected_reason": "HOST_CANCEL_ONLY",
+      "execution_status": "NOT_RUN"
+    },
+    {
+      "id": "H03",
+      "cell": "HOST-DEFER",
+      "kind": "host",
+      "construction_or_mutation": "stale/fatal tuple record discarded and resources released exactly once",
+      "expected_verdict": "PASS",
+      "expected_reason": "HOST_STALE_ONLY",
+      "execution_status": "NOT_RUN"
+    }
+  ],
+  "counts": {
+    "total": 53,
+    "runtime": 50,
+    "host": 3
+  }
+}

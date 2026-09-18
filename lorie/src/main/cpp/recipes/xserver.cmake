@@ -297,6 +297,13 @@ add_library(Xlorie SHARED
         "lorie/egl_dispatch.c"
         "lorie/activity.cpp"
         "lorie/cmdentrypoint.cpp")
+if (LORIE_ENABLE_R8_TEST_SUPPORT)
+    target_sources(Xlorie PRIVATE
+            "lorie/lorie_r8_obs.c"
+            "lorie/lorie_r8_test.c")
+    target_compile_definitions(Xlorie PRIVATE LORIE_ENABLE_R8_TEST_SUPPORT=1)
+    target_include_directories(Xlorie PRIVATE "${CMAKE_SOURCE_DIR}/../../../../tests/r8")
+endif ()
 target_include_directories(Xlorie PRIVATE ${inc} "libxcvt/include")
 # -nostdlib++ keeps this shared object free of any libc++ dependency; renderer.cpp, activity.cpp,
 # and cmdentrypoint.cpp are restricted to a runtime-free subset of C++ (no exceptions, no RTTI, no

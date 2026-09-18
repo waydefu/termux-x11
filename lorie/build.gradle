@@ -34,6 +34,13 @@ android {
         buildConfigField "String", "APPLICATION_ID", "\"${hostApplicationId}\""
 
         consumerProguardFiles 'proguard-rules.pro'
+        // Experimental fork APK compiles R8 test support ON. CMake option
+        // default remains OFF; runtime still requires TERMUX_X11_R8_ARM=1.
+        externalNativeBuild {
+            cmake {
+                arguments "-DLORIE_ENABLE_R8_TEST_SUPPORT=ON"
+            }
+        }
     }
 
     compileOptions.sourceCompatibility JavaVersion.VERSION_1_9

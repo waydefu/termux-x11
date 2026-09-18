@@ -126,6 +126,12 @@ void LorieBuffer_gpuCopyPendingDec(LorieBuffer* _Nullable buffer);
 bool LorieBuffer_hasGpuCopyPending(LorieBuffer* _Nullable buffer);
 
 /**
+ * Read-only current GPU-copy pending count. Observation only; does not
+ * change ownership or product decisions.
+ */
+int32_t LorieBuffer_gpuCopyPendingCount(const LorieBuffer* _Nullable buffer);
+
+/**
  * Return a description of the LorieBuffer.
  *
  * @param buffer the buffer to be described
