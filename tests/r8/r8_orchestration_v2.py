@@ -157,8 +157,7 @@ def fixture_markers(text: str) -> dict:
         "hold_for_term": "HOLD_FOR_TERM" in t,
         "hangup": "X_HANGUP_AFTER_HOLD" in t or "X_ERROR_AFTER_HOLD" in t
             or "X_HANGUP_AFTER_TERMINATE" in t,
-        "terminate": "TERMINATE_SENT" in t or "TERMINATE_ACK" in t
-            or "X_HANGUP_AFTER_TERMINATE" in t,
+        "terminate": "TERMINATE_ACK" in t or "X_HANGUP_AFTER_TERMINATE" in t,
         "c5_full": "C5_FULL registered=" in t,
         "pre_term": "CHECKPOINT phase=5" in t,
         "c5_registered": None,
@@ -227,6 +226,11 @@ def permit_judge(
             return False, "HOLD_FIXTURE_STATE_UNKNOWN"
         if shutdown_requested and fixture_alive is True:
             return False, "HOLD_CLIENT_NO_HANGUP"
+        if shutdown_requested and not fixture_markers(fixture_text).get("terminate"):
+            return False, "MISSING_R8_TERMINATE"
+        if x_alive_after_construction is False:
+            if not fixture_markers(fixture_text).get("terminate"):
+                return False, "X_DIED_BEFORE_SHUTDOWN"
     if not shutdown_requested:
         return False, "JUDGE_BEFORE_CLEAN_SHUTDOWN"
     ok, reason = producer_finalized(xrows, rrows, cell)

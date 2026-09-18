@@ -88,6 +88,29 @@ class OrchestrationV2(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(reason, "X_DIED_BEFORE_SHUTDOWN")
 
+    def test_c1_sent_without_ack_x_dead_invalid(self):
+        x, r = closed_x(), closed_r()
+        ok, reason = permit_judge(
+            "R8-C1", shutdown_requested=True, xrows=x, rrows=r,
+            fixture_text="RESULT p_r8_lifecycle C1 CLIENT_OK\nTERMINATE_SENT\n",
+            fixture_alive=False, fixture_killed_by_runner=False,
+            x_alive_after_construction=False,
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "X_DIED_BEFORE_SHUTDOWN")
+
+    def test_c2_terminate_allows_x_already_dead(self):
+        x, r = closed_x(), closed_r()
+        text = ("RESULT p_r8_lifecycle C2 CLIENT_HOLD\n"
+                "TERMINATE_SENT\nTERMINATE_ACK\nX_HANGUP_AFTER_TERMINATE\n")
+        ok, reason = permit_judge(
+            "R8-C2", shutdown_requested=True, xrows=x, rrows=r,
+            fixture_text=text, fixture_alive=False,
+            fixture_killed_by_runner=False, x_alive_after_construction=False,
+        )
+        self.assertTrue(ok, reason)
+        self.assertEqual(reason, "ok")
+
     def test_c1_terminate_allows_x_already_dead(self):
         x, r = closed_x(), closed_r()
         text = ("RESULT p_r8_lifecycle C1 CLIENT_OK\n"
@@ -114,11 +137,35 @@ class OrchestrationV2(unittest.TestCase):
 
     def test_c2_hold_then_hangup_permits(self):
         x, r = closed_x(), closed_r()
-        text = "RESULT p_r8_lifecycle C2 CLIENT_HOLD\nX_HANGUP_AFTER_HOLD\n"
+        text = ("RESULT p_r8_lifecycle C2 CLIENT_HOLD\n"
+                "TERMINATE_SENT\nTERMINATE_ACK\nX_HANGUP_AFTER_TERMINATE\n")
         ok, reason = permit_judge(
             "R8-C2", shutdown_requested=True, xrows=x, rrows=r,
             fixture_text=text, fixture_alive=False,
             fixture_killed_by_runner=False, x_alive_after_construction=True,
+        )
+        self.assertTrue(ok, reason)
+
+    def test_c2_hold_without_terminate_refused(self):
+        x, r = closed_x(), closed_r()
+        ok, reason = permit_judge(
+            "R8-C2", shutdown_requested=True, xrows=x, rrows=r,
+            fixture_text="RESULT p_r8_lifecycle C2 CLIENT_HOLD\nTERMINATE_SENT\n",
+            fixture_alive=False, fixture_killed_by_runner=False,
+            x_alive_after_construction=True,
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "MISSING_R8_TERMINATE")
+
+    def test_c5_full_terminate_permits(self):
+        x, r = closed_x(), closed_r()
+        text = ("C5_FULL registered=16\nCHECKPOINT phase=5\n"
+                "RESULT p_r8_lifecycle C5-full CLIENT_HOLD\n"
+                "TERMINATE_SENT\nTERMINATE_ACK\nX_HANGUP_AFTER_TERMINATE\n")
+        ok, reason = permit_judge(
+            "R8-C5-full", shutdown_requested=True, xrows=x, rrows=r,
+            fixture_text=text, fixture_alive=False,
+            fixture_killed_by_runner=False, x_alive_after_construction=False,
         )
         self.assertTrue(ok, reason)
 

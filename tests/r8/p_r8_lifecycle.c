@@ -1,7 +1,7 @@
 /* p_r8_lifecycle.c — Gate A P2 R8 lifecycle fixture.
  * DISPLAY=:3 only. One cell per process. Links xcb, xcb-render, xcb-present.
  *
- *   cc -O2 -o p_r8_lifecycle p_r8_lifecycle.c -lxcb -lxcb-render -lxcb-present
+ *   cc -O2 -o p_r8_lifecycle p_r8_lifecycle.c r8_xcb_request.c -lxcb -lxcb-render -lxcb-present
  */
 #include "r8-test-protocol.h"
 
@@ -13,6 +13,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/uio.h>
+#include "r8_xcb_request.h"
+
 #include <xcb/present.h>
 #include <xcb/render.h>
 #include <xcb/xcb.h>
@@ -140,80 +142,33 @@ static void pair_free(xcb_connection_t *c, struct pair *p) {
     xcb_flush(c);
 }
 
-static xcb_extension_t r8_ext = { .name = LORIE_R8_TEST_NAME, .global_id = 0 };
-
-static const xcb_query_extension_reply_t *r8ext(xcb_connection_t *c) {
-    return xcb_get_extension_data(c, &r8_ext);
-}
-
-static int r8_send(xcb_connection_t *c, uint8_t minor, void *bytes, size_t nbytes,
-                   void **reply_out) {
-    const xcb_query_extension_reply_t *ext = r8ext(c);
-    struct iovec iov[2];
-    uint64_t seq;
-    xcb_generic_error_t *e = NULL;
-    uint8_t *hdr = bytes;
-    if (!ext || !ext->present) {
-        flog("FAIL LORIE-R8-TEST missing");
-        return 1;
-    }
-    hdr[0] = ext->major_opcode;
-    hdr[1] = minor;
-    iov[0].iov_base = bytes;
-    iov[0].iov_len = nbytes;
-    seq = xcb_send_request64(c, XCB_REQUEST_CHECKED, iov,
-                             &(xcb_protocol_request_t){
-                                 .count = 1, .ext = NULL, .opcode = 0, .isvoid = 0 });
-    xcb_flush(c);
-    *reply_out = xcb_wait_for_reply(c, (unsigned)seq, &e);
-    if (e || !*reply_out) {
-        flog("FAIL r8 request minor=%u", minor);
-        free(e);
-        free(*reply_out);
-        *reply_out = NULL;
-        return 1;
-    }
-    return 0;
-}
-
 static int r8_query(xcb_connection_t *c) {
-    uint8_t q[4] = { 0, X_LorieR8QueryVersion, 1, 0 };
+    uint8_t q[4] = { 0 };
     void *rep = NULL;
-    if (r8_send(c, X_LorieR8QueryVersion, q, 4, &rep))
+    char err[256];
+    if (r8_send_checked(c, X_LorieR8QueryVersion, q, sizeof(q), &rep, err, sizeof(err))) {
+        flog("%s", err[0] ? err : "FAIL QUERY_VERSION");
         return 1;
+    }
     flog("QUERY_VERSION ok");
     free(rep);
     return 0;
 }
 
 static int r8_register(xcb_connection_t *c, uint32_t xid, int *accepted) {
-    const xcb_query_extension_reply_t *ext = xcb_get_extension_data(c, &r8_ext);
     struct {
         uint8_t major, minor;
         uint16_t length;
         uint32_t xid;
     } q;
-    struct iovec iov[2];
-    uint64_t seq;
-    xcb_generic_error_t *e = NULL;
-    uint8_t *rep;
-    if (!ext || !ext->present)
-        return 1;
-    q.major = ext->major_opcode;
-    q.minor = X_LorieR8RegisterBuffer;
-    q.length = 2;
+    uint8_t *rep = NULL;
+    char err[256];
+    memset(&q, 0, sizeof(q));
     q.xid = xid;
-    iov[0].iov_base = &q;
-    iov[0].iov_len = 8;
-    seq = xcb_send_request64(c, XCB_REQUEST_CHECKED, iov,
-                             &(xcb_protocol_request_t){
-                                 .count = 1, .ext = NULL, .opcode = 0, .isvoid = 0 });
-    xcb_flush(c);
-    rep = xcb_wait_for_reply(c, (unsigned)seq, &e);
-    if (e || !rep) {
+    if (r8_send_checked(c, X_LorieR8RegisterBuffer, &q, sizeof(q), (void **)&rep,
+                        err, sizeof(err))) {
+        flog("%s", err[0] ? err : "FAIL REGISTER_BUFFER");
         flog("FAIL REGISTER_BUFFER xid=%u", xid);
-        free(e);
-        free(rep);
         return 1;
     }
     *accepted = rep[1];
@@ -223,33 +178,18 @@ static int r8_register(xcb_connection_t *c, uint32_t xid, int *accepted) {
 }
 
 static int r8_checkpoint(xcb_connection_t *c, uint32_t phase) {
-    const xcb_query_extension_reply_t *ext = xcb_get_extension_data(c, &r8_ext);
     struct {
         uint8_t major, minor;
         uint16_t length;
         uint32_t phase;
     } q;
-    struct iovec iov[2];
-    uint64_t seq;
-    xcb_generic_error_t *e = NULL;
-    void *rep;
-    if (!ext || !ext->present)
-        return 1;
-    q.major = ext->major_opcode;
-    q.minor = X_LorieR8Checkpoint;
-    q.length = 2;
+    void *rep = NULL;
+    char err[256];
+    memset(&q, 0, sizeof(q));
     q.phase = phase;
-    iov[0].iov_base = &q;
-    iov[0].iov_len = 8;
-    seq = xcb_send_request64(c, XCB_REQUEST_CHECKED, iov,
-                             &(xcb_protocol_request_t){
-                                 .count = 1, .ext = NULL, .opcode = 0, .isvoid = 0 });
-    xcb_flush(c);
-    rep = xcb_wait_for_reply(c, (unsigned)seq, &e);
-    if (e || !rep) {
+    if (r8_send_checked(c, X_LorieR8Checkpoint, &q, sizeof(q), &rep, err, sizeof(err))) {
+        flog("%s", err[0] ? err : "FAIL CHECKPOINT");
         flog("FAIL CHECKPOINT phase=%u", phase);
-        free(e);
-        free(rep);
         return 1;
     }
     flog("CHECKPOINT phase=%u", phase);
@@ -258,34 +198,22 @@ static int r8_checkpoint(xcb_connection_t *c, uint32_t phase) {
 }
 
 static int r8_terminate(xcb_connection_t *c) {
-    const xcb_query_extension_reply_t *ext = r8ext(c);
-    uint8_t q[4] = { 0, X_LorieR8Terminate, 1, 0 };
-    struct iovec iov[2];
-    uint64_t seq;
-    xcb_generic_error_t *e = NULL;
+    uint8_t q[4] = { 0 };
     void *rep = NULL;
+    char err[256];
 
-    if (!ext || !ext->present) {
-        flog("FAIL LORIE-R8-TEST missing");
+    flog("TERMINATE_SENT");
+    if (r8_send_checked(c, X_LorieR8Terminate, q, sizeof(q), &rep, err, sizeof(err))) {
+        if (xcb_connection_has_error(c)) {
+            flog("%s", err);
+            flog("X_HANGUP_AFTER_TERMINATE");
+            return 0;
+        }
+        flog("%s", err[0] ? err : "FAIL TERMINATE");
         return 1;
     }
-    q[0] = ext->major_opcode;
-    iov[0].iov_base = q;
-    iov[0].iov_len = 4;
-    flog("TERMINATE_SENT");
-    seq = xcb_send_request64(c, XCB_REQUEST_CHECKED, iov,
-                             &(xcb_protocol_request_t){
-                                 .count = 1, .ext = NULL, .opcode = 0, .isvoid = 0 });
-    xcb_flush(c);
-    rep = xcb_wait_for_reply(c, (unsigned)seq, &e);
-    if (rep) {
-        flog("TERMINATE_ACK");
-        free(rep);
-        free(e);
-    } else {
-        free(e);
-        flog("TERMINATE_NO_REPLY_WAIT_HANGUP");
-    }
+    flog("TERMINATE_ACK");
+    free(rep);
     for (;;) {
         xcb_generic_event_t *ev;
         if (xcb_connection_has_error(c)) {

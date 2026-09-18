@@ -79,6 +79,19 @@ def main() -> int:
     need("X_LorieR8Terminate" in fixture, "fixture_terminate_opcode", bad)
     need("TERMINATE_SENT" in fixture, "fixture_terminate_sent", bad)
     need("r8_terminate(c)" in fixture, "fixture_calls_terminate", bad)
+    need("r8_send_checked" in fixture, "fixture_uses_shared_sender", bad)
+    need(".ext = NULL" not in fixture, "fixture_no_null_ext", bad)
+    need("xcb_wait_for_reply(" not in fixture, "fixture_no_seq32_wait", bad)
+    need("TERMINATE_NO_REPLY_WAIT_HANGUP" not in fixture, "fixture_no_timeout_eat", bad)
+    helper = (src / "tests/r8/r8_xcb_request.c").read_text()
+    need("req.ext = &r8_ext" in helper, "helper_ext_ptr", bad)
+    need("req.opcode = minor" in helper, "helper_opcode_minor", bad)
+    need("parts + 2" in helper, "helper_reserved_iovecs", bad)
+    need("xcb_wait_for_reply64" in helper, "helper_wait64", bad)
+    need("xcb_wait_for_reply(" not in helper.replace("xcb_wait_for_reply64", "WAIT64"),
+         "helper_no_seq32_wait", bad)
+    need("error_code=" in helper, "helper_logs_error_code", bad)
+    need("minor_code=" in helper, "helper_logs_minor_code", bad)
     need("hold_until_hangup" not in fixture, "fixture_no_signal_hold", bad)
     need("PrepareComposite" not in test_c, "register_no_prepare", bad)
     need("gateADirectTryPrepare" not in test_c, "register_no_pair", bad)
@@ -298,7 +311,9 @@ def main() -> int:
 
     r = subprocess.run(
             ["gcc", "-O2", "-Wall", "-Werror", "-I", str(src / "tests/r8"),
-             "-o", "/tmp/p_r8_lifecycle", str(src / "tests/r8/p_r8_lifecycle.c"),
+             "-o", "/tmp/p_r8_lifecycle",
+             str(src / "tests/r8/p_r8_lifecycle.c"),
+             str(src / "tests/r8/r8_xcb_request.c"),
              "-lxcb", "-lxcb-render", "-lxcb-present"],
             capture_output=True, text=True,
         )
@@ -317,6 +332,14 @@ def main() -> int:
         need("kill" not in fn, "runner_terminate_no_kill", bad)
         need("GiveUp(0)" in fn, "runner_records_giveup", bad)
         need("request_clean_shutdown" not in rt, "runner_no_sigterm_shutdown", bad)
+        need("require_server_terminate_obs" in rt, "runner_requires_server_terminate", bad)
+        need("MISSING_TEST_CONTROL_TERMINATE" in rt, "runner_missing_test_control", bad)
+        need("require_server_terminate_obs\n  record_r8_terminate_shutdown" in rt,
+             "runner_obs_before_shutdown", bad)
+        need("copy_close_artifacts\n  require_terminate_markers\n  require_server_terminate_obs" in rt,
+             "runner_copy_before_server_obs", bad)
+        need('"hangup": ("X_HANGUP_AFTER_TERMINATE" in text)' in rt,
+             "runner_classb_hangup_not_sent", bad)
 
     r = subprocess.run(
         [sys.executable, "-m", "unittest", "test_r8_orchestration_v2", "-q"],
@@ -332,6 +355,19 @@ def main() -> int:
     r = subprocess.run([sys.executable, str(src / "tests/r8/test_r8_obs_terminal.py")],
                        capture_output=True, text=True)
     need(r.returncode == 0 and "PASS" in r.stdout, f"obs_terminal_py:{r.stdout}{r.stderr}", bad)
+    compile_run(
+        "xcb_request",
+        ["gcc", "-std=c11", "-O0", "-Wall", "-Werror", "-I", str(tests_r8),
+         str(tests_r8 / "test_r8_xcb_request.c"),
+         str(tests_r8 / "r8_xcb_request.c"),
+         "-Wl,--wrap=xcb_get_extension_data",
+         "-Wl,--wrap=xcb_send_request64",
+         "-Wl,--wrap=xcb_wait_for_reply64",
+         "-Wl,--wrap=xcb_flush",
+         "-Wl,--wrap=xcb_connection_has_error",
+         "-o", "/tmp/test_r8_xcb_request"],
+        "/tmp/test_r8_xcb_request",
+    )
     compile_run(
         "obs_terminal_c",
         ["gcc", "-std=c11", "-O0", "-Wall", "-Werror", "-D_GNU_SOURCE",

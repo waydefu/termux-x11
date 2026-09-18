@@ -290,9 +290,30 @@ record_r8_terminate_shutdown() {
 }
 
 require_terminate_markers() {
-  grep -E 'TERMINATE_SENT|TERMINATE_ACK|X_HANGUP_AFTER_TERMINATE' \
+  grep -E 'TERMINATE_ACK|X_HANGUP_AFTER_TERMINATE' \
     "$EVIDENCE/fixture.stdout" "$EVIDENCE/fixture.jsonl" >/dev/null 2>&1 \
     || invalid "MISSING_R8_TERMINATE"
+  grep -q 'TERMINATE_SENT' "$EVIDENCE/fixture.stdout" "$EVIDENCE/fixture.jsonl" 2>/dev/null \
+    || invalid "MISSING_R8_TERMINATE"
+}
+
+require_server_terminate_obs() {
+  python3 - "$EVIDENCE" "$SUMMARY" "$RING" <<'PY' || invalid "MISSING_TEST_CONTROL_TERMINATE"
+from pathlib import Path
+import sys
+d = Path(sys.argv[1])
+text = ""
+paths = [
+    d / "raw-logcat.txt", d / "gatea-ring.txt", d / "gatea-summary.txt",
+    d / "x-observations.jsonl", Path(sys.argv[2]), Path(sys.argv[3]),
+]
+for p in paths:
+    if p.is_file():
+        text += p.read_text(encoding="utf-8", errors="replace") + "\n"
+ok = '"phase":"TEST_CONTROL"' in text and '"op":"TERMINATE"' in text
+print("SERVER_TEST_CONTROL_TERMINATE=" + ("PASS" if ok else "FAIL"))
+raise SystemExit(0 if ok else 2)
+PY
 }
 
 copy_close_artifacts() {
@@ -386,12 +407,15 @@ for n in ("fixture.stdout","fixture.jsonl"):
         text += p.read_text(encoding="utf-8", errors="replace")+"\n"
 json.dump({
   "exit": int(sys.argv[2]),
-  "hangup": ("X_HANGUP_AFTER_TERMINATE" in text or "TERMINATE_SENT" in text),
+  "hangup": ("X_HANGUP_AFTER_TERMINATE" in text),
+  "terminate_ack": ("TERMINATE_ACK" in text),
   "killed_by_runner": False
 }, open(d/"fixture-hangup-exit.json","w"), indent=2)
 print("HANGUP_EXIT", sys.argv[2])
 PY
+  copy_close_artifacts
   require_terminate_markers
+  require_server_terminate_obs
   record_r8_terminate_shutdown
 else
   timeout 20 "$FIXTURE" --display :3 --cell "$CELL_ID" --spec "$SPEC" --client-log "$EVIDENCE/fixture.jsonl" \
@@ -407,7 +431,9 @@ PY
   if [ "$CLASS" = "A" ]; then
     grep -q 'CLIENT_OK' "$EVIDENCE/fixture.stdout" "$EVIDENCE/fixture.jsonl" 2>/dev/null || invalid "MISSING_CLIENT_OK"
     emit CLIENT_CONSTRUCTION_COMPLETE
+    copy_close_artifacts
     require_terminate_markers
+    require_server_terminate_obs
     record_r8_terminate_shutdown
   else
     emit CLIENT_CONSTRUCTION_COMPLETE
