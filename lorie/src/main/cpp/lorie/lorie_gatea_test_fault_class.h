@@ -111,4 +111,30 @@ lorieGateATestFaultClassArmPresentTarget(struct LorieGateATestFault *f,
     return 1;
 }
 
+/* Test-only Present-hold (cell 12). After the matching target is consumed,
+ * lorieGpuCopyIsDone(S) must stay false even if a later unrelated T>S
+ * stores completedSerial=T. Production unarmed/unconsumed path is a no-op.
+ * Cell 13 (renderer-exit) does not hold: the process dies instead.
+ * Does not change completedSerial publication or ObserveCompleted. */
+static inline __always_inline int
+lorieGateATestFaultClassHoldsIncomplete(const struct LorieGateATestFault *f,
+                                        uint64_t serial) {
+    uint32_t magic, version, cell, consumed;
+    uint64_t targetOrd;
+    if (f == NULL || serial == 0)
+        return 0;
+    consumed = __atomic_load_n(&f->consumed, __ATOMIC_ACQUIRE);
+    if (consumed == 0)
+        return 0;
+    magic = __atomic_load_n(&f->magic, __ATOMIC_ACQUIRE);
+    version = __atomic_load_n(&f->version, __ATOMIC_ACQUIRE);
+    cell = __atomic_load_n(&f->cell, __ATOMIC_ACQUIRE);
+    if (magic != LORIE_GATEA_TEST_MAGIC
+        || version != LORIE_GATEA_TEST_VERSION
+        || cell != (uint32_t)LORIE_GATEA_TEST_PRESENT_HOLD_COMPLETE)
+        return 0;
+    targetOrd = __atomic_load_n(&f->targetOrdinal, __ATOMIC_ACQUIRE);
+    return targetOrd != 0 && targetOrd == serial;
+}
+
 #endif /* LORIE_GATEA_TEST_FAULT_CLASS_H */

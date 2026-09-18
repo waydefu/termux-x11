@@ -1878,6 +1878,12 @@ static Bool lorieTryScheduleGpuBlit(PixmapPtr pixmap, PixmapPtr dst, RegionPtr u
 }
 
 Bool lorieGpuCopyIsDone(uint64_t serial) {
+    /* Production predicate is a high-watermark. Cell-12 consume must not
+     * let a later unrelated T>S satisfy Present serial S. Unarmed is a
+     * no-op: ObserveCompleted is unchanged and still compared with >=. */
+    if (pvfb && pvfb->state
+        && lorieGateATestFaultHoldsIncomplete(pvfb->state, serial))
+        return FALSE;
     return lorieGateAObserveCompleted(&pvfb->state->gpuCopyQueue.completedSerial) >= serial;
 }
 

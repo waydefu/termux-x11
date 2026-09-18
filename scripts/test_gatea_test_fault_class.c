@@ -102,6 +102,10 @@ int main(void) {
     /* Matching Present COPY consumes exactly once. */
     assert(lorieGateATestFaultClassConsume(&f, 12, 7ull, 1ull) == 1);
     assert(f.consumed == 1);
+    assert(lorieGateATestFaultClassHoldsIncomplete(&f, 7ull) == 1);
+    assert(!lorieGateATestFaultClassHoldsIncomplete(&f, 8ull));
+    assert(!lorieGateATestFaultClassHoldsIncomplete(&f, 6ull));
+    assert(!lorieGateATestFaultClassHoldsIncomplete(&f, 0ull));
 
     /* Repeated target callback / consume must not fire again. */
     assert(!lorieGateATestFaultClassConsume(&f, 12, 7ull, 1ull));
@@ -134,6 +138,37 @@ int main(void) {
     assert(!lorieGateATestFaultIsPresentBoundCell(10));
     assert(lorieGateATestFaultClassConsume(&f, 10, 1ull, 1ull) == 1);
     assert(!lorieGateATestFaultClassArmPresentTarget(&f, 7ull, 1ull));
+    assert(!lorieGateATestFaultClassHoldsIncomplete(&f, 1ull));
+    assert(!lorieGateATestFaultClassHoldsIncomplete(&f, 7ull));
+
+    /* Cell 13 consume does not hold Present completion (P2 exits instead). */
+    publish_cell(&f, 13);
+    assert(lorieGateATestFaultClassArmPresentTarget(&f, 7ull, 1ull) == 1);
+    assert(lorieGateATestFaultClassConsume(&f, 13, 7ull, 1ull) == 1);
+    assert(!lorieGateATestFaultClassHoldsIncomplete(&f, 7ull));
+
+    /* Production-shaped IsDone: unarmed later T>S covers S. */
+    {
+        uint64_t completed = 8ull;
+        uint64_t s = 7ull;
+        memset(&f, 0, sizeof(f));
+        assert(!lorieGateATestFaultClassHoldsIncomplete(&f, s));
+        assert(completed >= s);
+        /* Armed but not consumed: still a watermark. */
+        publish_cell(&f, 12);
+        assert(lorieGateATestFaultClassArmPresentTarget(&f, 7ull, 1ull) == 1);
+        assert(!lorieGateATestFaultClassHoldsIncomplete(&f, s));
+        assert(completed >= s);
+        /* Consumed target S: later T=8 must NOT satisfy S. T itself remains
+         * complete under the watermark (hold is serial-exact). */
+        assert(lorieGateATestFaultClassConsume(&f, 12, 7ull, 1ull) == 1);
+        assert(lorieGateATestFaultClassHoldsIncomplete(&f, s) == 1);
+        assert(!(!lorieGateATestFaultClassHoldsIncomplete(&f, s) && completed >= s));
+        assert(!lorieGateATestFaultClassHoldsIncomplete(&f, 8ull)
+               && completed >= 8ull);
+        assert(!lorieGateATestFaultClassHoldsIncomplete(&f, 6ull)
+               && completed >= 6ull);
+    }
 
     /* R7-10 wait-wake regression: peer death is x-hup/6, not timeout/4. */
     reason = 0xdeadu;

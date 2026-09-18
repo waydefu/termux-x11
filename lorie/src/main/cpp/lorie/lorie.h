@@ -1765,6 +1765,15 @@ static inline __always_inline int lorieGateATestFaultArmPresentTarget(
                                                     generation);
 }
 
+/* Test-only cell-12 hold. Unarmed/unconsumed/other-serial returns 0 so
+ * lorieGpuCopyIsDone stays completedSerial >= serial. */
+static inline __always_inline int lorieGateATestFaultHoldsIncomplete(
+        const struct lorie_shared_server_state *st, uint64_t serial) {
+    if (st == NULL)
+        return 0;
+    return lorieGateATestFaultClassHoldsIncomplete(&st->gateATestFault, serial);
+}
+
 #ifdef __cplusplus
 }
 #endif
