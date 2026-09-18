@@ -4,17 +4,23 @@
 Does not emit, rewrite, or synthesize producer END records.
 Does not invoke the frozen judge. Callers collect producer R8_OBS then ask
 whether judge is permitted.
+
+permit-judge counts collector jsonl only. wait-finalized stays raw-only.
+raw/logcat/ring are provenance and are never concatenated into semantic rows.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 import time
 from pathlib import Path
 
-OBS_PAT = re.compile(r"R8_OBS\s+(\{.*\})\s*$")
+from r8_obs_stream import (
+    collector_provenance,
+    load_semantic_obs,
+    parse_raw_obs,
+)
 
 STATES = (
     "PRESTART",
@@ -62,33 +68,7 @@ def cell_class(cell: str) -> str:
 
 
 def parse_obs_text(text: str) -> tuple[list[dict], list[dict]]:
-    xs, rs = [], []
-    for line in (text or "").splitlines():
-        m = OBS_PAT.search(line)
-        if not m:
-            continue
-        try:
-            obj = json.loads(m.group(1))
-        except json.JSONDecodeError:
-            continue
-        role = obj.get("role")
-        if role == "x":
-            xs.append(obj)
-        elif role == "r":
-            rs.append(obj)
-    return xs, rs
-
-
-def load_jsonl(path: Path) -> list[dict]:
-    if not path.is_file():
-        return []
-    rows = []
-    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        rows.append(json.loads(line))
-    return rows
+    return parse_raw_obs(text)
 
 
 def role_phases(rows: list[dict], role: str) -> list[str]:
@@ -133,20 +113,8 @@ def producer_finalized(xrows: list[dict], rrows: list[dict], cell: str) -> tuple
 
 
 def ends_are_producer_only(raw_text: str, jsonl_rows: list[dict]) -> tuple[bool, str]:
-    """Reject END rows that are not present as producer R8_OBS in raw text."""
-    raw_x, raw_r = parse_obs_text(raw_text)
-    raw_ends = [
-        (r.get("role"), r.get("producer_seq"), r.get("actual_count"))
-        for r in raw_x + raw_r if r.get("phase") == "END"
-    ]
-    json_ends = [
-        (r.get("role"), r.get("producer_seq"), r.get("actual_count"))
-        for r in jsonl_rows if r.get("phase") == "END"
-    ]
-    for item in json_ends:
-        if item not in raw_ends:
-            return False, "COLLECTOR_SYNTHETIC_END"
-    return True, "ok"
+    """Reject collector semantic rows that are not present as producer R8_OBS."""
+    return collector_provenance(raw_text, jsonl_rows)
 
 
 def fixture_markers(text: str) -> dict:
@@ -340,9 +308,9 @@ def main() -> int:
         ev / "raw-logcat.txt", ev / "gatea-ring.txt", ev / "gatea-summary.txt",
         ev / "x3-launcher.raw.log",
     ]
-    xrows, rrows, blob = scan_files(raw_paths)
-    xrows += load_jsonl(ev / "x-observations.jsonl")
-    rrows += load_jsonl(ev / "renderer-observations.jsonl")
+    # Semantic rows: collector jsonl only. Raw is provenance, never counted.
+    xrows, rrows = load_semantic_obs(ev)
+    _raw_x, _raw_r, blob = scan_files(raw_paths)
     fixture = ""
     for name in ("fixture.stdout", "fixture.jsonl", "fixture.stderr"):
         p = ev / name

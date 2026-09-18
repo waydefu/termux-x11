@@ -340,18 +340,62 @@ def main() -> int:
              "runner_copy_before_server_obs", bad)
         need('"hangup": ("X_HANGUP_AFTER_TERMINATE" in text)' in rt,
              "runner_classb_hangup_not_sent", bad)
+        need('JUDGE="$HERE/judge-r8-v2.py"' in rt, "runner_amend_judge", bad)
+        need('JUDGE="$HERE/judge-r8.py"' not in rt, "runner_not_frozen_judge", bad)
+        need("R8-C2|R8-C5-full) CLASS=B;;" in rt, "runner_classb_cells", bad)
+        wait_at = rt.find('python3 "$ORCH" wait-finalized')
+        freeze_at = rt.find("freeze_obs\nemit RAW_EVIDENCE_FROZEN")
+        permit_at = rt.find('python3 "$ORCH" permit-judge')
+        need(wait_at >= 0 and freeze_at >= 0 and permit_at >= 0, "runner_classb_order_present", bad)
+        need(wait_at < freeze_at < permit_at, "runner_wait_freeze_permit_order", bad)
+
+    FROZEN_JUDGE_SHA = (
+        "f021048da3c1b729c6f9bf560eba52609b2f980336dd4fab77ad1700438c0e31"
+    )
+    FROZEN_COLLECTOR_SHA = (
+        "e6df519a75c872c8a56fac00146585853eec7f17a3f424e70e5d4736340666c8"
+    )
+    frozen_judge = tests_r8 / "judge-r8.py"
+    amend_judge = tests_r8 / "judge-r8-v2.py"
+    need(frozen_judge.is_file(), "frozen_judge_present", bad)
+    need(amend_judge.is_file(), "amend_judge_present", bad)
+    need(sha256(frozen_judge) == FROZEN_JUDGE_SHA, "frozen_judge_sha", bad)
+    need(sha256(tests_r8 / "collect-r8.py") == FROZEN_COLLECTOR_SHA,
+         "collector_unchanged", bad)
+    need(sha256(amend_judge) != FROZEN_JUDGE_SHA, "amend_judge_new_hash", bad)
+    need("FROZEN_PARENT_SHA256" in amend_judge.read_text(),
+         "amend_records_parent_sha", bad)
+    need(FROZEN_JUDGE_SHA in amend_judge.read_text(),
+         "amend_records_parent_sha_value", bad)
+
+    orch_txt = (tests_r8 / "r8_orchestration_v2.py").read_text()
+    need("xrows += load_jsonl" not in orch_txt, "permit_no_jsonl_concat", bad)
+    need("load_semantic_obs" in orch_txt, "permit_semantic_jsonl", bad)
+    wait_fn = orch_txt.split('if args.cmd == "wait-finalized":', 1)[-1]
+    wait_fn = wait_fn.split("ev = Path(args.evidence)", 1)[-1]
+    wait_fn = wait_fn.split("ev = Path(args.evidence)", 1)[0]
+    need("scan_files(raw_paths)" in wait_fn, "wait_raw_scan", bad)
+    need("x-observations.jsonl" not in wait_fn, "wait_not_jsonl", bad)
+    need("load_semantic_obs" not in wait_fn, "wait_not_semantic", bad)
 
     r = subprocess.run(
         [sys.executable, "-m", "unittest", "test_r8_orchestration_v2", "-q"],
         cwd=str(tests_r8), capture_output=True, text=True)
     need(r.returncode == 0, f"orch_v2:{r.stdout}{r.stderr}", bad)
+    r = subprocess.run(
+        [sys.executable, "-m", "unittest", "test_r8_obs_ingestion", "-q"],
+        cwd=str(tests_r8), capture_output=True, text=True)
+    need(r.returncode == 0, f"obs_ingestion:{r.stdout}{r.stderr}", bad)
 
     r = subprocess.run([sys.executable, str(src / "tests/r8/test_r8_parser.py")],
                        capture_output=True, text=True)
     need(r.returncode == 0, f"parser:{r.stdout}{r.stderr}", bad)
     r = subprocess.run([sys.executable, str(src / "tests/r8/test-judge-r8.py")],
                        capture_output=True, text=True)
-    need(r.returncode == 0 and "failures=0" in r.stdout, "judge_vectors", bad)
+    need(r.returncode == 0 and "failures=0" in r.stdout, "judge_vectors_frozen", bad)
+    r = subprocess.run([sys.executable, str(src / "tests/r8/test-judge-r8-v2.py")],
+                       capture_output=True, text=True)
+    need(r.returncode == 0 and "failures=0" in r.stdout, "judge_vectors_v2", bad)
     r = subprocess.run([sys.executable, str(src / "tests/r8/test_r8_obs_terminal.py")],
                        capture_output=True, text=True)
     need(r.returncode == 0 and "PASS" in r.stdout, f"obs_terminal_py:{r.stdout}{r.stderr}", bad)
@@ -389,7 +433,8 @@ def main() -> int:
     print("R8_SUPPORT_HOST_STATIC_OK")
     print("judge_vectors=53 device_cells=10")
     print("spec_sha", sha256(Path(args.spec)))
-    print("judge_sha", sha256(src / "tests/r8/judge-r8.py"))
+    print("judge_sha_frozen", sha256(src / "tests/r8/judge-r8.py"))
+    print("judge_sha", sha256(src / "tests/r8/judge-r8-v2.py"))
     print("collector_sha", sha256(src / "tests/r8/collect-r8.py"))
     return 0
 
