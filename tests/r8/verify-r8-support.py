@@ -60,6 +60,26 @@ def main() -> int:
     need("LorieR8TestExtensionInit" in init, "ext_init", bad)
 
     test_c = (src / "lorie/src/main/cpp/lorie/lorie_r8_test.c").read_text()
+    term_fn = test_c.split("static int ProcLorieR8Terminate", 1)[-1].split(
+        "static int ProcLorieR8Dispatch", 1)[0]
+    need("GiveUp(0)" in term_fn, "terminate_calls_giveup", bad)
+    need('lorieR8ObsEnd' not in term_fn, "terminate_no_obs_end", bad)
+    need('\\"op\\":\\"TERMINATE\\"' in term_fn, "terminate_obs_control", bad)
+    dispatch_c = (src / "lorie/src/main/cpp/xserver/dix/dispatch.c").read_text()
+    need("char dispatchExceptionAtReset = DE_RESET;" in dispatch_c,
+         "product_reset_default", bad)
+    need("SetDispatchExceptionTimer();" in dispatch_c.split("CloseDownClient", 1)[-1],
+         "last_client_sets_reset_timer", bad)
+    utils_c = (src / "lorie/src/main/cpp/xserver/os/utils.c").read_text()
+    giveup_fn = utils_c.split("void\nGiveUp(int sig)", 1)[-1].split("#ifdef MONOTONIC_CLOCK", 1)[0]
+    need("dispatchException |= DE_TERMINATE" in giveup_fn, "giveup_sets_terminate", bad)
+    autoreset_fn = utils_c.split("void\nAutoResetServer(int sig)", 1)[-1].split("void\nGiveUp", 1)[0]
+    need("dispatchException |= DE_RESET" in autoreset_fn, "hup_sets_reset", bad)
+    fixture = (src / "tests/r8/p_r8_lifecycle.c").read_text()
+    need("X_LorieR8Terminate" in fixture, "fixture_terminate_opcode", bad)
+    need("TERMINATE_SENT" in fixture, "fixture_terminate_sent", bad)
+    need("r8_terminate(c)" in fixture, "fixture_calls_terminate", bad)
+    need("hold_until_hangup" not in fixture, "fixture_no_signal_hold", bad)
     need("PrepareComposite" not in test_c, "register_no_prepare", bad)
     need("gateADirectTryPrepare" not in test_c, "register_no_pair", bad)
     need("lorieGateAR8EnsureReadyForBuffer" in test_c, "ready_wrapper", bad)
@@ -76,6 +96,9 @@ def main() -> int:
     need("sz_xLorieR8RegisterBufferReply 72" in proto, "sz_reg_rep", bad)
     need("sz_xLorieR8CheckpointReq 8" in proto, "sz_ck_req", bad)
     need("sz_xLorieR8CheckpointReply 72" in proto, "sz_ck_rep", bad)
+    need("sz_xLorieR8TerminateReq 4" in proto, "sz_term_req", bad)
+    need("sz_xLorieR8TerminateReply 32" in proto, "sz_term_rep", bad)
+    need("X_LorieR8Terminate 3" in proto, "op_terminate", bad)
     need('#include <X11/Xmd.h>' in proto, "proto_xmd_include", bad)
     need("__X11_XMD_H" not in proto, "proto_no_xmd_heuristic", bad)
     need("defined(CARD8)" not in proto, "proto_no_card8_heuristic", bad)
@@ -119,6 +142,12 @@ def main() -> int:
     need("ddxGiveUp(EXIT_NO_ERROR)" in dix_main, "dix_giveup_present", bad)
     need(dix_main.find("(*screenInfo.screens[i]->CloseScreen)")
          < dix_main.find("ddxGiveUp(EXIT_NO_ERROR)"), "dix_giveup_after_close", bad)
+    need("if (dispatchException & DE_TERMINATE) {\n            ddxGiveUp(EXIT_NO_ERROR);"
+         in dix_main, "dix_giveup_only_terminate", bad)
+    need("dispatchException &= ~DE_RESET" in dispatch_c, "dispatch_clears_reset_only", bad)
+    need("dispatchExceptionAtReset" not in test_c, "test_no_atreset_mutate", bad)
+    need("-terminate" in utils_c, "product_terminate_flag_exists", bad)
+    need("-terminate" not in fixture, "fixture_no_product_terminate_flag", bad)
 
     rend = (src / "lorie/src/main/cpp/lorie/renderer.cpp").read_text()
     close_ctl = rend.split("LORIE_GATEA_MSG_GENERATION_CLOSE", 1)[-1].split(
@@ -277,6 +306,22 @@ def main() -> int:
     if r.returncode == 0:
         r2 = subprocess.run(["/tmp/p_r8_lifecycle", "--help"], capture_output=True, text=True)
         need(r2.returncode == 0 and "R8-C1" in r2.stdout, "fixture_help", bad)
+
+    runner_v2 = tests_r8 / "run-r8-one-cell-v2.sh"
+    need(runner_v2.is_file(), "runner_v2_present", bad)
+    if runner_v2.is_file():
+        rt = runner_v2.read_text()
+        fn = rt.split("record_r8_terminate_shutdown()", 1)[-1].split(
+            "copy_close_artifacts", 1)[0]
+        need("LORIE_R8_TERMINATE" in fn, "runner_terminate_source", bad)
+        need("kill" not in fn, "runner_terminate_no_kill", bad)
+        need("GiveUp(0)" in fn, "runner_records_giveup", bad)
+        need("request_clean_shutdown" not in rt, "runner_no_sigterm_shutdown", bad)
+
+    r = subprocess.run(
+        [sys.executable, "-m", "unittest", "test_r8_orchestration_v2", "-q"],
+        cwd=str(tests_r8), capture_output=True, text=True)
+    need(r.returncode == 0, f"orch_v2:{r.stdout}{r.stderr}", bad)
 
     r = subprocess.run([sys.executable, str(src / "tests/r8/test_r8_parser.py")],
                        capture_output=True, text=True)

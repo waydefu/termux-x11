@@ -61,6 +61,7 @@ int main(void) {
 
     /* X: normal records then END; later obs is POST_END diagnostic. */
     lorieR8ObsBegin("x");
+    lorieR8Obs("x", "TEST_CONTROL", "\"op\":\"TERMINATE\"");
     lorieR8Obs("x", "X_CLOSE_ENTER", "\"path\":\"lorieCloseScreen\"");
     lorieR8Obs("x", "X_CLOSE_RESULT", "\"generation_close\":\"invoked\"");
     lorieR8Obs("x", "X_DESTRUCTOR_ENTER", "\"bufferId\":1");

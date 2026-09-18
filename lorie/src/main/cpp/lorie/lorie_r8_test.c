@@ -324,6 +324,25 @@ static int ProcLorieR8Checkpoint(ClientPtr client) {
     return Success;
 }
 
+static int ProcLorieR8Terminate(ClientPtr client) {
+    xLorieR8TerminateReply rep;
+
+    REQUEST_SIZE_MATCH(xLorieR8TerminateReq);
+    memset(&rep, 0, sizeof(rep));
+    rep.type = X_Reply;
+    rep.sequenceNumber = client->sequence;
+    rep.length = 0;
+    lorieR8Obs("x", "TEST_CONTROL", "\"op\":\"TERMINATE\"");
+    if (client->swapped) {
+        swaps(&rep.sequenceNumber);
+        swapl(&rep.length);
+    }
+    WriteToClient(client, sizeof(rep), &rep);
+    /* Same DE_TERMINATE flag as os/utils.c GiveUp. ddxGiveUp still emits END. */
+    GiveUp(0);
+    return Success;
+}
+
 static int ProcLorieR8Dispatch(ClientPtr client) {
     REQUEST(xReq);
     if (!r8ExtReady || !lorieR8Armed())
@@ -335,6 +354,8 @@ static int ProcLorieR8Dispatch(ClientPtr client) {
         return ProcLorieR8RegisterBuffer(client);
     case X_LorieR8Checkpoint:
         return ProcLorieR8Checkpoint(client);
+    case X_LorieR8Terminate:
+        return ProcLorieR8Terminate(client);
     default:
         return BadRequest;
     }
@@ -356,6 +377,8 @@ static int SProcLorieR8Dispatch(ClientPtr client) {
         swapl(&stuff->phase);
         break;
     }
+    case X_LorieR8Terminate:
+        break;
     default:
         return BadRequest;
     }

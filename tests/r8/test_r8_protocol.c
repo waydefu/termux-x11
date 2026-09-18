@@ -20,15 +20,21 @@ int main(void) {
     assert(sz_xLorieR8RegisterBufferReply == 72);
     assert(sz_xLorieR8CheckpointReq == 8);
     assert(sz_xLorieR8CheckpointReply == 72);
+    assert(sz_xLorieR8TerminateReq == 4);
+    assert(sz_xLorieR8TerminateReply == 32);
     assert(sizeof(xLorieR8QueryVersionReq) == sz_xLorieR8QueryVersionReq);
     assert(sizeof(xLorieR8QueryVersionReply) == sz_xLorieR8QueryVersionReply);
     assert(sizeof(xLorieR8RegisterBufferReq) == sz_xLorieR8RegisterBufferReq);
     assert(sizeof(xLorieR8RegisterBufferReply) == sz_xLorieR8RegisterBufferReply);
     assert(sizeof(xLorieR8CheckpointReq) == sz_xLorieR8CheckpointReq);
     assert(sizeof(xLorieR8CheckpointReply) == sz_xLorieR8CheckpointReply);
+    assert(sizeof(xLorieR8TerminateReq) == sz_xLorieR8TerminateReq);
+    assert(sizeof(xLorieR8TerminateReply) == sz_xLorieR8TerminateReply);
     assert(X_LorieR8QueryVersion == 0);
     assert(X_LorieR8RegisterBuffer == 1);
     assert(X_LorieR8Checkpoint == 2);
+    assert(X_LorieR8Terminate == 3);
+    assert(X_LorieR8LastRequest == X_LorieR8Terminate);
     assert(lorieR8CaseCode("R8-C1") == LORIE_R8_CASE_C1);
     assert(lorieR8CaseCode("R8-C3-window") == LORIE_R8_CASE_C3_WINDOW);
     assert(lorieR8CaseCode("nope") == 0);
@@ -40,12 +46,13 @@ int main(void) {
     assert((sizeof(xLorieR8QueryVersionReply) - 32) / 4 == 0);
     assert((sizeof(xLorieR8RegisterBufferReply) - 32) / 4 == 10);
     assert((sizeof(xLorieR8CheckpointReply) - 32) / 4 == 10);
+    assert((sizeof(xLorieR8TerminateReply) - 32) / 4 == 0);
 
     memset(&qv, 0, sizeof(qv));
     qv.sequenceNumber = 0x1122;
     qv.length = 0;
     qv.majorVersion = 1;
-    qv.minorVersion = 0;
+    qv.minorVersion = 1;
     qv.caseCode = 0x01020304u;
     qv.occupancy = 0xaabbccddu;
     qv.sequenceNumber = (CARD16)((qv.sequenceNumber >> 8) | (qv.sequenceNumber << 8));
@@ -55,7 +62,7 @@ int main(void) {
     qv.occupancy = bswap32(qv.occupancy);
     assert(qv.sequenceNumber == 0x2211);
     assert(qv.majorVersion == 0x0100);
-    assert(qv.minorVersion == 0);
+    assert(qv.minorVersion == 0x0100);
     assert(qv.caseCode == 0x04030201u);
     assert(qv.occupancy == 0xddccbbaau);
     assert(qv.pad0 == 0 && qv.pad1 == 0 && qv.pad2 == 0);

@@ -257,19 +257,47 @@ static int r8_checkpoint(xcb_connection_t *c, uint32_t phase) {
     return 0;
 }
 
-static int hold_until_hangup(xcb_connection_t *c) {
-    flog("HOLD_FOR_TERM");
+static int r8_terminate(xcb_connection_t *c) {
+    const xcb_query_extension_reply_t *ext = r8ext(c);
+    uint8_t q[4] = { 0, X_LorieR8Terminate, 1, 0 };
+    struct iovec iov[2];
+    uint64_t seq;
+    xcb_generic_error_t *e = NULL;
+    void *rep = NULL;
+
+    if (!ext || !ext->present) {
+        flog("FAIL LORIE-R8-TEST missing");
+        return 1;
+    }
+    q[0] = ext->major_opcode;
+    iov[0].iov_base = q;
+    iov[0].iov_len = 4;
+    flog("TERMINATE_SENT");
+    seq = xcb_send_request64(c, XCB_REQUEST_CHECKED, iov,
+                             &(xcb_protocol_request_t){
+                                 .count = 1, .ext = NULL, .opcode = 0, .isvoid = 0 });
+    xcb_flush(c);
+    rep = xcb_wait_for_reply(c, (unsigned)seq, &e);
+    if (rep) {
+        flog("TERMINATE_ACK");
+        free(rep);
+        free(e);
+    } else {
+        free(e);
+        flog("TERMINATE_NO_REPLY_WAIT_HANGUP");
+    }
     for (;;) {
-        xcb_generic_event_t *ev = xcb_wait_for_event(c);
+        xcb_generic_event_t *ev;
+        if (xcb_connection_has_error(c)) {
+            flog("X_HANGUP_AFTER_TERMINATE");
+            return 0;
+        }
+        ev = xcb_wait_for_event(c);
         if (!ev) {
-            flog("X_HANGUP_AFTER_HOLD");
+            flog("X_HANGUP_AFTER_TERMINATE");
             return 0;
         }
         free(ev);
-        if (xcb_connection_has_error(c)) {
-            flog("X_ERROR_AFTER_HOLD");
-            return 0;
-        }
     }
 }
 
@@ -295,7 +323,7 @@ static int cell_c2(xcb_connection_t *c, xcb_screen_t *s,
     if (pair_composite(c, &a, PAIR_W, PAIR_H))
         return 1;
     flog("RESULT p_r8_lifecycle C2 CLIENT_HOLD");
-    return hold_until_hangup(c);
+    return 0;
 }
 
 static int present_copy(xcb_connection_t *c, xcb_screen_t *s, uint32_t serial,
@@ -403,7 +431,7 @@ static int cell_c5_full(xcb_connection_t *c, xcb_screen_t *s,
     if (r8_checkpoint(c, LORIE_R8_PHASE_PRE_TERM))
         return 1;
     flog("RESULT p_r8_lifecycle C5-full CLIENT_HOLD");
-    return hold_until_hangup(c);
+    return 0;
 }
 
 static int cell_c5_overflow(xcb_connection_t *c, xcb_screen_t *s,
@@ -579,6 +607,8 @@ int main(int argc, char **argv) {
         rc = cell_p(c, s, fmt32, fmt24);
     else
         die("unknown cell");
+    if (!rc && strcmp(cell, "R8-P1") && strcmp(cell, "R8-P2"))
+        rc = r8_terminate(c);
     xcb_disconnect(c);
     if (client_log)
         fclose(client_log);

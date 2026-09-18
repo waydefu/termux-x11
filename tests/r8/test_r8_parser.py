@@ -29,6 +29,9 @@ def main() -> int:
     need("X_LorieR8QueryVersion 0" in text, "op0", bad)
     need("X_LorieR8RegisterBuffer 1" in text, "op1", bad)
     need("X_LorieR8Checkpoint 2" in text, "op2", bad)
+    need("X_LorieR8Terminate 3" in text, "op3", bad)
+    need("sz_xLorieR8TerminateReq 4" in text, "term_req", bad)
+    need("sz_xLorieR8TerminateReply 32" in text, "term_rep", bad)
     # Native vs swapped CARD32 xid
     native = struct.pack("<I", 0x12345678)
     swapped = struct.pack(">I", 0x12345678)

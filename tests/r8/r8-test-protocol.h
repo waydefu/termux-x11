@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: MIT
  * LORIE-R8-TEST protocol v1. Test-only. Not Gate A wire/shared ABI.
- * Frozen request/reply layouts, opcodes, and byte lengths.
+ * Frozen request/reply layouts, opcodes, and byte lengths for QueryVersion,
+ * RegisterBuffer, and Checkpoint. Terminate (opcode 3) is additive; those
+ * three layouts stay unchanged.
  */
 #ifndef LORIE_R8_TEST_PROTOCOL_H
 #define LORIE_R8_TEST_PROTOCOL_H
@@ -11,12 +13,13 @@
 
 #define LORIE_R8_TEST_NAME "LORIE-R8-TEST"
 #define LORIE_R8_TEST_MAJOR_VERSION 1
-#define LORIE_R8_TEST_MINOR_VERSION 0
+#define LORIE_R8_TEST_MINOR_VERSION 1
 
 #define X_LorieR8QueryVersion 0
 #define X_LorieR8RegisterBuffer 1
 #define X_LorieR8Checkpoint 2
-#define X_LorieR8LastRequest X_LorieR8Checkpoint
+#define X_LorieR8Terminate 3
+#define X_LorieR8LastRequest X_LorieR8Terminate
 
 #define LORIE_R8_PHASE_INVALID 0
 #define LORIE_R8_PHASE_BEGIN 1
@@ -132,12 +135,33 @@ typedef struct {
     CARD32 generationHi;
 } xLorieR8CheckpointReply;
 
+typedef struct {
+    CARD8 reqType;
+    CARD8 r8ReqType;
+    CARD16 length; /* 1 */
+} xLorieR8TerminateReq;
+
+typedef struct {
+    BYTE type;
+    CARD8 unused;
+    CARD16 sequenceNumber;
+    CARD32 length; /* 0 */
+    CARD32 pad0;
+    CARD32 pad1;
+    CARD32 pad2;
+    CARD32 padA;
+    CARD32 padB;
+    CARD32 padC;
+} xLorieR8TerminateReply;
+
 #define sz_xLorieR8QueryVersionReq 4
 #define sz_xLorieR8QueryVersionReply 32
 #define sz_xLorieR8RegisterBufferReq 8
 #define sz_xLorieR8RegisterBufferReply 72
 #define sz_xLorieR8CheckpointReq 8
 #define sz_xLorieR8CheckpointReply 72
+#define sz_xLorieR8TerminateReq 4
+#define sz_xLorieR8TerminateReply 32
 
 #if defined(__cplusplus)
 #define LORIE_R8_SA(cond, msg) static_assert(cond, msg)
@@ -163,9 +187,14 @@ LORIE_R8_SA(offsetof(xLorieR8QueryVersionReply, length) == 4, "qv len");
 LORIE_R8_SA(offsetof(xLorieR8QueryVersionReply, majorVersion) == 8, "qv major");
 LORIE_R8_SA(offsetof(xLorieR8CheckpointReply, generationLo) == 64, "ck genLo");
 LORIE_R8_SA(offsetof(xLorieR8CheckpointReply, generationHi) == 68, "ck genHi");
+LORIE_R8_SA(sizeof(xLorieR8TerminateReq) == sz_xLorieR8TerminateReq,
+            "term req");
+LORIE_R8_SA(sizeof(xLorieR8TerminateReply) == sz_xLorieR8TerminateReply,
+            "term rep");
 LORIE_R8_SA((sz_xLorieR8QueryVersionReply - 32) / 4 == 0, "qv extra");
 LORIE_R8_SA((sz_xLorieR8RegisterBufferReply - 32) / 4 == 10, "reg extra");
 LORIE_R8_SA((sz_xLorieR8CheckpointReply - 32) / 4 == 10, "ck extra");
+LORIE_R8_SA((sz_xLorieR8TerminateReply - 32) / 4 == 0, "term extra");
 #undef LORIE_R8_SA
 
 static inline uint32_t lorieR8CaseCode(const char *name) {

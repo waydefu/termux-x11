@@ -75,6 +75,23 @@ def main() -> int:
     ]
     need(classify(legal_x_giveup) == "OK", "legal_x_reset_then_giveup", bad)
 
+    reset_no_end = [
+        rec("BEGIN", 0),
+        rec("X_CLOSE_ENTER", 1),
+        rec("X_CLOSE_RESULT", 2),
+        rec("RECHECK", 3),
+    ]
+    need(classify(reset_no_end) == "END_COUNT", "reset_path_no_end", bad)
+
+    legal_x_terminate = [
+        rec("BEGIN", 0),
+        rec("TEST_CONTROL", 1, op="TERMINATE"),
+        rec("X_CLOSE_ENTER", 2),
+        rec("X_CLOSE_RESULT", 3),
+        end_row(3, 3),
+    ]
+    need(classify(legal_x_terminate) == "OK", "legal_x_terminate_then_giveup", bad)
+
     end_then_dtor = [
         rec("BEGIN", 0),
         rec("X_CLOSE_ENTER", 1),
@@ -129,7 +146,7 @@ def main() -> int:
         print("FAIL", bad)
         return 1
     print("PASS test_r8_obs_terminal.py")
-    print(json.dumps({"vectors": 8, "failures": 0}))
+    print(json.dumps({"vectors": 10, "failures": 0}))
     return 0
 
 
