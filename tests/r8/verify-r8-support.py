@@ -101,15 +101,24 @@ def main() -> int:
     need('lorieR8Obs("x", "X_CLOSE_ENTER"' in close_fn, "x_close_enter", bad)
     need('lorieR8Obs("x", "X_CLOSE_RESULT"' in close_fn, "x_close_result", bad)
     need("pScreen->DestroyPixmap(pScreen->devPrivate)" in close_fn, "x_destroy_root", bad)
-    need('lorieR8ObsEnd("x")' in close_fn, "x_obs_end", bad)
-    need(close_fn.find("pScreen->DestroyPixmap(pScreen->devPrivate)")
-         < close_fn.find('lorieR8ObsEnd("x")'), "x_end_after_destroy", bad)
     need(close_fn.find('X_CLOSE_RESULT') < close_fn.find("pScreen->DestroyPixmap"),
-         "x_end_not_before_destroy", bad)
-    need(close_fn.find("pScreen->CloseScreen = pvfb->CloseScreen")
-         < close_fn.find('lorieR8ObsEnd("x")'), "x_end_after_restore_close", bad)
-    need(close_fn.find("ret = pScreen->CloseScreen(pScreen)")
-         < close_fn.find('lorieR8ObsEnd("x")'), "x_end_after_saved_close", bad)
+         "x_close_result_before_destroy", bad)
+    need("pScreen->CloseScreen = pvfb->CloseScreen" in close_fn, "x_restore_saved_close", bad)
+    need("ret = pScreen->CloseScreen(pScreen)" in close_fn, "x_saved_close_called", bad)
+    need('lorieR8ObsEnd("x")' not in close_fn, "x_end_not_in_close", bad)
+
+    giveup_fn = init.split("void ddxGiveUp", 1)[-1].split("static void* ddxReadyThread", 1)[0]
+    end_at = giveup_fn.find('lorieR8ObsEnd("x")')
+    unlock_at = giveup_fn.find("UnlockServer")
+    exit_at = giveup_fn.find("exit(error)")
+    need(end_at >= 0, "x_obs_end_at_giveup", bad)
+    need(unlock_at >= 0 and end_at > unlock_at, "x_end_after_unlock", bad)
+    need(exit_at >= 0 and end_at < exit_at, "x_end_before_exit", bad)
+
+    dix_main = (src / "lorie/src/main/cpp/xserver/dix/main.c").read_text()
+    need("ddxGiveUp(EXIT_NO_ERROR)" in dix_main, "dix_giveup_present", bad)
+    need(dix_main.find("(*screenInfo.screens[i]->CloseScreen)")
+         < dix_main.find("ddxGiveUp(EXIT_NO_ERROR)"), "dix_giveup_after_close", bad)
 
     rend = (src / "lorie/src/main/cpp/lorie/renderer.cpp").read_text()
     close_ctl = rend.split("LORIE_GATEA_MSG_GENERATION_CLOSE", 1)[-1].split(

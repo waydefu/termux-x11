@@ -640,6 +640,13 @@ void ddxGiveUp(unused enum ExitCode error) {
     log(ERROR, "Server stopped (%d)", error);
     CloseWellKnownConnections();
     UnlockServer();
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+    /* Official last DDX hook: dix/main.c calls this after CloseScreen,
+     * FreeFonts, and ClearWorkQueue, and only on DE_TERMINATE. Reset
+     * CloseScreen is not producer quiescence — dix_main then loops into
+     * InitOutput / CreateRootCursor, which still emit role=x R8_OBS. */
+    lorieR8ObsEnd("x");
+#endif
     exit(error);
 }
 
@@ -1248,13 +1255,11 @@ static Bool lorieCloseScreen(ScreenPtr pScreen) {
     pScreen->devPrivate = NULL;
     /* pvfb->CloseScreen is the wrap saved after present_screen_init, before
      * this Lorie hook. It is never lorieCloseScreen. present_scmd_flip_destroy
-     * can still dixDestroyPixmap while EXA DestroyPixmap is lorieExaDestroyPixmap,
-     * so observation END is after that saved chain returns, not before it. */
+     * can still dixDestroyPixmap while EXA DestroyPixmap is lorieExaDestroyPixmap.
+     * Observation END is not here: last-client disconnect is DE_RESET, and
+     * dix_main re-enters InitOutput after this returns. */
     pScreen->CloseScreen = pvfb->CloseScreen;
     ret = pScreen->CloseScreen(pScreen);
-#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
-    lorieR8ObsEnd("x");
-#endif
     return ret;
 }
 

@@ -57,6 +57,24 @@ def main() -> int:
     ]
     need(classify(legal_x) == "OK", "legal_x_close_dtor_end", bad)
 
+    # CloseScreen is not X producer quiescence: reset re-enters ScreenInit
+    # (CreateRootCursor / GPU_COPY_DONE) before ddxGiveUp.
+    legal_x_giveup = [
+        rec("BEGIN", 0),
+        rec("X_CLOSE_ENTER", 1),
+        rec("X_CLOSE_RESULT", 2),
+        rec("X_DESTRUCTOR_ENTER", 3),
+        rec("X_DESTRUCTOR_EXIT", 4),
+        rec("X_DESTRUCTOR_ENTER", 5),
+        rec("X_DESTRUCTOR_EXIT", 6),
+        rec("DEFER_ENQUEUE", 7),
+        rec("X_WAKE_RECEIVED", 8),
+        rec("DEFER_DISPATCH", 9),
+        rec("RECHECK", 10),
+        end_row(10, 10),
+    ]
+    need(classify(legal_x_giveup) == "OK", "legal_x_reset_then_giveup", bad)
+
     end_then_dtor = [
         rec("BEGIN", 0),
         rec("X_CLOSE_ENTER", 1),
@@ -111,7 +129,7 @@ def main() -> int:
         print("FAIL", bad)
         return 1
     print("PASS test_r8_obs_terminal.py")
-    print(json.dumps({"vectors": 7, "failures": 0}))
+    print(json.dumps({"vectors": 8, "failures": 0}))
     return 0
 
 
