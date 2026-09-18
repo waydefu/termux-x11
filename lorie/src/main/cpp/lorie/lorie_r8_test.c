@@ -21,6 +21,7 @@
 #include "windowstr.h"
 #include "resource.h"
 #include "os.h"
+#include "lorie_r8_test_x.h"
 #include <string.h>
 #include <stdio.h>
 

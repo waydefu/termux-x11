@@ -71,8 +71,121 @@ def main() -> int:
 
     proto = (src / "tests/r8/r8-test-protocol.h").read_text()
     need("sz_xLorieR8QueryVersionReq 4" in proto, "sz_qv_req", bad)
+    need("sz_xLorieR8QueryVersionReply 32" in proto, "sz_qv_rep", bad)
     need("sz_xLorieR8RegisterBufferReq 8" in proto, "sz_reg_req", bad)
     need("sz_xLorieR8RegisterBufferReply 72" in proto, "sz_reg_rep", bad)
+    need("sz_xLorieR8CheckpointReq 8" in proto, "sz_ck_req", bad)
+    need("sz_xLorieR8CheckpointReply 72" in proto, "sz_ck_rep", bad)
+    need('#include <X11/Xmd.h>' in proto, "proto_xmd_include", bad)
+    need("__X11_XMD_H" not in proto, "proto_no_xmd_heuristic", bad)
+    need("defined(CARD8)" not in proto, "proto_no_card8_heuristic", bad)
+    need("pad3" not in proto, "proto_no_pad3", bad)
+
+    shared_h = (src / "lorie/src/main/cpp/lorie/lorie_r8_test.h").read_text()
+    need("PixmapPtr" not in shared_h, "shared_no_PixmapPtr", bad)
+    need("pixmap.h" not in shared_h and "pixmapstr.h" not in shared_h, "shared_no_pixmap_hdr", bad)
+    x_h = (src / "lorie/src/main/cpp/lorie/lorie_r8_test_x.h").read_text()
+    need("struct _Pixmap" in x_h, "xhdr_opaque_pixmap", bad)
+    need("PixmapPtr" not in x_h, "xhdr_no_PixmapPtr", bad)
+    need("lorieGateAR8EnsureGpuSampleableAhb" in x_h, "xhdr_sampleable", bad)
+    need("lorieGateAR8PixmapReject" in x_h, "xhdr_reject", bad)
+    cmd = (src / "lorie/src/main/cpp/lorie/cmdentrypoint.cpp").read_text()
+    need('#include "lorie_r8_test.h"' in cmd, "cmd_shared_include", bad)
+    need("lorie_r8_test_x.h" not in cmd, "cmd_no_x_header", bad)
+    need('#include "lorie_r8_test_x.h"' in init, "init_x_header", bad)
+    need('#include "lorie_r8_test_x.h"' in test_c, "testc_x_header", bad)
+    need("void lorieExaDestroyPixmap(ScreenPtr pScreen, void *driverPriv);" in init,
+         "d382c0a_prototype", bad)
+
+    lorie_inc = src / "lorie/src/main/cpp/lorie"
+    tests_r8 = src / "tests/r8"
+    host_cflags = [
+        "-DLORIE_ENABLE_R8_TEST_SUPPORT=1",
+        "-I", str(lorie_inc),
+        "-I", str(tests_r8),
+    ]
+
+    def compile_run(label: str, cmd_args: list[str], run_bin: str | None = None) -> None:
+        r = subprocess.run(cmd_args, capture_output=True, text=True)
+        need(r.returncode == 0, f"{label}:{r.stderr[-400:]}", bad)
+        if r.returncode == 0 and run_bin:
+            r2 = subprocess.run([run_bin], capture_output=True, text=True)
+            need(r2.returncode == 0, f"{label}_run:{r2.returncode} {r2.stderr[-200:]}", bad)
+
+    compile_run(
+        "shared_c",
+        ["gcc", "-std=c11", "-c", *host_cflags, str(tests_r8 / "test_r8_header_shared.c"),
+         "-o", "/tmp/test_r8_header_shared.o"],
+    )
+    compile_run(
+        "shared_cxx",
+        ["g++", "-std=c++17", "-c", *host_cflags, str(tests_r8 / "test_r8_header_shared.cpp"),
+         "-o", "/tmp/test_r8_header_shared.o"],
+    )
+    compile_run(
+        "x_only_c",
+        ["gcc", "-std=c11", "-c", *host_cflags, str(tests_r8 / "test_r8_header_x.c"),
+         "-o", "/tmp/test_r8_header_x.o"],
+    )
+    compile_run(
+        "x_after_typedef",
+        ["gcc", "-std=c11", "-c", *host_cflags, str(tests_r8 / "test_r8_header_x_after_typedef.c"),
+         "-o", "/tmp/test_r8_header_x_after_typedef.o"],
+    )
+    compile_run(
+        "proto_alone_c",
+        ["gcc", "-std=c11", "-c", "-I", str(tests_r8), str(tests_r8 / "test_r8_header_proto.c"),
+         "-o", "/tmp/test_r8_header_proto_c.o"],
+    )
+    compile_run(
+        "proto_c",
+        ["gcc", "-std=c11", "-c", "-I", str(tests_r8), str(tests_r8 / "test_r8_protocol.c"),
+         "-o", "/tmp/test_r8_protocol.o"],
+    )
+    compile_run(
+        "proto_c_exe",
+        ["gcc", "-std=c11", "-O0", "-I", str(tests_r8), str(tests_r8 / "test_r8_protocol.c"),
+         "-o", "/tmp/test_r8_protocol"],
+        "/tmp/test_r8_protocol",
+    )
+    compile_run(
+        "proto_cxx",
+        ["g++", "-std=c++17", "-c", "-I", str(tests_r8), str(tests_r8 / "test_r8_header_proto.cpp"),
+         "-o", "/tmp/test_r8_header_proto.o"],
+    )
+    compile_run(
+        "order_xmd_proto",
+        ["gcc", "-std=c11", "-c", "-I", str(tests_r8),
+         str(tests_r8 / "test_r8_header_order_xmd_proto.c"),
+         "-o", "/tmp/test_r8_header_order_xmd_proto.o"],
+    )
+    compile_run(
+        "order_x_proto",
+        ["gcc", "-std=c11", "-c", "-I", str(tests_r8),
+         str(tests_r8 / "test_r8_header_order_x_proto.c"),
+         "-o", "/tmp/test_r8_header_order_x_proto.o"],
+    )
+    compile_run(
+        "order_xproto_proto",
+        ["gcc", "-std=c11", "-c", "-I", str(tests_r8),
+         str(tests_r8 / "test_r8_header_order_xproto_proto.c"),
+         "-o", "/tmp/test_r8_header_order_xproto_proto.o"],
+    )
+    compile_run(
+        "order_proto_xproto",
+        ["gcc", "-std=c11", "-c", "-I", str(tests_r8),
+         str(tests_r8 / "test_r8_header_order_proto_xproto.c"),
+         "-o", "/tmp/test_r8_header_order_proto_xproto.o"],
+    )
+
+    pre = subprocess.run(
+        ["gcc", "-std=c11", "-E", *host_cflags, str(tests_r8 / "test_r8_header_shared.c")],
+        capture_output=True, text=True,
+    )
+    need(pre.returncode == 0, f"shared_preproc:{pre.stderr[-200:]}", bad)
+    if pre.returncode == 0:
+        need("pixmap.h" not in pre.stdout and "pixmapstr.h" not in pre.stdout,
+             "shared_preproc_no_pixmap", bad)
 
     # R7 regressions
     scripts = src / "scripts"
@@ -136,6 +249,7 @@ def main() -> int:
             print(" ", b)
         return 1
     print("R8_SUPPORT_HOST_STATIC_OK")
+    print("judge_vectors=53 device_cells=10")
     print("spec_sha", sha256(Path(args.spec)))
     print("judge_sha", sha256(src / "tests/r8/judge-r8.py"))
     print("collector_sha", sha256(src / "tests/r8/collect-r8.py"))

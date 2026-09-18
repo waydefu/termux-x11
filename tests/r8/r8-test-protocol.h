@@ -7,6 +7,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <X11/Xmd.h>
 
 #define LORIE_R8_TEST_NAME "LORIE-R8-TEST"
 #define LORIE_R8_TEST_MAJOR_VERSION 1
@@ -51,7 +52,6 @@
 #define LORIE_R8_CASE_P1 9
 #define LORIE_R8_CASE_P2 10
 
-#if defined(__X11_XMD_H) || defined(CARD8)
 typedef struct {
     CARD8 reqType;
     CARD8 r8ReqType;
@@ -70,7 +70,6 @@ typedef struct {
     CARD32 pad0;
     CARD32 pad1;
     CARD32 pad2;
-    CARD32 pad3;
 } xLorieR8QueryVersionReply;
 
 typedef struct {
@@ -114,7 +113,7 @@ typedef struct {
     BYTE type;
     CARD8 unused;
     CARD16 sequenceNumber;
-    CARD32 length; /* 8 extra dwords */
+    CARD32 length; /* 10 extra dwords */
     CARD32 phase;
     CARD32 occupancy;
     CARD32 registryCount;
@@ -132,14 +131,42 @@ typedef struct {
     CARD32 generationLo;
     CARD32 generationHi;
 } xLorieR8CheckpointReply;
-#endif
 
 #define sz_xLorieR8QueryVersionReq 4
 #define sz_xLorieR8QueryVersionReply 32
 #define sz_xLorieR8RegisterBufferReq 8
 #define sz_xLorieR8RegisterBufferReply 72
 #define sz_xLorieR8CheckpointReq 8
-#define sz_xLorieR8CheckpointReply 64
+#define sz_xLorieR8CheckpointReply 72
+
+#if defined(__cplusplus)
+#define LORIE_R8_SA(cond, msg) static_assert(cond, msg)
+#else
+#define LORIE_R8_SA(cond, msg) _Static_assert(cond, msg)
+#endif
+
+LORIE_R8_SA(sizeof(xLorieR8QueryVersionReq) == sz_xLorieR8QueryVersionReq,
+            "qv req");
+LORIE_R8_SA(sizeof(xLorieR8QueryVersionReply) == sz_xLorieR8QueryVersionReply,
+            "qv rep");
+LORIE_R8_SA(sizeof(xLorieR8RegisterBufferReq) == sz_xLorieR8RegisterBufferReq,
+            "reg req");
+LORIE_R8_SA(sizeof(xLorieR8RegisterBufferReply) == sz_xLorieR8RegisterBufferReply,
+            "reg rep");
+LORIE_R8_SA(sizeof(xLorieR8CheckpointReq) == sz_xLorieR8CheckpointReq,
+            "ck req");
+LORIE_R8_SA(sizeof(xLorieR8CheckpointReply) == sz_xLorieR8CheckpointReply,
+            "ck rep");
+LORIE_R8_SA(offsetof(xLorieR8QueryVersionReply, type) == 0, "qv type");
+LORIE_R8_SA(offsetof(xLorieR8QueryVersionReply, sequenceNumber) == 2, "qv seq");
+LORIE_R8_SA(offsetof(xLorieR8QueryVersionReply, length) == 4, "qv len");
+LORIE_R8_SA(offsetof(xLorieR8QueryVersionReply, majorVersion) == 8, "qv major");
+LORIE_R8_SA(offsetof(xLorieR8CheckpointReply, generationLo) == 64, "ck genLo");
+LORIE_R8_SA(offsetof(xLorieR8CheckpointReply, generationHi) == 68, "ck genHi");
+LORIE_R8_SA((sz_xLorieR8QueryVersionReply - 32) / 4 == 0, "qv extra");
+LORIE_R8_SA((sz_xLorieR8RegisterBufferReply - 32) / 4 == 10, "reg extra");
+LORIE_R8_SA((sz_xLorieR8CheckpointReply - 32) / 4 == 10, "ck extra");
+#undef LORIE_R8_SA
 
 static inline uint32_t lorieR8CaseCode(const char *name) {
     if (name == NULL)

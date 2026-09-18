@@ -18,8 +18,14 @@ def need(cond: bool, label: str, bad: list[str]) -> None:
 def main() -> int:
     bad: list[str] = []
     need("sz_xLorieR8QueryVersionReq 4" in text, "qv_req", bad)
+    need("sz_xLorieR8QueryVersionReply 32" in text, "qv_rep", bad)
     need("sz_xLorieR8RegisterBufferReq 8" in text, "reg_req", bad)
+    need("sz_xLorieR8RegisterBufferReply 72" in text, "reg_rep", bad)
     need("sz_xLorieR8CheckpointReq 8" in text, "ck_req", bad)
+    need("sz_xLorieR8CheckpointReply 72" in text, "ck_rep", bad)
+    need('#include <X11/Xmd.h>' in text, "xmd_include", bad)
+    need("__X11_XMD_H" not in text and "defined(CARD8)" not in text, "no_card8_heuristic", bad)
+    need("pad3" not in text, "no_qv_pad3", bad)
     need("X_LorieR8QueryVersion 0" in text, "op0", bad)
     need("X_LorieR8RegisterBuffer 1" in text, "op1", bad)
     need("X_LorieR8Checkpoint 2" in text, "op2", bad)

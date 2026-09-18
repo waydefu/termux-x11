@@ -53,6 +53,7 @@
 #ifdef LORIE_ENABLE_R8_TEST_SUPPORT
 #include "lorie_r8_obs.h"
 #include "lorie_r8_test.h"
+#include "lorie_r8_test_x.h"
 #endif
 
 #define DRM_FORMAT_MOD_LINEAR 0
@@ -2818,8 +2819,8 @@ static Bool gateAEnsureReady(LorieBuffer *buf) {
 }
 
 #ifdef LORIE_ENABLE_R8_TEST_SUPPORT
-Bool lorieGateAR8EnsureReadyForBuffer(LorieBuffer *buf) {
-    return gateAEnsureReady(buf);
+int lorieGateAR8EnsureReadyForBuffer(LorieBuffer *buf) {
+    return gateAEnsureReady(buf) ? 1 : 0;
 }
 
 LorieBuffer *lorieGateAR8EnsureGpuSampleableAhb(PixmapPtr pixmap) {
