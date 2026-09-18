@@ -138,6 +138,28 @@ static const char solidFragmentShaderSrc[] =
 // GPU copy batch finishes instead of it waiting for the next vblank-tick poll.
 extern "C" volatile int conn_fd;
 
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+/* Observation-only renderer session-finalization. Never consulted by
+ * admission, completion, scheduling, or other product predicates. */
+static int r8RendererGenerationUnbound;
+static int r8RendererSurfaceQuiesced;
+static int r8RendererLoopDrained;
+static int r8RendererEndEmitted;
+
+static void lorieR8MaybeFinalizeRendererObs(void) {
+    if (r8RendererEndEmitted)
+        return;
+    if (!r8RendererGenerationUnbound || !r8RendererSurfaceQuiesced)
+        return;
+    /* Drain/unbind and surface_loss can both run before applyPendingGpuCopies
+     * in the same threadLoop iteration. END only after that drain point. */
+    if (!r8RendererLoopDrained)
+        return;
+    r8RendererEndEmitted = 1;
+    lorieR8ObsEnd("r");
+}
+#endif
+
 static void notifyGpuCopyDoneCause(const char *cause) {
     lorieEvent e = { .type = EVENT_GPU_COPY_DONE };
     int rc = lorieActivitySendLegacyRecord(&e);
@@ -795,7 +817,8 @@ static void gateADrainPendingControls(struct lorie_shared_server_state *st) {
 #ifdef LORIE_ENABLE_R8_TEST_SUPPORT
             lorieR8Obs("r", "R_UNBOUND_FINAL",
                        "\"ready\":0,\"pending\":0");
-            lorieR8ObsEnd("r");
+            r8RendererGenerationUnbound = 1;
+            lorieR8MaybeFinalizeRendererObs();
 #endif
             continue;
         }
@@ -1616,6 +1639,11 @@ void Renderer::refreshContext() {
         if (state)
             state->surfaceAvailable = false;
         notifyGpuCopyDoneCause("surface_loss"); // Wake up any GPU copy stuck waiting on a surface we no longer have.
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+        lorieR8Obs("r", "R_SURFACE_QUIESCED", "\"cause\":\"surface_loss\"");
+        r8RendererSurfaceQuiesced = 1;
+        lorieR8MaybeFinalizeRendererObs();
+#endif
         return;
     }
 
@@ -2366,6 +2394,9 @@ void Renderer::threadLoop() {
     LorieBuffer* buf;
     bool waitingForBuffers = false;
     while (true) {
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+        r8RendererLoopDrained = 0;
+#endif
         waitWhileIdle(&waitingForBuffers);
 
         if (stateChanged) {
@@ -2436,6 +2467,10 @@ void Renderer::threadLoop() {
         while((buf = LorieBufferList_first(&removedBuffers)))
             LorieBuffer_release(buf);
         pthread_spin_unlock(&bufferLock);
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+        r8RendererLoopDrained = 1;
+        lorieR8MaybeFinalizeRendererObs();
+#endif
         pthread_mutex_lock(&stateLock);
     }
 }

@@ -97,6 +97,39 @@ def main() -> int:
     need("void lorieExaDestroyPixmap(ScreenPtr pScreen, void *driverPriv);" in init,
          "d382c0a_prototype", bad)
 
+    close_fn = init.split("static Bool lorieCloseScreen", 1)[-1].split("void lorieSetWindowPixmap", 1)[0]
+    need('lorieR8Obs("x", "X_CLOSE_ENTER"' in close_fn, "x_close_enter", bad)
+    need('lorieR8Obs("x", "X_CLOSE_RESULT"' in close_fn, "x_close_result", bad)
+    need("pScreen->DestroyPixmap(pScreen->devPrivate)" in close_fn, "x_destroy_root", bad)
+    need('lorieR8ObsEnd("x")' in close_fn, "x_obs_end", bad)
+    need(close_fn.find("pScreen->DestroyPixmap(pScreen->devPrivate)")
+         < close_fn.find('lorieR8ObsEnd("x")'), "x_end_after_destroy", bad)
+    need(close_fn.find('X_CLOSE_RESULT') < close_fn.find("pScreen->DestroyPixmap"),
+         "x_end_not_before_destroy", bad)
+    need(close_fn.find("pScreen->CloseScreen = pvfb->CloseScreen")
+         < close_fn.find('lorieR8ObsEnd("x")'), "x_end_after_restore_close", bad)
+    need(close_fn.find("ret = pScreen->CloseScreen(pScreen)")
+         < close_fn.find('lorieR8ObsEnd("x")'), "x_end_after_saved_close", bad)
+
+    rend = (src / "lorie/src/main/cpp/lorie/renderer.cpp").read_text()
+    close_ctl = rend.split("LORIE_GATEA_MSG_GENERATION_CLOSE", 1)[-1].split(
+        "gateARendererFatal(st, \"r-control-type\"", 1)[0]
+    need("R_UNBOUND_FINAL" in close_ctl, "r_unbound_final", bad)
+    need("r8RendererGenerationUnbound = 1" in close_ctl, "r_unbound_mark", bad)
+    need("lorieR8MaybeFinalizeRendererObs" in close_ctl, "r_unbound_maybe", bad)
+    need('lorieR8ObsEnd("r")' not in close_ctl, "r_end_not_at_unbind", bad)
+    need("r8RendererSurfaceQuiesced" in rend, "r_surface_flag", bad)
+    need("R_SURFACE_QUIESCED" in rend, "r_surface_phase", bad)
+    need("r8RendererLoopDrained" in rend, "r_loop_drained", bad)
+    need("lorieR8MaybeFinalizeRendererObs" in rend, "r_maybe_finalize", bad)
+    surface_win = rend.split("if (!win) {", 1)[-1].split("eglCreateWindowSurface", 1)[0]
+    need('notifyGpuCopyDoneCause("surface_loss")' in surface_win, "r_surface_loss_product", bad)
+    need(surface_win.find('notifyGpuCopyDoneCause("surface_loss")')
+         < surface_win.find("r8RendererSurfaceQuiesced"), "r_wake_before_end", bad)
+    obs_c = (src / "lorie/src/main/cpp/lorie/lorie_r8_obs.c").read_text()
+    need("R8_OBS_POST_END" in obs_c, "post_end_diag", bad)
+    need("r8Ended[ix]" in obs_c.split("void lorieR8Obs(", 1)[-1][:900], "obs_checks_ended", bad)
+
     lorie_inc = src / "lorie/src/main/cpp/lorie"
     tests_r8 = src / "tests/r8"
     host_cflags = [
@@ -242,6 +275,21 @@ def main() -> int:
     r = subprocess.run([sys.executable, str(src / "tests/r8/test-judge-r8.py")],
                        capture_output=True, text=True)
     need(r.returncode == 0 and "failures=0" in r.stdout, "judge_vectors", bad)
+    r = subprocess.run([sys.executable, str(src / "tests/r8/test_r8_obs_terminal.py")],
+                       capture_output=True, text=True)
+    need(r.returncode == 0 and "PASS" in r.stdout, f"obs_terminal_py:{r.stdout}{r.stderr}", bad)
+    compile_run(
+        "obs_terminal_c",
+        ["gcc", "-std=c11", "-O0", "-Wall", "-Werror", "-D_GNU_SOURCE",
+         "-DLORIE_ENABLE_R8_TEST_SUPPORT=1",
+         "-I", str(tests_r8 / "hoststubs"),
+         "-I", str(tests_r8),
+         "-I", str(lorie_inc),
+         str(tests_r8 / "test_r8_obs_terminal.c"),
+         str(src / "lorie/src/main/cpp/lorie/lorie_r8_obs.c"),
+         "-lpthread", "-o", "/tmp/test_r8_obs_terminal"],
+        "/tmp/test_r8_obs_terminal",
+    )
 
     if bad:
         print("R8_SUPPORT_HOST_FAIL")

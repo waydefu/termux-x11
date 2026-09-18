@@ -1220,6 +1220,7 @@ static Bool lorieCreateScreenResources(ScreenPtr pScreen) {
 
 static Bool lorieCloseScreen(ScreenPtr pScreen) {
     PictureScreenPtr ps = GetPictureScreenIfSet(pScreen);
+    Bool ret;
 
 #ifdef LORIE_ENABLE_R8_TEST_SUPPORT
     lorieR8Obs("x", "X_CLOSE_ENTER", "\"path\":\"lorieCloseScreen\"");
@@ -1232,7 +1233,6 @@ static Bool lorieCloseScreen(ScreenPtr pScreen) {
         gateACloseGeneration();
 #ifdef LORIE_ENABLE_R8_TEST_SUPPORT
     lorieR8Obs("x", "X_CLOSE_RESULT", "\"generation_close\":\"invoked\"");
-    lorieR8ObsEnd("x");
 #endif
     if (pvfb->state)
         lorieGateADumpSummary(pvfb->state, "x-close-screen");
@@ -1246,8 +1246,16 @@ static Bool lorieCloseScreen(ScreenPtr pScreen) {
     pScreenPtr = NULL;
     pScreen->DestroyPixmap(pScreen->devPrivate);
     pScreen->devPrivate = NULL;
+    /* pvfb->CloseScreen is the wrap saved after present_screen_init, before
+     * this Lorie hook. It is never lorieCloseScreen. present_scmd_flip_destroy
+     * can still dixDestroyPixmap while EXA DestroyPixmap is lorieExaDestroyPixmap,
+     * so observation END is after that saved chain returns, not before it. */
     pScreen->CloseScreen = pvfb->CloseScreen;
-    return pScreen->CloseScreen(pScreen);
+    ret = pScreen->CloseScreen(pScreen);
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+    lorieR8ObsEnd("x");
+#endif
+    return ret;
 }
 
 void lorieSetWindowPixmap(WindowPtr pWindow, PixmapPtr newPixmap) {

@@ -1,5 +1,8 @@
 #ifdef LORIE_ENABLE_R8_TEST_SUPPORT
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include "lorie_r8_obs.h"
 #include "r8-test-protocol.h"
 
@@ -178,10 +181,27 @@ void lorieR8Obs(const char *role, const char *phase, const char *fields) {
     if (role && role[0] == 'x' && !lorieR8Armed())
         return;
     pthread_mutex_lock(&r8ObsMu);
+    if (r8Ended[ix]) {
+        pthread_mutex_unlock(&r8ObsMu);
+        /* Fail-closed instrumentation diagnostic, not a product fatal and not
+         * a normal R8_OBS record. Collector/orchestration maps this to
+         * R8_INVALID POST_END_OBSERVATION. */
+        __android_log_print(ANDROID_LOG_ERROR, "R8_OBS",
+            "R8_OBS_POST_END role=%s phase=%s",
+            role ? role : "?", phase ? phase : "?");
+        return;
+    }
     if (!r8Began[ix]) {
         pthread_mutex_unlock(&r8ObsMu);
         lorieR8ObsBegin(role);
         pthread_mutex_lock(&r8ObsMu);
+        if (r8Ended[ix]) {
+            pthread_mutex_unlock(&r8ObsMu);
+            __android_log_print(ANDROID_LOG_ERROR, "R8_OBS",
+                "R8_OBS_POST_END role=%s phase=%s",
+                role ? role : "?", phase ? phase : "?");
+            return;
+        }
     }
     r8Seq[ix]++;
     n = snprintf(line, sizeof(line),
