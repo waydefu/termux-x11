@@ -2000,6 +2000,7 @@ static struct {
 
 Bool loriePrepareAccess(PixmapPtr pPix, int index);
 void lorieFinishAccess(PixmapPtr pPix, int index);
+void lorieExaDestroyPixmap(ScreenPtr pScreen, void *driverPriv);
 
 static Bool lorieGpuExaDisabled(void) {
     const char *e;
