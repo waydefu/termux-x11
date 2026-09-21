@@ -16,6 +16,9 @@
 #include <arpa/inet.h>
 #include <poll.h>
 #include "lorie.h"
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+#include "lorie_r8_obs.h"
+#endif
 #include "lorie_gatea_hup_class.h"
 
 #pragma clang diagnostic ignored "-Wunknown-pragmas"
@@ -191,6 +194,9 @@ static void gateABindFromState(struct lorie_shared_server_state *state) {
     uint32_t version;
     uint64_t nonce, generation;
     int bound;
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+    int epochOpened = 0;
+#endif
     if (state == NULL)
         return;
     version = lorieGateALoadU32Acquire(&state->gateA.protocolVersion);
@@ -204,6 +210,12 @@ static void gateABindFromState(struct lorie_shared_server_state *state) {
         if (gateABound && (nonce != gateABoundNonce || generation != gateABoundGeneration)
             && lorieGateAImportBusy())
             lorieGateAFatalHalt("r-rebind-busy", LORIE_GATEA_FAIL_GENERATION);
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+        /* Only a genuine tuple change opens a new epoch. A re-latch of the same
+         * tuple (a duplicate EVENT_SHARED_SERVER_STATE) must not allocate one. */
+        epochOpened = (!gateABound || nonce != gateABoundNonce
+                       || generation != gateABoundGeneration);
+#endif
         gateABoundNonce = nonce;
         gateABoundGeneration = generation;
         gateABound = 1;
@@ -212,6 +224,15 @@ static void gateABindFromState(struct lorie_shared_server_state *state) {
     }
     bound = gateABound;
     pthread_mutex_unlock(&gateABindMutex);
+#ifdef LORIE_ENABLE_R8_TEST_SUPPORT
+    /* D-02 (R9): epoch boundary. An ORDINARY semantic phase record, not a second
+     * BEGIN/END producer, so it cannot collide with the r8Ended[] terminal latch.
+     * Carries its own tuple; never the process globals. Emitted OUTSIDE
+     * gateABindMutex so the obs mutex is never nested under the bind mutex. */
+    if (epochOpened)
+        lorieR8ObsEpoch("r", "R_EPOCH_BEGIN", lorieR8EpochAllocId(),
+                        nonce, generation, "bind", NULL);
+#endif
     log(INFO, "GATEA_BIND version=%u nonce=%llu generation=%llu bound=%d",
         version, (unsigned long long)nonce, (unsigned long long)generation, bound);
 }
@@ -433,6 +454,11 @@ static int xcallback(int fd, int events, __unused void* data) {
             close(fd);
         }
         pthread_mutex_unlock(&lorieActivityWriterMutex);
+        /* Q4-F1: setSharedState(NULL) makes the GL thread munmap this mapping.
+         * gateAMappedState had no clear site, so it outlived its target and the
+         * HUP read above could dereference unmapped memory. Clear it on every
+         * unmap path. */
+        gateAMappedState = NULL;
         g_renderer.setSharedState(NULL);
         g_renderer.removeAllBuffers();
         log(DEBUG, "disconnected");
@@ -546,6 +572,9 @@ static void connect_(__unused JNIEnv* env, __unused jobject cls, jint fd) {
     }
     pthread_mutex_unlock(&lorieActivityWriterMutex);
     if (oldFd != -1) {
+        /* Q4-F1: same unmap, same requirement — see the peer-HUP path. This is the
+         * warm-reconnect leg that Q1-F2 proved makes the stale read REACHABLE. */
+        gateAMappedState = NULL;
         g_renderer.setSharedState(NULL);
         g_renderer.removeAllBuffers();
         log(DEBUG, "disconnected");

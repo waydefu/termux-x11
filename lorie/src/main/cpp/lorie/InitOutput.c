@@ -2583,7 +2583,7 @@ static void lorieGateATestFaultPublishFromEnv(struct lorie_shared_server_state *
     st->gateATestFault.version = LORIE_GATEA_TEST_VERSION;
     st->gateATestFault.cell = cell;
     st->gateATestFault.consumed = 0;
-    st->gateATestFault.pad = 0;
+    st->gateATestFault.runFinalize = 0;
     st->gateATestFault.targetGeneration = 0;
     st->gateATestFault.targetOrdinal = 0;
     /* Present-bound cells 12/13: selector configured, not eligible until the

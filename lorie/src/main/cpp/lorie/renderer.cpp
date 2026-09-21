@@ -146,8 +146,22 @@ static int r8RendererSurfaceQuiesced;
 static int r8RendererLoopDrained;
 static int r8RendererEndEmitted;
 
-static void lorieR8MaybeFinalizeRendererObs(void) {
+/* D-02 (R9): END authority is EXPLICIT WHOLE-RUN FINALIZATION.
+ * Before D-02 this fired on first-generation quiescence, which made the renderer
+ * observation stream one-shot per PROCESS: a second generation's records would be
+ * dropped as R8_OBS_POST_END. R9 spans generations inside one process, so the
+ * terminal now additionally requires X to have published runFinalize from
+ * ProcLorieR8Terminate (lorie_r8_test.c).
+ *
+ * Observationally equivalent on the frozen R8 corpus: across runtime-b984ded all
+ * ten passing attempts, the renderer END appears in exactly the eight cells that
+ * sent TERMINATE and in neither of the two fatal cells that did not. The
+ * quiescence latches are kept as preconditions so ordering within a run is
+ * unchanged. */
+static void lorieR8MaybeFinalizeRendererObs(struct lorie_shared_server_state *st) {
     if (r8RendererEndEmitted)
+        return;
+    if (!lorieGateAObserveRunFinalize(st))
         return;
     if (!r8RendererGenerationUnbound || !r8RendererSurfaceQuiesced)
         return;
@@ -817,8 +831,13 @@ static void gateADrainPendingControls(struct lorie_shared_server_state *st) {
 #ifdef LORIE_ENABLE_R8_TEST_SUPPORT
             lorieR8Obs("r", "R_UNBOUND_FINAL",
                        "\"ready\":0,\"pending\":0");
+            /* D-02 (R9): epoch boundary, paired with the R_EPOCH_BEGIN emitted at
+             * bind. Ordinary semantic phase; the process-level terminal is now
+             * decided separately by explicit whole-run finalization. */
+            lorieR8ObsEpoch("r", "R_EPOCH_END", lorieR8EpochCurrentId(),
+                            ctl->nonce, ctl->generation, "generation_close", NULL);
             r8RendererGenerationUnbound = 1;
-            lorieR8MaybeFinalizeRendererObs();
+            lorieR8MaybeFinalizeRendererObs(st);
 #endif
             continue;
         }
@@ -1642,7 +1661,7 @@ void Renderer::refreshContext() {
 #ifdef LORIE_ENABLE_R8_TEST_SUPPORT
         lorieR8Obs("r", "R_SURFACE_QUIESCED", "\"cause\":\"surface_loss\"");
         r8RendererSurfaceQuiesced = 1;
-        lorieR8MaybeFinalizeRendererObs();
+        lorieR8MaybeFinalizeRendererObs(state);
 #endif
         return;
     }
@@ -2469,7 +2488,7 @@ void Renderer::threadLoop() {
         pthread_spin_unlock(&bufferLock);
 #ifdef LORIE_ENABLE_R8_TEST_SUPPORT
         r8RendererLoopDrained = 1;
-        lorieR8MaybeFinalizeRendererObs();
+        lorieR8MaybeFinalizeRendererObs(state);
 #endif
         pthread_mutex_lock(&stateLock);
     }

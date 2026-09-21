@@ -65,6 +65,51 @@ def main() -> int:
     need("GiveUp(0)" in term_fn, "terminate_calls_giveup", bad)
     need('lorieR8ObsEnd' not in term_fn, "terminate_no_obs_end", bad)
     need('\\"op\\":\\"TERMINATE\\"' in term_fn, "terminate_obs_control", bad)
+
+    # ---- D-02 (R9): whole-run finalization seam ----
+    lorie_h = (src / "lorie/src/main/cpp/lorie/lorie.h").read_text()
+    need("uint32_t runFinalize;" in lorie_h, "d02_run_finalize_field", bad)
+    need('offsetof(struct LorieGateATestFault, runFinalize) == 20' in lorie_h,
+         "d02_run_finalize_offset_assert", bad)
+    # the seam must be ABI-layout-neutral: the five pre-existing asserts stay
+    for frag, lbl in (
+            ("sizeof(struct LorieGateATestFault) == 40", "d02_testfault_size_unchanged"),
+            ("offsetof(struct LorieGateATestFault, magic) == 0", "d02_testfault_magic_unchanged"),
+            ("offsetof(struct LorieGateATestFault, targetGeneration) == 24",
+             "d02_testfault_gen_off_unchanged")):
+        need(frag in lorie_h, lbl, bad)
+    need("lorieGateAPublishRunFinalize" in term_fn, "d02_terminate_publishes_finalize", bad)
+    renderer_cpp = (src / "lorie/src/main/cpp/lorie/renderer.cpp").read_text()
+    fin_fn = renderer_cpp.split("static void lorieR8MaybeFinalizeRendererObs", 1)[-1].split(
+        "\n}", 1)[0]
+    need("lorieGateAObserveRunFinalize" in fin_fn, "d02_finalize_requires_publish", bad)
+    need("lorieR8ObsEnd" in fin_fn, "d02_finalize_still_emits_end", bad)
+
+    # ---- D-02 (R9): epoch records are ordinary phases carrying their own tuple ----
+    activity_cpp = (src / "lorie/src/main/cpp/lorie/activity.cpp").read_text()
+    need('lorieR8ObsEpoch("r", "R_EPOCH_BEGIN"' in activity_cpp, "d02_epoch_begin_emitted", bad)
+    need('lorieR8ObsEpoch("r", "R_EPOCH_END"' in renderer_cpp, "d02_epoch_end_emitted", bad)
+    obs_c = (src / "lorie/src/main/cpp/lorie/lorie_r8_obs.c").read_text()
+    need("void lorieR8ObsEpoch(" in obs_c, "d02_epoch_api_present", bad)
+    need("void lorieR8ObsTuple(" in obs_c, "d02_tuple_api_present", bad)
+    # the legacy path must still stamp the process globals
+    need("lorieR8ObsTuple(role, phase, r8Nonce, r8Generation, fields);" in obs_c,
+         "d02_legacy_obs_unchanged", bad)
+    # epoch ids must not be derived from the generation (Q2-F2)
+    need("lorieR8EpochAllocId" in obs_c, "d02_epoch_id_independent", bad)
+
+    # ---- Q6-F1: the deferred tuple must be assigned BEFORE it is observed ----
+    cmd_cpp = (src / "lorie/src/main/cpp/lorie/cmdentrypoint.cpp").read_text()
+    q_fn = cmd_cpp.split("static int gateAQueueDeferredRecord", 1)[-1].split(
+        "\nvoid lorieGateACancelDeferred", 1)[0]
+    assign_at = q_fn.find("queued->nonce = lorieGateALoadU64Acquire")
+    obs_at = q_fn.find('lorieR8Obs("x", "DEFER_ENQUEUE"')
+    need(assign_at >= 0 and obs_at >= 0 and assign_at < obs_at,
+         "q6f1_defer_tuple_before_obs", bad)
+
+    # ---- Q4-F1: gateAMappedState must be cleared on every unmap path ----
+    need(activity_cpp.count("gateAMappedState = NULL;") >= 2,
+         "q4f1_mapped_state_cleared", bad)
     dispatch_c = (src / "lorie/src/main/cpp/xserver/dix/dispatch.c").read_text()
     need("char dispatchExceptionAtReset = DE_RESET;" in dispatch_c,
          "product_reset_default", bad)
@@ -352,8 +397,24 @@ def main() -> int:
     FROZEN_JUDGE_SHA = (
         "f021048da3c1b729c6f9bf560eba52609b2f980336dd4fab77ad1700438c0e31"
     )
-    FROZEN_COLLECTOR_SHA = (
+    # The collector was AMENDED in 2b6f9f0 ("R8: fix judge/fixture contract
+    # defects that made 8 of 10 cells unreachable"): json.loads -> obs_loads.
+    # That is the GAP-8 containment — product b984ded emits a DUPLICATE "phase"
+    # key for X_CHECKPOINT, and obs_loads (r8_obs_stream.py) keeps the first
+    # "phase" while surfacing the later one as "checkpoint_phase". Without it the
+    # collector silently mis-parses every checkpoint record.
+    #
+    # The pin was not updated at the time, which left this check RED from 2b6f9f0
+    # onward. Re-pinned 2026-09-22 to the amended content, which is the collector
+    # that actually produced the frozen runtime-b984ded corpus (V2-R8-AGG check 11
+    # "one collect-r8.py across all ten", check 12 "all ten re-run after the last
+    # amendment"). collect-r8.py itself is deliberately NOT edited here: it must
+    # stay byte-identical to the file that produced the frozen evidence.
+    COLLECTOR_PARENT_SHA = (
         "e6df519a75c872c8a56fac00146585853eec7f17a3f424e70e5d4736340666c8"
+    )
+    FROZEN_COLLECTOR_SHA = (
+        "c2d4013bbf6fb2532047e97fd1ab6989e3c31a1ddcefcd81ef5a6b4f11f5640b"
     )
     frozen_judge = tests_r8 / "judge-r8.py"
     amend_judge = tests_r8 / "judge-r8-v2.py"
@@ -361,7 +422,10 @@ def main() -> int:
     need(amend_judge.is_file(), "amend_judge_present", bad)
     need(sha256(frozen_judge) == FROZEN_JUDGE_SHA, "frozen_judge_sha", bad)
     need(sha256(tests_r8 / "collect-r8.py") == FROZEN_COLLECTOR_SHA,
-         "collector_unchanged", bad)
+         "collector_pinned", bad)
+    need(COLLECTOR_PARENT_SHA != FROZEN_COLLECTOR_SHA, "collector_amended_hash", bad)
+    need("obs_loads" in (tests_r8 / "collect-r8.py").read_text(),
+         "collector_uses_obs_loads", bad)
     need(sha256(amend_judge) != FROZEN_JUDGE_SHA, "amend_judge_new_hash", bad)
     need("FROZEN_PARENT_SHA256" in amend_judge.read_text(),
          "amend_records_parent_sha", bad)
@@ -411,6 +475,18 @@ def main() -> int:
          "-Wl,--wrap=xcb_connection_has_error",
          "-o", "/tmp/test_r8_xcb_request"],
         "/tmp/test_r8_xcb_request",
+    )
+    compile_run(
+        "epoch_obs_c",
+        ["gcc", "-std=c11", "-O0", "-Wall", "-Werror", "-D_GNU_SOURCE",
+         "-DLORIE_ENABLE_R8_TEST_SUPPORT=1",
+         "-I", str(tests_r8 / "hoststubs"),
+         "-I", str(tests_r8),
+         "-I", str(lorie_inc),
+         str(tests_r8 / "test_r8_epoch_obs.c"),
+         str(src / "lorie/src/main/cpp/lorie/lorie_r8_obs.c"),
+         "-lpthread", "-o", "/tmp/test_r8_epoch_obs"],
+        "/tmp/test_r8_epoch_obs",
     )
     compile_run(
         "obs_terminal_c",

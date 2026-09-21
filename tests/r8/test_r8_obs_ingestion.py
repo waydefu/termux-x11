@@ -248,8 +248,18 @@ class JudgeV2Ingestion(unittest.TestCase):
     def _c1_rows(self):
         x = [
             obs("x", "BEGIN", 0, expected_count=None, expected_digest=None),
+            # D-17 widened judge-r8-v2.py's C1 residue proof beyond root_pending:
+            # it now requires readIndex / writeIndex / completedSerial / pair_src /
+            # pair_dst / generationFatal / firstFailed to be non-None, and proves
+            # zero residue from those instead of from total_actual_buffer_pending,
+            # which product b984ded hardcodes null (GAP-8). This fixture predated
+            # that and therefore tripped PENDING_NOT_OBSERVED. The values match a
+            # quiesced checkpoint in the real corpus
+            # (runtime-b984ded/r8-c1/attempt-13/x-observations.jsonl).
             obs("x", "X_CHECKPOINT", 1, registry_count=0,
-                total_actual_buffer_pending=0, root_pending=0, pair_state=0),
+                total_actual_buffer_pending=0, root_pending=0, pair_state=0,
+                pair_src=0, pair_dst=0, readIndex=0, writeIndex=0,
+                completedSerial=0, generationFatal=0, firstFailed=0),
             obs("x", "X_DESTRUCTOR_ENTER", 2, bufferId=10, overlap=False),
             obs("x", "X_DESTRUCTOR_EXIT", 3, released=True),
             obs("x", "END", 3, actual_count=3, actual_digest="00"),

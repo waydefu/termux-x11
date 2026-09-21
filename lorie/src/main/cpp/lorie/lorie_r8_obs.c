@@ -173,7 +173,46 @@ void lorieR8ObsEnd(const char *role) {
     pthread_mutex_unlock(&r8ObsMu);
 }
 
+/* D-02 (R9): epoch-scoped emit. `nonce`/`generation` are the tuple of the EPOCH
+ * this record belongs to, not the process-global pair. R9 spans generations in one
+ * process, so a single global pair cannot represent a historical epoch; every epoch
+ * record must carry its own. lorieR8Obs() keeps the legacy behaviour (process
+ * globals) so no existing R8 record changes shape. */
+void lorieR8ObsEpoch(const char *role, const char *phase,
+                     uint64_t epochId, uint64_t nonce, uint64_t generation,
+                     const char *reason, const char *fields) {
+    char merged[1536];
+    snprintf(merged, sizeof(merged),
+        "\"epoch_id\":%llu,\"epoch_nonce\":%llu,\"epoch_generation\":%llu,"
+        "\"reason\":\"%s\"%s%s",
+        (unsigned long long)epochId,
+        (unsigned long long)nonce,
+        (unsigned long long)generation,
+        reason ? reason : "unspecified",
+        (fields && fields[0]) ? "," : "",
+        (fields && fields[0]) ? fields : "");
+    /* The epoch tuple lives in the epoch_* columns ONLY. original_nonce /
+     * original_generation keep their existing provenance meaning (the process
+     * globals), so the r-stream's original_* values are byte-identical to what
+     * the product emitted before D-02.
+     *
+     * This is deliberate and load-bearing: judge-r8-v2.py tuple_bind() collects
+     * (original_nonce, original_generation) from every non-BEGIN/END row and
+     * raises INVALID TUPLE_BINDING on disagreement, after discarding rows whose
+     * original_nonce is 0. The renderer never calls lorieR8BindTuple(), so today
+     * every renderer row is discarded there (verified in runtime-b984ded:
+     * r-stream origins are {(0,0)} in every cell). Stamping a real nonce here
+     * would newly admit renderer rows into that assertion and change the judge's
+     * input set for FROZEN R8 cells. It must not. */
+    lorieR8Obs(role, phase, merged);
+}
+
 void lorieR8Obs(const char *role, const char *phase, const char *fields) {
+    lorieR8ObsTuple(role, phase, r8Nonce, r8Generation, fields);
+}
+
+void lorieR8ObsTuple(const char *role, const char *phase,
+                     uint64_t nonce, uint64_t generation, const char *fields) {
     int ix = roleIx(role);
     char line[2048];
     int n;
@@ -212,7 +251,7 @@ void lorieR8Obs(const char *role, const char *phase, const char *fields) {
         (unsigned long long)r8Seq[ix],
         r8Case[0] ? "\"" : "", r8Case[0] ? r8Case : "null", r8Case[0] ? "\"" : "",
         phase ? phase : "UNKNOWN",
-        (unsigned long long)r8Nonce, (unsigned long long)r8Generation,
+        (unsigned long long)nonce, (unsigned long long)generation,
         (fields && fields[0]) ? "," : "",
         (fields && fields[0]) ? fields : "");
     if (n > 0)
@@ -254,6 +293,29 @@ uint64_t lorieR8WakeReceived(uint64_t ordinal_hint) {
     snprintf(fields, sizeof(fields), "\"ordinal\":%llu", (unsigned long long)ord);
     lorieR8Obs("x", "X_WAKE_RECEIVED", fields);
     return ord;
+}
+
+/* D-02 (R9): renderer-process-local epoch counter. Deliberately INDEPENDENT of
+ * epoch_generation: Q2-F2 proved that (nonce, generation) cannot distinguish
+ * "same X, new Activity" from "same X, same Activity, new generation", because the
+ * nonce is per X PROCESS and only the generation advances. epoch_id counts what
+ * THIS renderer process has actually seen, which is the missing axis. */
+static uint64_t r8EpochSeq;
+
+uint64_t lorieR8EpochAllocId(void) {
+    uint64_t id;
+    pthread_mutex_lock(&r8ObsMu);
+    id = ++r8EpochSeq;
+    pthread_mutex_unlock(&r8ObsMu);
+    return id;
+}
+
+uint64_t lorieR8EpochCurrentId(void) {
+    uint64_t id;
+    pthread_mutex_lock(&r8ObsMu);
+    id = r8EpochSeq;
+    pthread_mutex_unlock(&r8ObsMu);
+    return id;
 }
 
 uint64_t lorieR8DeferAllocId(void) {

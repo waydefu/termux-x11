@@ -1537,7 +1537,14 @@ struct LorieGateATestFault {
     uint32_t cell;
     uint32_t armed;
     uint32_t consumed;
-    uint32_t pad;
+    /* D-02 (R9): whole-run finalization authority for the RENDERER observation
+     * stream. Formerly an unnamed alignment pad at +20, never read by anything.
+     * X publishes 1 from ProcLorieR8Terminate before GiveUp(0); the renderer
+     * requires it before emitting its process-level END. Size, every offset and
+     * every static assert below are unchanged by naming it. Test-support only:
+     * both the publisher and the consumer are inside
+     * LORIE_ENABLE_R8_TEST_SUPPORT, and Production Gate A never reads it. */
+    uint32_t runFinalize;
     uint64_t targetGeneration;
     uint64_t targetOrdinal;
 };
@@ -1547,6 +1554,8 @@ LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateATestFault, magic) == 0, "r7 
 LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateATestFault, targetGeneration) == 24, "r7 test-fault gen off");
 LORIE_GATEA_STATIC_ASSERT((offsetof(struct LorieGateATestFault, targetGeneration) % 8) == 0, "r7 test-fault gen aligned");
 LORIE_GATEA_STATIC_ASSERT((offsetof(struct LorieGateATestFault, consumed) % 4) == 0, "r7 test-fault consumed aligned");
+LORIE_GATEA_STATIC_ASSERT(offsetof(struct LorieGateATestFault, runFinalize) == 20, "d02 run-finalize off");
+
 
 #include "lorie_gatea_test_fault_class.h"
 
@@ -1653,6 +1662,27 @@ static inline __always_inline bool lorieGateASharedAtomicsLockFree(
                                  &state->gateATestFault.armed)
         && __atomic_is_lock_free(sizeof(state->gateATestFault.consumed),
                                  &state->gateATestFault.consumed);
+}
+
+/* ---- D-02 (R9): renderer observation finalization authority ----
+ * X publishes this from ProcLorieR8Terminate immediately BEFORE GiveUp(0).
+ * The renderer requires it before emitting its process-level END, so END
+ * authority is "the whole run was explicitly finalized" and NOT
+ * "the first generation unbound" / "the surface quiesced" / "the first epoch
+ * ended". Release/acquire: a renderer that observes 1 also observes every
+ * earlier X-side store. Test-support only; Production Gate A never reads it. */
+static inline __always_inline void lorieGateAPublishRunFinalize(
+        struct lorie_shared_server_state *state) {
+    if (state == NULL)
+        return;
+    lorieGateAStoreU32Release(&state->gateATestFault.runFinalize, 1u);
+}
+
+static inline __always_inline int lorieGateAObserveRunFinalize(
+        const struct lorie_shared_server_state *state) {
+    if (state == NULL)
+        return 0;
+    return lorieGateALoadU32Acquire(&state->gateATestFault.runFinalize) == 1u;
 }
 
 /* Renderer/Activity enable authority: bound generation + published word.

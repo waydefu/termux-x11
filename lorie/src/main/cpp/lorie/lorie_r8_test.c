@@ -338,6 +338,15 @@ static int ProcLorieR8Terminate(ClientPtr client) {
         swapl(&rep.length);
     }
     WriteToClient(client, sizeof(rep), &rep);
+    /* D-02: this request IS the whole-run finalization authority. Publish it for
+     * the renderer BEFORE GiveUp(0), so the renderer's process-level END is gated
+     * on an explicit end-of-run and not on first-generation quiescence.
+     * Ordering is guaranteed, not assumed: GiveUp only sets DE_TERMINATE, and X
+     * then unwinds through lorieCloseScreen -> gateACloseGeneration(), which
+     * BLOCKS in gateAWaitCleanAck() until the renderer sends GENERATION_CLOSED
+     * (InitOutput.c gateACloseGeneration). The renderer therefore runs, and reads
+     * this word, before X is gone. X's own END still comes from ddxGiveUp. */
+    lorieGateAPublishRunFinalize(lorieGateASharedState());
     /* Same DE_TERMINATE flag as os/utils.c GiveUp. ddxGiveUp still emits END. */
     GiveUp(0);
     return Success;

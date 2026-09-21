@@ -739,6 +739,16 @@ static int gateAQueueDeferredRecord(struct LorieDecodedRecord *record) {
     if (queued == NULL)
         return -1;
     lorieDeferredLegacyAdoptDecoded(queued, record);
+    /* The tuple snapshot MUST be taken before it is observed. Until 2026-09-22 the
+     * DEFER_ENQUEUE record below was emitted first, so it always printed the
+     * calloc'd zeros: 570 of 570 records in the runtime-b984ded corpus carried
+     * nonce=0 generation=0, which made the deferred queue's tuple snapshot
+     * unobservable in evidence (R9 DESIGN FREEZE Q6-F1). */
+    shared = lorieGateAShared();
+    if (shared != NULL) {
+        queued->nonce = lorieGateALoadU64Acquire(&shared->sessionNonce);
+        queued->generation = lorieGateALoadU64Acquire(&shared->generation);
+    }
 #ifdef LORIE_ENABLE_R8_TEST_SUPPORT
     queued->r8LocalId = lorieR8DeferAllocId();
     queued->r8Type = record->event.type;
@@ -755,11 +765,6 @@ static int gateAQueueDeferredRecord(struct LorieDecodedRecord *record) {
     if (record->event.type == EVENT_GPU_COPY_DONE)
         lorieR8WakeReceived(0);
 #endif
-    shared = lorieGateAShared();
-    if (shared != NULL) {
-        queued->nonce = lorieGateALoadU64Acquire(&shared->sessionNonce);
-        queued->generation = lorieGateALoadU64Acquire(&shared->generation);
-    }
     if (!QueueWorkProc(gateADeferredWorkProc, NULL, queued)) {
         gateADeferredRelease(queued);
         return -1;
