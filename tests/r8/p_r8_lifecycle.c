@@ -232,6 +232,14 @@ static int r8_terminate(xcb_connection_t *c) {
 static int cell_c1(xcb_connection_t *c, xcb_screen_t *s,
                    xcb_render_pictformat_t fmt32, xcb_render_pictformat_t fmt24) {
     struct pair a, b;
+    /* D-17: C1 must be able to PROVE zero residue, not merely not crash.
+     * r8_checkpoint is a read-only query (it reports registry state and
+     * registers nothing), so C1 stays a pure pair lifecycle and does NOT
+     * become C4. No r8_register here, by design. */
+    if (r8_query(c))
+        return 1;
+    if (r8_checkpoint(c, LORIE_R8_PHASE_BEGIN))
+        return 1;
     pair_create(c, s, fmt32, fmt24, &a, PAIR_W, PAIR_H);
     if (pair_composite(c, &a, PAIR_W, PAIR_H))
         return 1;
@@ -240,6 +248,8 @@ static int cell_c1(xcb_connection_t *c, xcb_screen_t *s,
     if (pair_composite(c, &b, PAIR_W, PAIR_H))
         return 1;
     pair_free(c, &b);
+    if (r8_checkpoint(c, LORIE_R8_PHASE_POST_FREE))
+        return 1;
     flog("RESULT p_r8_lifecycle C1 CLIENT_OK");
     return 0;
 }
@@ -339,22 +349,37 @@ static int cell_c5_full(xcb_connection_t *c, xcb_screen_t *s,
     xcb_gcontext_t gc = xcb_generate_id(c);
     int i, acc, n = 0;
     uint32_t px = 0x00804000u;
+    uint32_t *buf;
+    unsigned k;
     (void)fmt32;
     (void)fmt24;
     if (r8_query(c))
         return 1;
+    /* The put_image below declares PAIR_W*PAIR_H*4 bytes of image data. It used to
+     * pass &px, a single 4-byte local: xcb then read 16 KiB past it and emitted a
+     * malformed request that killed the X connection, so every r8 request after the
+     * first reported "LORIE-R8-TEST missing" and the cell could never register a
+     * single buffer (attempt-01, 2026-09-21). Back it with a real buffer, the same
+     * way pair_create() and present_copy() already do. */
+    buf = calloc((size_t)PAIR_W * PAIR_H, sizeof(uint32_t));
+    if (!buf)
+        return 1;
+    for (k = 0; k < (unsigned)(PAIR_W * PAIR_H); k++)
+        buf[k] = px;
     xcb_create_gc(c, gc, s->root, 0, NULL);
     for (i = 0; i < 16; i++) {
         pms[i] = xcb_generate_id(c);
         xcb_create_pixmap(c, 24, pms[i], s->root, PAIR_W, PAIR_H);
         xcb_put_image(c, XCB_IMAGE_FORMAT_Z_PIXMAP, pms[i], gc, PAIR_W, PAIR_H,
-                      0, 0, 0, 24, PAIR_W * PAIR_H * 4, (const uint8_t *)&px);
+                      0, 0, 0, 24, (uint32_t)(PAIR_W * PAIR_H * 4),
+                      (const uint8_t *)buf);
         if (r8_register(c, pms[i], &acc)) {
             flog("C5 register stop at %d", i);
             break;
         }
         n++;
     }
+    free(buf);
     flog("C5_FULL registered=%d", n);
     if (r8_checkpoint(c, LORIE_R8_PHASE_PRE_TERM))
         return 1;
@@ -369,9 +394,18 @@ static int cell_c5_overflow(xcb_connection_t *c, xcb_screen_t *s,
     struct pair rec;
     int i, acc, n = 0;
     uint32_t px = 0x00804000u;
+    uint32_t *ovbuf;
+    unsigned k;
     xcb_gcontext_t gc = xcb_generate_id(c);
     if (r8_query(c))
         return 1;
+    /* Same defect class as cell_c5_full, inverted: this declared a PAIR_W x PAIR_H
+     * image but supplied only 4 bytes, i.e. a short/malformed request. */
+    ovbuf = calloc((size_t)PAIR_W * PAIR_H, sizeof(uint32_t));
+    if (!ovbuf)
+        return 1;
+    for (k = 0; k < (unsigned)(PAIR_W * PAIR_H); k++)
+        ovbuf[k] = px;
     xcb_create_gc(c, gc, s->root, 0, NULL);
     pms[0] = xcb_generate_id(c);
     xcb_create_pixmap(c, 32, pms[0], s->root, PAIR_W, PAIR_H);
@@ -382,12 +416,18 @@ static int cell_c5_overflow(xcb_connection_t *c, xcb_screen_t *s,
         pms[i] = xcb_generate_id(c);
         xcb_create_pixmap(c, 24, pms[i], s->root, PAIR_W, PAIR_H);
         xcb_put_image(c, XCB_IMAGE_FORMAT_Z_PIXMAP, pms[i], gc, PAIR_W, PAIR_H,
-                      0, 0, 0, 24, 4, (const uint8_t *)&px);
+                      0, 0, 0, 24, (uint32_t)(PAIR_W * PAIR_H * 4),
+                      (const uint8_t *)ovbuf);
         if (r8_register(c, pms[i], &acc))
             break;
         n++;
     }
+    free(ovbuf);
     flog("C5_OVERFLOW filled=%d", n);
+    /* D-17: judge_c5_overflow requires X_CHECKPOINT; capture registry state at
+     * the refusal boundary, which is what this cell exists to prove. */
+    if (r8_checkpoint(c, LORIE_R8_PHASE_POST_REFUSAL))
+        return 1;
     pair_create(c, s, fmt32, fmt24, &rec, PAIR_W, PAIR_H);
     /* New dest while full: composite should fallback, not lease. */
     (void)pair_composite(c, &rec, PAIR_W, PAIR_H);
@@ -396,6 +436,8 @@ static int cell_c5_overflow(xcb_connection_t *c, xcb_screen_t *s,
     if (pair_composite(c, &rec, PAIR_W, PAIR_H))
         return 1;
     pair_free(c, &rec);
+    if (r8_checkpoint(c, LORIE_R8_PHASE_POST_FREE))
+        return 1;
     flog("RESULT p_r8_lifecycle C5-overflow CLIENT_OK");
     return 0;
 }
@@ -439,10 +481,21 @@ static int cell_d(xcb_connection_t *c, xcb_screen_t *s,
     xcb_render_free_picture(c, g.dst);
     xcb_free_pixmap(c, g.dst_pm);
     xcb_flush(c);
-    for (i = 0; i < 8; i++) {
-        xcb_generic_event_t *ev = xcb_wait_for_event(pc);
-        free(ev);
-    }
+    /* The window selects XCB_EVENT_MASK_NO_EVENT and the presents pass XCB_NONE as
+     * the event context, so no Present events are ever delivered. The previous
+     * xcb_wait_for_event() x8 drain therefore blocked forever and the runner killed
+     * the fixture at timeout 20 (attempt-01, 2026-09-21), losing all buffered output.
+     * What the cell actually needs is a guarantee that the server has PROCESSED the
+     * presents and both retirements before the client goes away. A round-trip does
+     * exactly that and is deterministic: xcb_get_input_focus_reply blocks until the
+     * server has handled every request issued earlier on that connection.
+     * Syncing c is the important one - it cannot return until gateARetireBufferId's
+     * gateAWaitTerminal + gateAWaitCleanAck have completed, i.e. until the renderer
+     * has acked, which is the overlap this cell exists to construct.
+     * This is a synchronisation primitive, not a sleep, not a retry, not a fake
+     * event - none of §7.8's forbidden constructions. */
+    free(xcb_get_input_focus_reply(pc, xcb_get_input_focus(pc), NULL));
+    free(xcb_get_input_focus_reply(c, xcb_get_input_focus(c), NULL));
     xcb_disconnect(pc);
     flog("RESULT p_r8_lifecycle D CLIENT_OK");
     return 0;

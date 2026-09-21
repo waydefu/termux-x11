@@ -21,7 +21,7 @@ import re
 import sys
 from pathlib import Path
 
-from r8_obs_stream import collector_provenance
+from r8_obs_stream import collector_provenance, obs_loads
 
 FROZEN_PARENT_JUDGE = "judge-r8.py"
 FROZEN_PARENT_SHA256 = (
@@ -96,7 +96,7 @@ def parse_obs_blob(text: str) -> list[dict]:
         else:
             continue
         try:
-            obj = json.loads(payload)
+            obj = obs_loads(payload)
         except json.JSONDecodeError:
             raise Verdict(INVALID, "OBS_JSON")
         if not isinstance(obj, dict) or obj.get("v") != 1:
@@ -255,18 +255,45 @@ def judge_c1(events, xrows, rrows, extra) -> None:
     completeness(xrows + rrows, "x")
     completeness(xrows + rrows, "r")
     tuple_bind(xrows + rrows)
-    destroy_before_x_release(xrows, rrows)
+    # D-17: destroy_before_x_release() asserts renderer R_DESTROY_STAGE /
+    # R_ACK_SETTLED, which only exist once a buffer has been REGISTERED. C1 is a
+    # pure pair lifecycle and registers nothing by design (§7.1); registration is
+    # C4's cell (§7.5), and §2.10 runs C1 BEFORE C4, so requiring it here made C1
+    # structurally unreachable and would have made C4 redundant. Zero residue is
+    # proven below by the X_CHECKPOINT pending assertion instead.
+    # X_DESTRUCTOR_EXIT was previously reached only via that helper; it is
+    # producible without registration, so it is asserted directly here to keep
+    # destructor coverage unchanged.
     require_obs(xrows, "X_DESTRUCTOR_ENTER")
+    require_obs(xrows, "X_DESTRUCTOR_EXIT")
     if any(e["event"] == EVENT_EARLY_ACK for e in events):
         raise Verdict(FAIL, "PRESENT_EARLY_ACK")
     if extra.get("identity_mismatch"):
         raise Verdict(INVALID, "RESOURCE_IDENTITY_MISSING")
     ck = require_obs(xrows, "X_CHECKPOINT")
-    pending = ck[-1].get("total_actual_buffer_pending")
-    if pending is None:
-        raise Verdict(INVALID, "PENDING_NOT_OBSERVED")
-    if pending not in (0, "0"):
+    last = ck[-1]
+    # D-17: product b984ded hardcodes "total_actual_buffer_pending":null
+    # (lorie_r8_test.c L288) - the field is declared but never populated, so any
+    # non-null assertion on it is unsatisfiable. Residue is proven instead from the
+    # fields the product DOES populate. registry_count is deliberately NOT used:
+    # C1 registers nothing by design, so it is 0 at BEGIN too and asserting it
+    # would be a tautology.
+    required = ("root_pending", "readIndex", "writeIndex", "completedSerial",
+                "pair_state", "pair_src", "pair_dst",
+                "generationFatal", "firstFailed")
+    for k in required:
+        if last.get(k) is None:
+            raise Verdict(INVALID, "PENDING_NOT_OBSERVED")
+    if last["root_pending"] not in (0, "0"):
         raise Verdict(FAIL, "RESOURCE_RESIDUE")
+    # copy queue fully drained: nothing enqueued past what completed
+    if not (last["readIndex"] == last["writeIndex"] == last["completedSerial"]):
+        raise Verdict(FAIL, "RESOURCE_RESIDUE")
+    # no pair still held at the end of a clean pair lifecycle
+    if any(last[k] not in (0, "0") for k in ("pair_state", "pair_src", "pair_dst")):
+        raise Verdict(FAIL, "RESOURCE_RESIDUE")
+    if any(last[k] not in (0, "0") for k in ("generationFatal", "firstFailed")):
+        raise Verdict(FAIL, "UNEXPECTED_FATAL")
 
 
 def judge_c2(events, xrows, rrows, extra) -> None:
@@ -294,7 +321,21 @@ def judge_c3(events, xrows, rrows, extra) -> None:
         raise Verdict(FAIL, "RELEASE_AFTER_FATAL")
     require_obs(xrows, "PRESENT_SUBMIT")
     pre = require_obs(xrows, "PRESENT_PRE_ACK")
-    require_obs(xrows, "PRESENT_POST_ACK")
+    # §7.3 / V-4: presentproto states that if the window is destroyed before the
+    # presentation happens, the presentation action never completes. That
+    # cancellation path is LEGAL and emits no PRESENT_POST_ACK. Requiring
+    # PRESENT_POST_ACK unconditionally implemented only ONE of the two legal
+    # traces and made R8-C3-window unreachable (attempt-01, 2026-09-21).
+    # The cancellation path is not accepted on absence alone: it must be PROVEN
+    # retired-by-cancel, per §7.3's "不得記為完成，也不得留在 pending".
+    post = obs_kinds(xrows, "PRESENT_POST_ACK")
+    if not post:
+        lp = pre[-1]
+        if lp.get("dst_id") not in (0, "0"):
+            # neither completed nor released: the present is stranded
+            raise Verdict(FAIL, "PRESENT_NOTIFICATION_LOST")
+        if lp.get("generationFatal") not in (0, "0") or lp.get("firstFailed") not in (0, "0"):
+            raise Verdict(FAIL, "UNEXPECTED_FATAL")
     waited = pre[-1].get("waited")
     if waited not in (0, 1):
         raise Verdict(INVALID, "PRESENT_WAITED")

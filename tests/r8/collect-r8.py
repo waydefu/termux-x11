@@ -8,6 +8,8 @@ import re
 import sys
 from pathlib import Path
 
+from r8_obs_stream import obs_loads
+
 PAT = re.compile(r"R8_OBS\s+(\{.*\})\s*$")
 
 
@@ -25,7 +27,7 @@ def main() -> int:
         if not m:
             continue
         try:
-            obj = json.loads(m.group(1))
+            obj = obs_loads(m.group(1))
         except json.JSONDecodeError:
             print("INVALID OBS_JSON", file=sys.stderr)
             return 2

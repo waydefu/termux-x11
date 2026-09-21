@@ -28,6 +28,34 @@ RAW_PROVENANCE_NAMES = (
 )
 
 
+def obs_loads(payload: str) -> dict:
+    """json.loads for an R8_OBS payload, duplicate-key safe.
+
+    Product b984ded emits a DUPLICATE "phase" key for X_CHECKPOINT: the lorieR8Obs
+    envelope writes the observation kind ("X_CHECKPOINT"), then
+    ProcLorieR8Checkpoint's field string writes the numeric checkpoint phase under
+    the same key (lorie_r8_test.c ~L288-L300). A standard parser keeps the LAST
+    value, which destroys the observation kind and made every X_CHECKPOINT-requiring
+    cell report MISSING_OBS_X_CHECKPOINT (attempt-10, 2026-09-21).
+
+    The information is present in the raw stream; only a naive parse loses it. Keep
+    the FIRST "phase" (the kind) and surface the later one as "checkpoint_phase".
+    Any other duplicated key is preserved as "<key>__dup" rather than dropped: this
+    parser never silently discards producer data.
+    """
+    def _hook(pairs):
+        out: dict = {}
+        for k, v in pairs:
+            if k not in out:
+                out[k] = v
+            elif k == "phase":
+                out.setdefault("checkpoint_phase", v)
+            else:
+                out.setdefault(f"{k}__dup", v)
+        return out
+    return json.loads(payload, object_pairs_hook=_hook)
+
+
 def parse_raw_obs(text: str) -> tuple[list[dict], list[dict]]:
     xs, rs = [], []
     for line in (text or "").splitlines():
@@ -35,7 +63,7 @@ def parse_raw_obs(text: str) -> tuple[list[dict], list[dict]]:
         if not m:
             continue
         try:
-            obj = json.loads(m.group(1))
+            obj = obs_loads(m.group(1))
         except json.JSONDecodeError:
             continue
         role = obj.get("role")
