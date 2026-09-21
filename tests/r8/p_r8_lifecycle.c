@@ -123,8 +123,15 @@ static void pair_create(xcb_connection_t *c, xcb_screen_t *s,
 static int pair_composite(xcb_connection_t *c, struct pair *p, uint16_t w,
                           uint16_t h) {
     xcb_generic_error_t *e;
+    /* Gate A only accelerates PictOpOver: lorieCanAccelCompositePictures()
+     * returns FALSE for every other operator, before any trace is emitted, so a
+     * PictOpSrc composite silently takes the CPU fallback and the Gate A direct
+     * EXA pair-lease path is never entered. That is why EVENT_LEASE_GPU_OWNED
+     * had zero occurrences in every cell with zero DIRECT_ADMIT_REJECT, and why
+     * R8-P1/P2 reported GPU_OWNED_NOT_CONSTRUCTED. src is a8r8g8b8 and dst is
+     * x8r8g8b8, which are exactly the formats that check also requires. */
     e = xcb_request_check(c, xcb_render_composite_checked(
-                                 c, XCB_RENDER_PICT_OP_SRC, p->src, XCB_NONE,
+                                 c, XCB_RENDER_PICT_OP_OVER, p->src, XCB_NONE,
                                  p->dst, 0, 0, 0, 0, 0, 0, w, h));
     if (e) {
         flog("FAIL composite err=%d", e->error_code);

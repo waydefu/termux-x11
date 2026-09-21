@@ -70,9 +70,22 @@ def load_json(path: Path):
 
 
 def parse_events(text: str) -> list[dict]:
+    # The caller concatenates gatea-ring.txt and raw-logcat.txt, and the SAME
+    # producer record is present in both. Two byte-identical copies of one record
+    # are one event, not two: counting them twice made R8-P1 report
+    # FAULT_NOT_FIRED with len(faults)==2 even though the single fault was correct
+    # (seq=28 src=14, attempt-02, 2026-09-21).
+    # Only EXACT duplicates collapse. Records sharing a seq but differing in any
+    # field are kept, so genuine trace conflicts and duplicate dispatches are still
+    # caught by the existing seq-collision checks downstream.
     out = []
+    seen = set()
     for m in EV_PAT.finditer(text or ""):
         seq, role, event, gen, serial, src, dst = (int(x) for x in m.groups())
+        key = (seq, role, event, gen, serial, src, dst)
+        if key in seen:
+            continue
+        seen.add(key)
         out.append({
             "seq": seq, "role": role, "event": event, "gen": gen,
             "serial": serial, "src": src, "dst": dst,
