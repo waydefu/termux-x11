@@ -82,8 +82,21 @@ def main() -> int:
     renderer_cpp = (src / "lorie/src/main/cpp/lorie/renderer.cpp").read_text()
     fin_fn = renderer_cpp.split("static void lorieR8MaybeFinalizeRendererObs", 1)[-1].split(
         "\n}", 1)[0]
-    need("lorieGateAObserveRunFinalize" in fin_fn, "d02_finalize_requires_publish", bad)
     need("lorieR8ObsEnd" in fin_fn, "d02_finalize_still_emits_end", bad)
+    # The finalize gate must consult a LATCH, never re-read the shared mapping.
+    # Measured on 7e3a05e: R_SURFACE_QUIESCED is the LAST renderer record, and by
+    # then X has died, the Activity has called setSharedState(NULL) and the GL
+    # thread has munmap'd the region and set state = nullptr. Re-reading there
+    # yields NULL, the END never fires, and the cell is
+    # R8_INVALID PRODUCERS_NOT_FINALIZED. Pin the latch shape so this cannot regress.
+    need("r8RendererRunFinalizeSeen" in fin_fn, "d02_finalize_uses_latch", bad)
+    need("lorieGateAObserveRunFinalize" not in fin_fn,
+         "d02_finalize_does_not_reread_mapping", bad)
+    note_fn = renderer_cpp.split("static void lorieR8NoteRunFinalize", 1)[-1].split(
+        "\n}", 1)[0]
+    need("lorieGateAObserveRunFinalize" in note_fn, "d02_latch_observes_publish", bad)
+    need("r8RendererRunFinalizeSeen = 1" in note_fn, "d02_latch_sets_flag", bad)
+    need("lorieR8NoteRunFinalize(st);" in fin_fn, "d02_finalize_latches_first", bad)
 
     # ---- D-02 (R9): epoch records are ordinary phases carrying their own tuple ----
     activity_cpp = (src / "lorie/src/main/cpp/lorie/activity.cpp").read_text()

@@ -158,10 +158,29 @@ static int r8RendererEndEmitted;
  * sent TERMINATE and in neither of the two fatal cells that did not. The
  * quiescence latches are kept as preconditions so ordering within a run is
  * unchanged. */
+static int r8RendererRunFinalizeSeen;
+
+/* LATCH, do not re-read. The shared mapping is gone before the terminal conditions
+ * are met: R_SURFACE_QUIESCED is the LAST renderer record, and by then X has died,
+ * the Activity has called setSharedState(NULL), and the GL thread has munmap'd the
+ * region and set state = nullptr (threadLoop). Observing the flag at terminal time
+ * therefore reads NULL and the END never fires - measured on 7e3a05e as
+ * R8_INVALID PRODUCERS_NOT_FINALIZED with r_end=0.
+ *
+ * X publishes runFinalize before GiveUp(0) and only THEN sends GENERATION_CLOSE, so
+ * the flag is already set when the renderer's control drain runs; that drain is a
+ * call site with a live st. Latching there preserves the authority semantics ("the
+ * run was explicitly finalized") without depending on the mapping's lifetime. */
+static void lorieR8NoteRunFinalize(struct lorie_shared_server_state *st) {
+    if (!r8RendererRunFinalizeSeen && lorieGateAObserveRunFinalize(st))
+        r8RendererRunFinalizeSeen = 1;
+}
+
 static void lorieR8MaybeFinalizeRendererObs(struct lorie_shared_server_state *st) {
+    lorieR8NoteRunFinalize(st);
     if (r8RendererEndEmitted)
         return;
-    if (!lorieGateAObserveRunFinalize(st))
+    if (!r8RendererRunFinalizeSeen)
         return;
     if (!r8RendererGenerationUnbound || !r8RendererSurfaceQuiesced)
         return;
