@@ -101,6 +101,23 @@ def main() -> int:
     need("generation - 1" in blk and "nonce - 1" in blk, "src_fault16_stale_tuple", bad)
     need("gateASendReady" in blk, "src_fault16_sends_ready", bad)
 
+    # the arming env var takes a NAME, not a number. A numeric value resolves to
+    # cell 0 and the X server fatal-halts with x-test-fault-env before the cell
+    # runs - an attempt spent on nothing. Pin each name to its index in the
+    # product's own table.
+    init_c = (LORIE / "InitOutput.c").read_text()
+    tbl = init_c.split("gateATestCellNames[] = {", 1)[-1].split("};", 1)[0]
+    entries = [e.strip().strip('",') for e in tbl.split("\n") if e.strip()]
+    for cid, idx, nm in (("R9-COLD-2", 8, "renderer-fatal-pre-fence"),
+                         ("R9-F1", 16, "stale-ready-replay")):
+        need(cells[cid].get("test_fault_env_name") == nm, f"spec_arming_name_{cid}", bad)
+        need(idx < len(entries) and entries[idx] == nm,
+             f"src_fault_name_index_{idx}", bad)
+        arm = cells[cid].get("arming", {})
+        need(arm.get("TERMUX_X11_GATEA_TEST_FAULT") == nm, f"spec_arming_env_{cid}", bad)
+        need(arm.get("TERMUX_X11_GATEA_TEST_ARM") == "1", f"spec_arming_flag_{cid}", bad)
+    need("gateATestCellFromName" in init_c, "src_fault_name_lookup", bad)
+
     # the two expected fatals must exist at the cited sites
     need('"x-bump-unterminal", LORIE_GATEA_FAIL_GENERATION' in cmdentry,
          "src_fatal_x_bump_unterminal", bad)

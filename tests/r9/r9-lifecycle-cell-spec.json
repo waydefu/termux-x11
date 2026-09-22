@@ -7,14 +7,17 @@
   "design_acceptance": [
     "V2-R9-DESIGN (planning-v2/r9-design/)",
     "V2-R9-FIXTURE construction proofs (planning-v2/r9-fixture/)",
-    "D-01 ACCEPTED (-noreset)", "D-02 ACCEPTED+IMPLEMENTED", "D-12 ACCEPTED"
+    "D-01 ACCEPTED (-noreset)",
+    "D-02 ACCEPTED+IMPLEMENTED",
+    "D-12 ACCEPTED"
   ],
   "runtime_authorization": "NOT GRANTED. This spec is frozen; no attempt is authorized by its existence.",
-
   "policy": {
     "attempts_per_cell": 1,
     "fresh_x_per_cell": true,
-    "x_launch_flags": ["-noreset"],
+    "x_launch_flags": [
+      "-noreset"
+    ],
     "x_launch_flags_rationale": "D-01. Without -noreset the last X client disconnecting raises DE_RESET, which runs the clean close, zeroes sessionNonce and permanently disables Gate A with no fatal and no log line (Q10). Every negative observation would be unattributable.",
     "fail_fast": true,
     "stable_package": "com.termux.x11",
@@ -26,16 +29,22 @@
     "null_means": "NOT OBSERVED. Never inferred, never defaulted.",
     "frozen_attempt_policy": "Frozen attempts are never reclassified or rerun. An INVALID attempt consumes its number; the next attempt takes the next number."
   },
-
   "identity_contract": "planning-v2/r9-design/r9-identity-contract.json",
-  "cell_order": ["R9-COLD-2", "R9-F1", "R9-F2"],
-
+  "cell_order": [
+    "R9-COLD-2",
+    "R9-F1",
+    "R9-F2"
+  ],
   "cells": [
     {
       "id": "R9-COLD-2",
-      "name": "cold restart with a non-terminal old registry — containment halt",
+      "name": "cold restart with a non-terminal old registry \u2014 containment halt",
       "kind": "cold-containment",
-      "grounds": ["Q2-F1", "Q3", "Q11"],
+      "grounds": [
+        "Q2-F1",
+        "Q3",
+        "Q11"
+      ],
       "test_fault": 8,
       "test_fault_name": "LORIE_GATEA_TEST_RENDERER_FATAL_PRE_FENCE",
       "construction": [
@@ -59,7 +68,12 @@
         "any_clean_generation_close_before_the_bump",
         "treating_the_halt_as_a_failure"
       ],
-      "fatal": {"what": "x-bump-unterminal", "reason": 6, "reason_name": "LORIE_GATEA_FAIL_GENERATION", "site": "cmdentrypoint.cpp:389-393"},
+      "fatal": {
+        "what": "x-bump-unterminal",
+        "reason": 6,
+        "reason_name": "LORIE_GATEA_FAIL_GENERATION",
+        "site": "cmdentrypoint.cpp:389-393"
+      },
       "attempts": 1,
       "pass_requires": "the EXACT expected fatal fired AND the new generation was NOT opened",
       "invalid": [
@@ -67,13 +81,23 @@
         "the registry was terminal at the bump -> INVALID_CONSTRUCTION, the lease did not persist"
       ],
       "fail": "the bump SUCCEEDED over a non-terminal registry",
-      "next": "R9-F1"
+      "next": "R9-F1",
+      "test_fault_env_name": "renderer-fatal-pre-fence",
+      "arming": {
+        "TERMUX_X11_GATEA_TEST_FAULT": "renderer-fatal-pre-fence",
+        "TERMUX_X11_GATEA_TEST_ARM": "1",
+        "note": "The env var takes the NAME, not the number: lorieGateATestFaultPublishFromEnv calls gateATestCellFromName (InitOutput.c), which looks the string up in gateATestCellNames and returns 0 for anything unknown. A numeric value would resolve to 0 and the X server would fatal-halt with x-test-fault-env before the cell ever ran."
+      }
     },
     {
       "id": "R9-F1",
-      "name": "stale-ready replay — expected containment fatal",
+      "name": "stale-ready replay \u2014 expected containment fatal",
       "kind": "stale-replay-containment",
-      "grounds": ["V-11", "Q5", "Q6"],
+      "grounds": [
+        "V-11",
+        "Q5",
+        "Q6"
+      ],
       "test_fault": 16,
       "test_fault_name": "LORIE_GATEA_TEST_STALE_READY_REPLAY",
       "construction": [
@@ -90,10 +114,15 @@
         "current_generation_state_not_polluted"
       ],
       "forbid": [
-        "concluding PASS from absence of harm — the EXACT expected fatal is required (§8.8)",
+        "concluding PASS from absence of harm \u2014 the EXACT expected fatal is required (\u00a78.8)",
         "designing this as a defence: Q5 proved a stale READY cannot be CONSUMED by a new generation; F1 proves the frame-path HALT"
       ],
-      "fatal": {"what": "x-wrong-generation", "reason": 6, "reason_name": "LORIE_GATEA_FAIL_GENERATION", "site": "cmdentrypoint.cpp:640-642"},
+      "fatal": {
+        "what": "x-wrong-generation",
+        "reason": 6,
+        "reason_name": "LORIE_GATEA_FAIL_GENERATION",
+        "site": "cmdentrypoint.cpp:640-642"
+      },
       "attempts": 1,
       "pass_requires": "the EXACT expected fatal fired",
       "invalid": [
@@ -101,15 +130,23 @@
         "gateAValidateImport was never reached (no register) -> INVALID_CONSTRUCTION"
       ],
       "fail": "the stale frame was ACCEPTED, or a different fatal fired",
-      "next": "R9-F2"
+      "next": "R9-F2",
+      "test_fault_env_name": "stale-ready-replay",
+      "arming": {
+        "TERMUX_X11_GATEA_TEST_FAULT": "stale-ready-replay",
+        "TERMUX_X11_GATEA_TEST_ARM": "1",
+        "note": "The env var takes the NAME, not the number: lorieGateATestFaultPublishFromEnv calls gateATestCellFromName (InitOutput.c), which looks the string up in gateATestCellNames and returns 0 for anything unknown. A numeric value would resolve to 0 and the X server would fatal-halt with x-test-fault-env before the cell ever ran."
+      }
     },
     {
       "id": "R9-F2",
       "name": "fresh session recovery after F1's fatal",
       "kind": "fresh-recovery",
-      "grounds": ["Q11"],
+      "grounds": [
+        "Q11"
+      ],
       "test_fault": null,
-      "precondition": "R9-F1 PASS with its expected fatal. §8.8: if that fatal does not exist, F2 is BLOCKED, and manufacturing another fatal to satisfy the precondition is FORBIDDEN.",
+      "precondition": "R9-F1 PASS with its expected fatal. \u00a78.8: if that fatal does not exist, F2 is BLOCKED, and manufacturing another fatal to satisfy the precondition is FORBIDDEN.",
       "construction": [
         "start a genuinely fresh session: a new X process and a new Activity process",
         "drive one clean direct exact composite"
@@ -123,18 +160,19 @@
       ],
       "forbid": [
         "manufacturing another fatal to satisfy the precondition",
-        "judging residue against an unwindowed logcat capture — the obs sink survives process death and `logcat -c` is a redline (Q11-F2); logcat-since.txt must be recorded",
+        "judging residue against an unwindowed logcat capture \u2014 the obs sink survives process death and `logcat -c` is a redline (Q11-F2); logcat-since.txt must be recorded",
         "inferring the Activity died from socket closure alone (Q11-F1); (PID, starttime) is required"
       ],
       "fatal": null,
       "attempts": 1,
       "pass_requires": "new nonce AND empty registry AND a clean direct SUCCESS with event=5 in the ring",
-      "invalid": ["F1's expected fatal absent -> BLOCKED, not INVALID"],
+      "invalid": [
+        "F1's expected fatal absent -> BLOCKED, not INVALID"
+      ],
       "fail": "stale residue present, or no direct success",
       "next": "R9-AGG"
     }
   ],
-
   "removed_cells": {
     "note": "SOURCE_PROVEN_RUNTIME_NOT_CONSTRUCTIBLE. Not PASS, not FAIL, not INVALID, not runtime-qualified. Each names the condition that reopens it.",
     "R9-WARM-1": "no product entry point for same-Activity warm reconnect; reopen if one is added",
@@ -144,6 +182,6 @@
     "R9-COLD-3": "inherits R9-COLD-1",
     "V2-R9-RESET": "does not exist (Q10 / D-01)"
   },
-
-  "product_level_finding": "GATE A HAS NO REACHABLE CLEAN SAME-PROCESS GENERATION BOUNDARY. A clean close zeroes sessionNonce and is terminal (Q10); the bump path is correctly built but reaching it needs either a warm reconnect entry point that does not exist, or an Activity death, which fatals X unless generationFatal is ALREADY set. Every generation boundary in a surviving X therefore requires a prior fatal — which is why all three surviving cells are fatal-path cells. Belongs to D-06; recorded, not decided."
+  "product_level_finding": "GATE A HAS NO REACHABLE CLEAN SAME-PROCESS GENERATION BOUNDARY. A clean close zeroes sessionNonce and is terminal (Q10); the bump path is correctly built but reaching it needs either a warm reconnect entry point that does not exist, or an Activity death, which fatals X unless generationFatal is ALREADY set. Every generation boundary in a surviving X therefore requires a prior fatal \u2014 which is why all three surviving cells are fatal-path cells. Belongs to D-06; recorded, not decided.",
+  "arming_contract": "TERMUX_X11_GATEA_TEST_FAULT is a NAME. It also requires TERMUX_X11_GATEA_TEST_ARM=1, Gate A proto enabled and telemetry requested; any other combination fatal-halts with x-test-fault-env."
 }
