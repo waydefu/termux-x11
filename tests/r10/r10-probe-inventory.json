@@ -1,0 +1,326 @@
+{
+  "schema_version": 1,
+  "status": "R10_PROBE_INVENTORY_FROZEN_V1",
+  "frozen": "2026-09-22",
+  "product_sha": "dc94485a7ef4f74cada36ea3c1d35d0aa0f48693",
+  "apk_sha256": "1bd8bef0909249737ea43acf0a35f3c995d941e1badbfcf370e5cd854f4bb8a3",
+  "measured_by": "evidence/session/gate-a-a1/p2-r10-probe/probe-01/",
+  "design": "evidence/session/gate-a-a1/planning-v2/r10-design/V2-R10-DESIGN.md",
+  "sampler": "tests/r10/r10_sample.py",
+  "null_rule": "not observable -> null. Writing 0 for an unobserved metric is permanently forbidden (plan v2.3 §9.5): 0 is a measurement meaning 'measured, value zero', and using it for 'not measured' dilutes a leak into no-leak.",
+  "status_values": {
+    "observable": "read directly, every sampling point where the subject exists",
+    "observable_at_dump_only": "exists only in a GATEA_SUMMARY, which lorieGateADumpSummary writes on a fatal, a clean close or a terminate. null at every other point, and that is a product fact, not a capture miss.",
+    "derived": "computed from the live gatea-telemetry event stream, which is unconditional. Used at non-dump points.",
+    "unavailable": "no instrumentation exists in this product. Frozen null so the gap stays visible rather than being dropped from the list."
+  },
+  "metrics": [
+    {
+      "metric": "x.fd_count",
+      "domain": "x",
+      "status": "observable",
+      "how": "len(/proc/<x_pid>/fd)",
+      "note": "exactly constant at 88 across 7 probe samples"
+    },
+    {
+      "metric": "x.fd_table_size",
+      "domain": "x",
+      "status": "observable",
+      "how": "/proc/<x_pid>/status FDSize",
+      "note": ""
+    },
+    {
+      "metric": "x.maps_count",
+      "domain": "x",
+      "status": "observable",
+      "how": "wc -l /proc/<x_pid>/maps",
+      "note": "one +3 step on first GPU work, then flat"
+    },
+    {
+      "metric": "x.threads",
+      "domain": "x",
+      "status": "observable",
+      "how": "/proc/<x_pid>/status Threads",
+      "note": ""
+    },
+    {
+      "metric": "x.rss_kb",
+      "domain": "x",
+      "status": "observable",
+      "how": "/proc/<x_pid>/status VmRSS",
+      "note": ""
+    },
+    {
+      "metric": "x.vm_size_kb",
+      "domain": "x",
+      "status": "observable",
+      "how": "/proc/<x_pid>/status VmSize",
+      "note": ""
+    },
+    {
+      "metric": "x.pss_kb",
+      "domain": "x",
+      "status": "observable",
+      "how": "/proc/<x_pid>/smaps_rollup Pss",
+      "note": ""
+    },
+    {
+      "metric": "x.pss_anon_kb",
+      "domain": "x",
+      "status": "observable",
+      "how": "/proc/<x_pid>/smaps_rollup Pss_Anon",
+      "note": ""
+    },
+    {
+      "metric": "x.pss_shmem_kb",
+      "domain": "x",
+      "status": "observable",
+      "how": "/proc/<x_pid>/smaps_rollup Pss_Shmem",
+      "note": ""
+    },
+    {
+      "metric": "activity.fd_count",
+      "domain": "activity",
+      "status": "observable",
+      "how": "adb shell run-as <pkg> ls /proc/<pid>/fd | wc -l",
+      "note": "plain adb shell is Permission denied. NEVER use a shell redirect with run-as: 'run-as p wc -l < /proc/X/maps' is evaluated by the outer shell and silently returns empty."
+    },
+    {
+      "metric": "activity.maps_count",
+      "domain": "activity",
+      "status": "observable",
+      "how": "adb shell run-as <pkg> wc -l /proc/<pid>/maps",
+      "note": "plain adb shell returns empty"
+    },
+    {
+      "metric": "activity.pss_kb",
+      "domain": "activity",
+      "status": "observable",
+      "how": "adb shell run-as <pkg> cat /proc/<pid>/smaps_rollup",
+      "note": "plain adb shell returns empty"
+    },
+    {
+      "metric": "activity.fd_table_size",
+      "domain": "activity",
+      "status": "observable",
+      "how": "adb shell /proc/<pid>/status FDSize",
+      "note": ""
+    },
+    {
+      "metric": "activity.threads",
+      "domain": "activity",
+      "status": "observable",
+      "how": "adb shell /proc/<pid>/status Threads",
+      "note": ""
+    },
+    {
+      "metric": "activity.rss_kb",
+      "domain": "activity",
+      "status": "observable",
+      "how": "adb shell /proc/<pid>/status VmRSS",
+      "note": ""
+    },
+    {
+      "metric": "activity.vm_size_kb",
+      "domain": "activity",
+      "status": "observable",
+      "how": "adb shell /proc/<pid>/status VmSize",
+      "note": ""
+    },
+    {
+      "metric": "activity.native_heap_pss_kb",
+      "domain": "activity",
+      "status": "observable",
+      "how": "adb shell dumpsys meminfo <pkg>, row 'Native Heap'",
+      "note": ""
+    },
+    {
+      "metric": "activity.gfx_dev_pss_kb",
+      "domain": "activity",
+      "status": "observable",
+      "how": "dumpsys meminfo row 'Gfx dev'",
+      "note": "rose +8 KB per probe iteration then was fully reclaimed"
+    },
+    {
+      "metric": "activity.egl_mtrack_pss_kb",
+      "domain": "activity",
+      "status": "observable",
+      "how": "dumpsys meminfo row 'EGL mtrack'",
+      "note": "HIGH VARIANCE: swung 10408 -> 45312 -> 39536 -> 10424 with the workload unchanged. Dominated by the display swapchain, not by Gate A imports. Unusable without the noise run's band."
+    },
+    {
+      "metric": "activity.gl_mtrack_pss_kb",
+      "domain": "activity",
+      "status": "observable",
+      "how": "dumpsys meminfo row 'GL mtrack'",
+      "note": ""
+    },
+    {
+      "metric": "gatea.c_ahb_acquire",
+      "domain": "gatea",
+      "status": "observable_at_dump_only",
+      "how": "GATEA_SUMMARY c12",
+      "note": "probe-01 clean close: 16, balanced against c13"
+    },
+    {
+      "metric": "gatea.c_ahb_release",
+      "domain": "gatea",
+      "status": "observable_at_dump_only",
+      "how": "GATEA_SUMMARY c13",
+      "note": "16"
+    },
+    {
+      "metric": "gatea.c_eglimage_create",
+      "domain": "gatea",
+      "status": "observable_at_dump_only",
+      "how": "GATEA_SUMMARY c14",
+      "note": "16"
+    },
+    {
+      "metric": "gatea.c_eglimage_destroy",
+      "domain": "gatea",
+      "status": "observable_at_dump_only",
+      "how": "GATEA_SUMMARY c15",
+      "note": "16"
+    },
+    {
+      "metric": "gatea.c_texture_create",
+      "domain": "gatea",
+      "status": "observable_at_dump_only",
+      "how": "GATEA_SUMMARY c16",
+      "note": "16"
+    },
+    {
+      "metric": "gatea.c_texture_delete",
+      "domain": "gatea",
+      "status": "observable_at_dump_only",
+      "how": "GATEA_SUMMARY c17",
+      "note": "16"
+    },
+    {
+      "metric": "gatea.c_x_registry_current",
+      "domain": "gatea",
+      "status": "observable_at_dump_only",
+      "how": "GATEA_SUMMARY c18",
+      "note": "NOT c25. c25 is UNREGISTER. The wrong index was live tooling until commit b68770f and would have reported 16 leaked entries on this clean close."
+    },
+    {
+      "metric": "gatea.c_renderer_registry_current",
+      "domain": "gatea",
+      "status": "observable_at_dump_only",
+      "how": "GATEA_SUMMARY c19",
+      "note": "NOT c26 (RESOURCE_DESTROY)"
+    },
+    {
+      "metric": "gatea.c_lease_current",
+      "domain": "gatea",
+      "status": "observable_at_dump_only",
+      "how": "GATEA_SUMMARY c20",
+      "note": "0 at the probe clean close"
+    },
+    {
+      "metric": "gatea.c_generation_fatal",
+      "domain": "gatea",
+      "status": "observable_at_dump_only",
+      "how": "GATEA_SUMMARY c24",
+      "note": ""
+    },
+    {
+      "metric": "gatea.c_unregister",
+      "domain": "gatea",
+      "status": "observable_at_dump_only",
+      "how": "GATEA_SUMMARY c25",
+      "note": ""
+    },
+    {
+      "metric": "gatea.c_resource_destroy",
+      "domain": "gatea",
+      "status": "observable_at_dump_only",
+      "how": "GATEA_SUMMARY c26",
+      "note": ""
+    },
+    {
+      "metric": "gatea.c_generation_close",
+      "domain": "gatea",
+      "status": "observable_at_dump_only",
+      "how": "GATEA_SUMMARY c27",
+      "note": "1 at a clean close"
+    },
+    {
+      "metric": "gatea.session_nonce",
+      "domain": "gatea",
+      "status": "observable_at_dump_only",
+      "how": "GATEA_SUMMARY nonce=",
+      "note": "0 after a clean close: it zeroes both halves"
+    },
+    {
+      "metric": "gatea.generation",
+      "domain": "gatea",
+      "status": "observable_at_dump_only",
+      "how": "GATEA_SUMMARY generation=",
+      "note": "0 after a clean close"
+    },
+    {
+      "metric": "derived.x_registry_current",
+      "domain": "gatea",
+      "status": "derived",
+      "how": "REGISTER_READY(event 1, role 1) minus UNREGISTER_ACK(event 25, role 1), per buffer id",
+      "note": "the only way to read registry occupancy at a non-dump point"
+    },
+    {
+      "metric": "derived.renderer_registry_current",
+      "domain": "gatea",
+      "status": "derived",
+      "how": "same with role 2",
+      "note": ""
+    },
+    {
+      "metric": "derived.lease_current",
+      "domain": "gatea",
+      "status": "derived",
+      "how": "LEASE_RESERVED(event 2) minus LEASE_RELEASE(event 23), role 1",
+      "note": ""
+    },
+    {
+      "metric": "ahb_lock_in_fence_fd_count",
+      "domain": "gatea",
+      "status": "unavailable",
+      "how": "-",
+      "note": "plan v2.3 §9.4 added this from V-5. No trace site and no counter exists in dc94485. Adding one is a product change (D-12 class); R10 does not make it."
+    },
+    {
+      "metric": "ahb_unlock_out_fence_fd_count",
+      "domain": "gatea",
+      "status": "unavailable",
+      "how": "-",
+      "note": "same"
+    },
+    {
+      "metric": "ahb_fence_fd_leaked",
+      "domain": "gatea",
+      "status": "unavailable",
+      "how": "-",
+      "note": "derived from the two above; cannot be computed"
+    },
+    {
+      "metric": "gatea.* at a non-dump point",
+      "domain": "gatea",
+      "status": "unavailable",
+      "how": "-",
+      "note": "AHB / EGLImage / texture are counter-only; no event is traced for them, so they cannot be derived between dumps"
+    },
+    {
+      "metric": "x.* at a post-X sampling point",
+      "domain": "x",
+      "status": "unavailable",
+      "how": "-",
+      "note": "the X process is gone. Structurally absent, not unmeasured."
+    }
+  ],
+  "probe_findings_that_shape_the_design": [
+    "A 64x64 pair is ~32 KB, two to three orders of magnitude below every Activity-side memory metric's noise band. The R10 workload is 4 x 1024x1024 pairs for this reason (V2-R10-DESIGN §4).",
+    "X-side metrics are quiet enough to be used directly; Activity-side metrics are not, and require V2-R10-NOISE before they can be judged (§6).",
+    "An apparent monotonic rise over five samples (activity.fd_count +1/iteration, gfx_dev +8 KB/iteration) was fully reclaimed at the sixth. A leak verdict from fewer than the full series would have been wrong.",
+    "The Activity SURVIVES a clean close (X gone, pid 24987 still running), which is what makes R10-B a real mode rather than a hypothetical one."
+  ]
+}
