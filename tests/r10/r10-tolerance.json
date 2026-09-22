@@ -1,0 +1,1075 @@
+{
+  "schema_version": 1,
+  "status": "R10_TOLERANCE_FROZEN_V1",
+  "derived_from": "/root/projects/GPU\u52a0\u901f/evidence/session/gate-a-a1/p2-r10-runtime/runtime-dc94485/noise-01/ledger.json",
+  "noise_ledger_sha256": "eac328b5d43c6d8581c0740d162b12ca8f4e55f28f1eb56004a4abdd026a2172",
+  "source_sha": "dc94485a7ef4f74cada36ea3c1d35d0aa0f48693",
+  "apk_sha256": "1bd8bef0909249737ea43acf0a35f3c995d941e1badbfcf370e5cd854f4bb8a3",
+  "rule": "2 x max|delta between consecutive same-tag samples|, floored at 1 for counts and 512 for *_kb",
+  "counters_note": "Gate A counters get NO tolerance: they are counts of protocol events and are judged exactly (design \u00a78 class 1).",
+  "tolerance": {
+    "activity.egl_mtrack_pss_kb": 512,
+    "activity.fd_count": 8,
+    "activity.fd_table_size": 1,
+    "activity.gfx_dev_pss_kb": 512,
+    "activity.gl_mtrack_pss_kb": 512,
+    "activity.maps_count": 2,
+    "activity.native_heap_pss_kb": 1992,
+    "activity.pss_kb": 21098,
+    "activity.rss_kb": 24480,
+    "activity.threads": 1,
+    "activity.vm_size_kb": 512,
+    "x.fd_count": 1,
+    "x.fd_table_size": 1,
+    "x.maps_count": 16,
+    "x.pss_anon_kb": 17512,
+    "x.pss_kb": 17114,
+    "x.pss_shmem_kb": 512,
+    "x.rss_kb": 17192,
+    "x.threads": 2,
+    "x.vm_size_kb": 744960
+  },
+  "detail": {
+    "x.fd_count": [
+      {
+        "key": "x.fd_count@A1",
+        "values": [
+          89,
+          89,
+          89,
+          89,
+          89
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "x.fd_count@A2",
+        "values": [
+          89,
+          89,
+          89,
+          89,
+          89
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "x.fd_count@B0",
+        "values": [
+          88,
+          88,
+          88,
+          88,
+          88
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "x.fd_count@B1",
+        "values": [
+          88,
+          88,
+          88,
+          88,
+          88
+        ],
+        "max_delta": 0
+      }
+    ],
+    "x.fd_table_size": [
+      {
+        "key": "x.fd_table_size@A1",
+        "values": [
+          512,
+          512,
+          512,
+          512,
+          512
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "x.fd_table_size@A2",
+        "values": [
+          512,
+          512,
+          512,
+          512,
+          512
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "x.fd_table_size@B0",
+        "values": [
+          512,
+          512,
+          512,
+          512,
+          512
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "x.fd_table_size@B1",
+        "values": [
+          512,
+          512,
+          512,
+          512,
+          512
+        ],
+        "max_delta": 0
+      }
+    ],
+    "x.maps_count": [
+      {
+        "key": "x.maps_count@A1",
+        "values": [
+          3026,
+          3019,
+          3011,
+          3007,
+          3003
+        ],
+        "max_delta": 8
+      },
+      {
+        "key": "x.maps_count@A2",
+        "values": [
+          3026,
+          3019,
+          3011,
+          3007,
+          3003
+        ],
+        "max_delta": 8
+      },
+      {
+        "key": "x.maps_count@B0",
+        "values": [
+          3026,
+          3019,
+          3011,
+          3007,
+          3003
+        ],
+        "max_delta": 8
+      },
+      {
+        "key": "x.maps_count@B1",
+        "values": [
+          3029,
+          3022,
+          3014,
+          3010,
+          3006
+        ],
+        "max_delta": 8
+      }
+    ],
+    "x.threads": [
+      {
+        "key": "x.threads@A1",
+        "values": [
+          14,
+          14,
+          13,
+          13,
+          13
+        ],
+        "max_delta": 1
+      },
+      {
+        "key": "x.threads@A2",
+        "values": [
+          14,
+          14,
+          13,
+          13,
+          13
+        ],
+        "max_delta": 1
+      },
+      {
+        "key": "x.threads@B0",
+        "values": [
+          14,
+          14,
+          13,
+          13,
+          13
+        ],
+        "max_delta": 1
+      },
+      {
+        "key": "x.threads@B1",
+        "values": [
+          14,
+          14,
+          13,
+          13,
+          13
+        ],
+        "max_delta": 1
+      }
+    ],
+    "x.rss_kb": [
+      {
+        "key": "x.rss_kb@A1",
+        "values": [
+          222912,
+          227340,
+          228584,
+          228368,
+          227188
+        ],
+        "max_delta": 4428
+      },
+      {
+        "key": "x.rss_kb@A2",
+        "values": [
+          222656,
+          227340,
+          228584,
+          228368,
+          227188
+        ],
+        "max_delta": 4684
+      },
+      {
+        "key": "x.rss_kb@B0",
+        "values": [
+          223040,
+          227212,
+          228584,
+          228368,
+          227188
+        ],
+        "max_delta": 4172
+      },
+      {
+        "key": "x.rss_kb@B1",
+        "values": [
+          218116,
+          226712,
+          222168,
+          222064,
+          223244
+        ],
+        "max_delta": 8596
+      }
+    ],
+    "x.vm_size_kb": [
+      {
+        "key": "x.vm_size_kb@A1",
+        "values": [
+          16609152,
+          16689024,
+          16900928,
+          16528448,
+          16278336
+        ],
+        "max_delta": 372480
+      },
+      {
+        "key": "x.vm_size_kb@A2",
+        "values": [
+          16609152,
+          16689024,
+          16900928,
+          16528448,
+          16278336
+        ],
+        "max_delta": 372480
+      },
+      {
+        "key": "x.vm_size_kb@B0",
+        "values": [
+          16609152,
+          16689024,
+          16900928,
+          16528448,
+          16278336
+        ],
+        "max_delta": 372480
+      },
+      {
+        "key": "x.vm_size_kb@B1",
+        "values": [
+          16609464,
+          16689336,
+          16901240,
+          16528760,
+          16278648
+        ],
+        "max_delta": 372480
+      }
+    ],
+    "x.pss_kb": [
+      {
+        "key": "x.pss_kb@A1",
+        "values": [
+          85406,
+          89534,
+          90958,
+          90657,
+          89407
+        ],
+        "max_delta": 4128
+      },
+      {
+        "key": "x.pss_kb@A2",
+        "values": [
+          84957,
+          89534,
+          90958,
+          90657,
+          89407
+        ],
+        "max_delta": 4577
+      },
+      {
+        "key": "x.pss_kb@B0",
+        "values": [
+          85486,
+          89470,
+          90958,
+          90657,
+          89343
+        ],
+        "max_delta": 3984
+      },
+      {
+        "key": "x.pss_kb@B1",
+        "values": [
+          80417,
+          88974,
+          84554,
+          84253,
+          85407
+        ],
+        "max_delta": 8557
+      }
+    ],
+    "x.pss_anon_kb": [
+      {
+        "key": "x.pss_anon_kb@A1",
+        "values": [
+          40864,
+          45640,
+          46936,
+          46540,
+          45152
+        ],
+        "max_delta": 4776
+      },
+      {
+        "key": "x.pss_anon_kb@A2",
+        "values": [
+          40864,
+          45640,
+          46936,
+          46540,
+          45152
+        ],
+        "max_delta": 4776
+      },
+      {
+        "key": "x.pss_anon_kb@B0",
+        "values": [
+          40848,
+          45576,
+          46936,
+          46540,
+          45088
+        ],
+        "max_delta": 4728
+      },
+      {
+        "key": "x.pss_anon_kb@B1",
+        "values": [
+          36324,
+          45080,
+          40532,
+          40136,
+          41152
+        ],
+        "max_delta": 8756
+      }
+    ],
+    "x.pss_shmem_kb": [
+      {
+        "key": "x.pss_shmem_kb@A1",
+        "values": [
+          7151,
+          7155,
+          7147,
+          7147,
+          7148
+        ],
+        "max_delta": 8
+      },
+      {
+        "key": "x.pss_shmem_kb@A2",
+        "values": [
+          7151,
+          7155,
+          7147,
+          7147,
+          7148
+        ],
+        "max_delta": 8
+      },
+      {
+        "key": "x.pss_shmem_kb@B0",
+        "values": [
+          7151,
+          7155,
+          7147,
+          7147,
+          7148
+        ],
+        "max_delta": 8
+      },
+      {
+        "key": "x.pss_shmem_kb@B1",
+        "values": [
+          7151,
+          7155,
+          7147,
+          7147,
+          7148
+        ],
+        "max_delta": 8
+      }
+    ],
+    "activity.fd_count": [
+      {
+        "key": "activity.fd_count@A1",
+        "values": [
+          226,
+          223,
+          223,
+          224,
+          226
+        ],
+        "max_delta": 3
+      },
+      {
+        "key": "activity.fd_count@A2",
+        "values": [
+          226,
+          223,
+          223,
+          224,
+          226
+        ],
+        "max_delta": 3
+      },
+      {
+        "key": "activity.fd_count@B0",
+        "values": [
+          227,
+          223,
+          223,
+          224,
+          226
+        ],
+        "max_delta": 4
+      },
+      {
+        "key": "activity.fd_count@B1",
+        "values": [
+          226,
+          223,
+          223,
+          224,
+          226
+        ],
+        "max_delta": 3
+      },
+      {
+        "key": "activity.fd_count@B3",
+        "values": [
+          214,
+          213,
+          214,
+          215,
+          216
+        ],
+        "max_delta": 1
+      }
+    ],
+    "activity.maps_count": [
+      {
+        "key": "activity.maps_count@A1",
+        "values": [
+          4053,
+          4053,
+          4053,
+          4053,
+          4053
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "activity.maps_count@A2",
+        "values": [
+          4053,
+          4053,
+          4053,
+          4053,
+          4053
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "activity.maps_count@B0",
+        "values": [
+          4053,
+          4053,
+          4053,
+          4053,
+          4053
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "activity.maps_count@B1",
+        "values": [
+          4053,
+          4053,
+          4053,
+          4053,
+          4053
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "activity.maps_count@B3",
+        "values": [
+          4058,
+          4057,
+          4058,
+          4058,
+          4057
+        ],
+        "max_delta": 1
+      }
+    ],
+    "activity.pss_kb": [
+      {
+        "key": "activity.pss_kb@A1",
+        "values": [
+          37555,
+          37647,
+          37770,
+          37832,
+          37898
+        ],
+        "max_delta": 123
+      },
+      {
+        "key": "activity.pss_kb@A2",
+        "values": [
+          37622,
+          37619,
+          37742,
+          37900,
+          37902
+        ],
+        "max_delta": 158
+      },
+      {
+        "key": "activity.pss_kb@B0",
+        "values": [
+          27226,
+          37775,
+          37894,
+          37992,
+          38054
+        ],
+        "max_delta": 10549
+      },
+      {
+        "key": "activity.pss_kb@B1",
+        "values": [
+          37558,
+          37615,
+          37806,
+          37836,
+          37962
+        ],
+        "max_delta": 191
+      },
+      {
+        "key": "activity.pss_kb@B3",
+        "values": [
+          38164,
+          38247,
+          38358,
+          38438,
+          38488
+        ],
+        "max_delta": 111
+      }
+    ],
+    "activity.fd_table_size": [
+      {
+        "key": "activity.fd_table_size@A1",
+        "values": [
+          512,
+          512,
+          512,
+          512,
+          512
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "activity.fd_table_size@A2",
+        "values": [
+          512,
+          512,
+          512,
+          512,
+          512
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "activity.fd_table_size@B0",
+        "values": [
+          512,
+          512,
+          512,
+          512,
+          512
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "activity.fd_table_size@B1",
+        "values": [
+          512,
+          512,
+          512,
+          512,
+          512
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "activity.fd_table_size@B3",
+        "values": [
+          512,
+          512,
+          512,
+          512,
+          512
+        ],
+        "max_delta": 0
+      }
+    ],
+    "activity.threads": [
+      {
+        "key": "activity.threads@A1",
+        "values": [
+          35,
+          35,
+          35,
+          35,
+          35
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "activity.threads@A2",
+        "values": [
+          35,
+          35,
+          35,
+          35,
+          35
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "activity.threads@B0",
+        "values": [
+          35,
+          35,
+          35,
+          35,
+          35
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "activity.threads@B1",
+        "values": [
+          35,
+          35,
+          35,
+          35,
+          35
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "activity.threads@B3",
+        "values": [
+          36,
+          36,
+          36,
+          36,
+          36
+        ],
+        "max_delta": 0
+      }
+    ],
+    "activity.rss_kb": [
+      {
+        "key": "activity.rss_kb@A1",
+        "values": [
+          183516,
+          184204,
+          184192,
+          184172,
+          184404
+        ],
+        "max_delta": 688
+      },
+      {
+        "key": "activity.rss_kb@A2",
+        "values": [
+          183580,
+          184188,
+          184208,
+          184304,
+          184420
+        ],
+        "max_delta": 608
+      },
+      {
+        "key": "activity.rss_kb@B0",
+        "values": [
+          171864,
+          184104,
+          184272,
+          184264,
+          184512
+        ],
+        "max_delta": 12240
+      },
+      {
+        "key": "activity.rss_kb@B1",
+        "values": [
+          183604,
+          184132,
+          184264,
+          184212,
+          184444
+        ],
+        "max_delta": 528
+      },
+      {
+        "key": "activity.rss_kb@B3",
+        "values": [
+          184096,
+          184196,
+          184528,
+          184480,
+          184576
+        ],
+        "max_delta": 332
+      }
+    ],
+    "activity.vm_size_kb": [
+      {
+        "key": "activity.vm_size_kb@A1",
+        "values": [
+          17958860,
+          17958860,
+          17958860,
+          17958860,
+          17958860
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "activity.vm_size_kb@A2",
+        "values": [
+          17958860,
+          17958860,
+          17958860,
+          17958860,
+          17958860
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "activity.vm_size_kb@B0",
+        "values": [
+          17958860,
+          17958860,
+          17958860,
+          17958860,
+          17958860
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "activity.vm_size_kb@B1",
+        "values": [
+          17958860,
+          17958860,
+          17958860,
+          17958860,
+          17958860
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "activity.vm_size_kb@B3",
+        "values": [
+          17972328,
+          17972328,
+          17972328,
+          17972328,
+          17972328
+        ],
+        "max_delta": 0
+      }
+    ],
+    "activity.native_heap_pss_kb": [
+      {
+        "key": "activity.native_heap_pss_kb@A1",
+        "values": [
+          8168,
+          8284,
+          8380,
+          8456,
+          8496
+        ],
+        "max_delta": 116
+      },
+      {
+        "key": "activity.native_heap_pss_kb@A2",
+        "values": [
+          8168,
+          8284,
+          8380,
+          8456,
+          8496
+        ],
+        "max_delta": 116
+      },
+      {
+        "key": "activity.native_heap_pss_kb@B0",
+        "values": [
+          7288,
+          8284,
+          8380,
+          8456,
+          8496
+        ],
+        "max_delta": 996
+      },
+      {
+        "key": "activity.native_heap_pss_kb@B1",
+        "values": [
+          8168,
+          8284,
+          8380,
+          8456,
+          8496
+        ],
+        "max_delta": 116
+      },
+      {
+        "key": "activity.native_heap_pss_kb@B3",
+        "values": [
+          8208,
+          8324,
+          8404,
+          8468,
+          8508
+        ],
+        "max_delta": 116
+      }
+    ],
+    "activity.gfx_dev_pss_kb": [
+      {
+        "key": "activity.gfx_dev_pss_kb@A1",
+        "values": [
+          1780,
+          1800,
+          1812,
+          1824,
+          1836
+        ],
+        "max_delta": 20
+      },
+      {
+        "key": "activity.gfx_dev_pss_kb@A2",
+        "values": [
+          1780,
+          1800,
+          1812,
+          1824,
+          1836
+        ],
+        "max_delta": 20
+      },
+      {
+        "key": "activity.gfx_dev_pss_kb@B0",
+        "values": [
+          1780,
+          1800,
+          1812,
+          1824,
+          1836
+        ],
+        "max_delta": 20
+      },
+      {
+        "key": "activity.gfx_dev_pss_kb@B1",
+        "values": [
+          1780,
+          1800,
+          1812,
+          1824,
+          1836
+        ],
+        "max_delta": 20
+      },
+      {
+        "key": "activity.gfx_dev_pss_kb@B3",
+        "values": [
+          1780,
+          1800,
+          1812,
+          1824,
+          1836
+        ],
+        "max_delta": 20
+      }
+    ],
+    "activity.egl_mtrack_pss_kb": [
+      {
+        "key": "activity.egl_mtrack_pss_kb@A1",
+        "values": [
+          45412,
+          45412,
+          45412,
+          45412,
+          45412
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "activity.egl_mtrack_pss_kb@A2",
+        "values": [
+          45412,
+          45412,
+          45412,
+          45412,
+          45412
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "activity.egl_mtrack_pss_kb@B0",
+        "values": [
+          45412,
+          45412,
+          45412,
+          45412,
+          45412
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "activity.egl_mtrack_pss_kb@B1",
+        "values": [
+          45412,
+          45412,
+          45412,
+          45412,
+          45412
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "activity.egl_mtrack_pss_kb@B3",
+        "values": [
+          28084,
+          28084,
+          28084,
+          28084,
+          28084
+        ],
+        "max_delta": 0
+      }
+    ],
+    "activity.gl_mtrack_pss_kb": [
+      {
+        "key": "activity.gl_mtrack_pss_kb@A1",
+        "values": [
+          820,
+          820,
+          820,
+          820,
+          820
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "activity.gl_mtrack_pss_kb@A2",
+        "values": [
+          820,
+          820,
+          820,
+          820,
+          820
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "activity.gl_mtrack_pss_kb@B0",
+        "values": [
+          820,
+          820,
+          820,
+          820,
+          820
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "activity.gl_mtrack_pss_kb@B1",
+        "values": [
+          820,
+          820,
+          820,
+          820,
+          820
+        ],
+        "max_delta": 0
+      },
+      {
+        "key": "activity.gl_mtrack_pss_kb@B3",
+        "values": [
+          820,
+          820,
+          820,
+          820,
+          820
+        ],
+        "max_delta": 0
+      }
+    ]
+  }
+}
