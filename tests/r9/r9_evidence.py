@@ -16,7 +16,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "r8"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "common"))
 from r8_obs_stream import obs_loads
+import gatea_counters as C
 
 HALT_PAT = re.compile(r"GATEA_FATAL_HALT what=(\S+) reason=(\d+)")
 OBS_PAT = re.compile(r"R8_OBS\s+(\{.*\})\s*$")
@@ -212,14 +214,22 @@ def registry_state(summary_text: str, raw: str = "") -> dict:
 
     Counters are still read when a dump did happen, and are used only if the event
     stream is absent entirely (then both are None: NOT OBSERVED, never 0)."""
+    # DEFECT FOUND 2026-09-22, fixed here: this read c25/c26, which are UNREGISTER
+    # and RESOURCE_DESTROY. The registry-CURRENT counters are c18 and c19
+    # (tests/common/gatea_counters.py, pinned against lorie.h by
+    # verify-r9-support.py). No R9 verdict depended on the wrong pair - the only
+    # PASS that reads a registry file is r9-f2/attempt-02 with
+    # source=telemetry_events, and r9-f1/attempt-03 has no registry file - but R10
+    # is built entirely on these counters, so it had to be corrected before R10.
     def c(n):
-        m = re.search(rf"\bc{n}=(\d+)\b", summary_text)
-        return int(m.group(1)) if m else None
+        return C.read(summary_text, n)
 
     rows = ring_rows(raw)
     if not rows:
-        return {"x_entries": c(25), "renderer_ready_entries": c(26),
-                "source": "summary_counters" if c(25) is not None else "none"}
+        xr = c(C.X_REGISTRY_CURRENT)
+        return {"x_entries": xr,
+                "renderer_ready_entries": c(C.RENDERER_REGISTRY_CURRENT),
+                "source": "summary_counters" if xr is not None else "none"}
 
     def held(role):
         ready = {sid for r, e, sid in rows if r == role and e == EVENT_REGISTER_READY}
@@ -229,7 +239,8 @@ def registry_state(summary_text: str, raw: str = "") -> dict:
     return {"x_entries": held(ROLE_X),
             "renderer_ready_entries": held(ROLE_RENDERER),
             "source": "telemetry_events",
-            "counters_c25": c(25), "counters_c26": c(26)}
+            "counter_x_registry_current": c(C.X_REGISTRY_CURRENT),
+            "counter_renderer_registry_current": c(C.RENDERER_REGISTRY_CURRENT)}
 
 
 def stale_replay(raw: str) -> dict:

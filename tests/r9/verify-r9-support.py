@@ -84,6 +84,22 @@ def main() -> int:
     # reason code 6 must still be FAIL_GENERATION
     need("LORIE_GATEA_FAIL_GENERATION = 6," in lorie_h, "src_reason6_is_generation", bad)
 
+    # ---- COUNTER INDEX BINDING ----
+    # lorieGateADumpSummary prints c<i> where i is the raw enum value, so every
+    # tooling reference to a counter is an index into a product enum that nothing
+    # else pins. It drifted once already: r9_evidence read c25/c26 (UNREGISTER,
+    # RESOURCE_DESTROY) as the registry-CURRENT pair, which is c18/c19. Re-derive
+    # the whole table from lorie.h and require it to match.
+    sys.path.insert(0, str(HERE.parent / "common"))
+    import gatea_counters as C
+    derived = C.parse_from_source(lorie_h)
+    need(derived == C.COUNTERS, "src_counter_enum_matches_table", bad)
+    need(C.X_REGISTRY_CURRENT == 18 and C.RENDERER_REGISTRY_CURRENT == 19,
+         "src_registry_counter_indices", bad)
+    ev_py = (HERE / "r9_evidence.py").read_text()
+    need("c(25)" not in ev_py and "c(26)" not in ev_py, "tooling_no_bare_c25_c26", bad)
+    need("C.X_REGISTRY_CURRENT" in ev_py, "tooling_uses_named_counters", bad)
+
     # ---- R9-COLD-2 REOPEN GUARD ----
     # COLD-2 was removed on 2026-09-22 as SOURCE-PROVEN / RUNTIME-NOT-CONSTRUCTIBLE
     # (planning-v2/r9-fixture/COLD2-ROUTE-SEARCH.md). These checks pin the exact

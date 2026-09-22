@@ -207,10 +207,47 @@ class RegistryState(unittest.TestCase):
                 f"generation=1 serial=0 src={src} dst=0\n")
 
     def test_counters_used_when_there_is_no_event_stream(self):
-        s = "GATEA_SUMMARY where=x c24=0 c25=3 c26=2 c27=1"
+        # c18 = X_REGISTRY_CURRENT, c19 = RENDERER_REGISTRY_CURRENT.
+        # c25/c26 are UNREGISTER/RESOURCE_DESTROY and must NOT be read as registry
+        # occupancy - that was the defect found 2026-09-22.
+        s = "GATEA_SUMMARY where=x c18=3 c19=2 c25=9 c26=9"
         r = E.registry_state(s)
         self.assertEqual((r["x_entries"], r["renderer_ready_entries"]), (3, 2))
         self.assertEqual(r["source"], "summary_counters")
+
+    def test_the_old_wrong_counters_are_not_read_as_registry(self):
+        """Regression guard for the c25/c26 defect. A summary that carries ONLY
+        UNREGISTER and RESOURCE_DESTROY says nothing about current occupancy, so
+        both fields must be NOT OBSERVED."""
+        r = E.registry_state("GATEA_SUMMARY where=x c25=7 c26=7")
+        self.assertIsNone(r["x_entries"])
+        self.assertIsNone(r["renderer_ready_entries"])
+        self.assertEqual(r["source"], "none")
+
+    def test_real_summary_line_from_r9_f1_attempt_02(self):
+        """Verbatim from evidence; with the right indices it reads as two buffers
+        registered on both sides and never released, which is what F1 does."""
+        s = ("GATEA_SUMMARY where=x-wrong-generation nonce=1 generation=1 "
+             "c12=2 c13=0 c14=2 c15=0 c16=2 c17=0 c18=2 c19=2 c20=0 c24=1 "
+             "c25=0 c26=0 c27=0")
+        r = E.registry_state(s)
+        self.assertEqual((r["x_entries"], r["renderer_ready_entries"]), (2, 2))
+
+    def test_counter_indices_match_the_product_enum(self):
+        """The mapping is hard-coded on purpose (a judge must not follow a drifting
+        enum silently), so it is re-derived from lorie.h here and must agree."""
+        from pathlib import Path as _P
+        h = (_P(__file__).resolve().parent.parent.parent
+             / "lorie/src/main/cpp/lorie/lorie.h")
+        if not h.is_file():          # source tree not present: nothing to compare
+            self.skipTest("lorie.h not available")
+        import sys as _s
+        _s.path.insert(0, str(_P(__file__).resolve().parent.parent / "common"))
+        import gatea_counters as C
+        derived = C.parse_from_source(h.read_text(encoding="utf-8", errors="replace"))
+        self.assertEqual(derived, C.COUNTERS)
+        self.assertEqual(C.X_REGISTRY_CURRENT, 18)
+        self.assertEqual(C.RENDERER_REGISTRY_CURRENT, 19)
 
     def test_absent_counter_is_none_not_zero(self):
         r = E.registry_state("GATEA_SUMMARY where=x")
@@ -236,9 +273,10 @@ class RegistryState(unittest.TestCase):
 
     def test_events_beat_counters_when_both_exist(self):
         raw = self.ev(1, 1, 6) + self.ev(1, 25, 6) + self.ev(2, 1, 6) + self.ev(2, 25, 6)
-        r = E.registry_state("GATEA_SUMMARY where=x c25=9 c26=9", raw)
+        r = E.registry_state("GATEA_SUMMARY where=x c18=9 c19=9", raw)
         self.assertEqual((r["x_entries"], r["renderer_ready_entries"]), (0, 0))
-        self.assertEqual((r["counters_c25"], r["counters_c26"]), (9, 9))
+        self.assertEqual((r["counter_x_registry_current"],
+                          r["counter_renderer_registry_current"]), (9, 9))
 
 
 class EndToEnd(unittest.TestCase):
