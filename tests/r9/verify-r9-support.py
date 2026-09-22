@@ -60,6 +60,21 @@ def main() -> int:
     need(r.returncode == 0 and "failures=0" in r.stdout,
          f"judge_vectors_r9:{r.stdout[-200:]}", bad)
 
+    # ---- 2b. evidence derivation ----
+    # Every judgement-relevant inference lives in r9_evidence.py precisely so it can
+    # be tested without a device. If the derivation and the judge ever disagree, it
+    # must show here and not by burning an attempt.
+    need((HERE / "r9_evidence.py").is_file(), "evidence_module_present", bad)
+    r = subprocess.run([sys.executable, str(HERE / "test_r9_evidence.py")],
+                       capture_output=True, text=True)
+    need(r.returncode == 0, f"evidence_tests:{(r.stderr or r.stdout)[-200:]}", bad)
+    ev_src = (HERE / "r9_evidence.py").read_text()
+    # the parser must key on the LAST ')' - a naive split lands on the wrong field
+    # when comm contains spaces or parentheses (Q8)
+    need("rindex(\")\")" in ev_src, "evidence_proc_parse_last_paren", bad)
+    # NEVER FABRICATE: unobserved values must stay None so the judge refuses
+    need("NEVER fabricate" in ev_src, "evidence_no_fabrication_contract", bad)
+
     # ---- 3. SOURCE BINDING ----
     lorie_h = (LORIE / "lorie.h").read_text()
     renderer = (LORIE / "renderer.cpp").read_text()
@@ -119,6 +134,7 @@ def main() -> int:
     print(f"r9_cells={len(spec['cells'])} removed={len(spec['removed_cells']) - 1}")
     print("spec_sha " + sha(spec_path))
     print("judge_sha " + sha(HERE / "judge-r9.py"))
+    print("evidence_sha " + sha(HERE / "r9_evidence.py"))
     return 0
 
 
