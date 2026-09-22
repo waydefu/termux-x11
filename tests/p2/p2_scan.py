@@ -159,10 +159,20 @@ def stable_of(d: Path):
 
 
 def halts_of(d: Path):
+    """Every GATEA_FATAL_HALT this attempt captured.
+
+    The log file name differs by era: R8+ writes raw-logcat.txt, the R7-era layout
+    writes logcat-follow.txt / logcat-dump-unfiltered.txt. Reading only the newer
+    names reports zero halts for every R7 attempt, which would make an expected-fatal
+    audit silently pass on 13 cells whose PASS condition IS a fatal."""
     out = []
-    for name in ("raw-logcat.txt", "collect-input.txt", "judge.stdout"):
+    for name in ("raw-logcat.txt", "collect-input.txt",
+                 "logcat-follow.txt", "logcat-dump-unfiltered.txt",
+                 "telemetry-fatal.txt", "judge.stdout"):
         for m in HALT.finditer(read(d / name)):
-            out.append({"what": m.group(1), "reason": int(m.group(2))})
+            h = {"what": m.group(1), "reason": int(m.group(2)), "source": name}
+            if h not in out:
+                out.append(h)
         if out:
             break
     return out
