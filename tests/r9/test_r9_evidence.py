@@ -102,35 +102,143 @@ class XSurvival(unittest.TestCase):
 
 
 class StaleReplay(unittest.TestCase):
-    def test_expected_fatal_implies_active(self):
-        # the tuple check is only REACHED when lorieGateAActive() is true, so the
-        # fatal itself proves the frame was not silently dropped
-        raw = ("I/R8_OBS: R8_OBS {\"v\":1,\"role\":\"r\","
-               "\"phase\":\"VALIDATE_TERMINAL_READY\"}\n"
-               "F/gatea-a1: GATEA_FATAL_HALT what=x-wrong-generation reason=6\n")
-        d = E.stale_replay(raw)
+    """Derived from what the product actually logs, measured on r9-f1/attempt-02.
+
+    The stages are LorieNative "GATEA_VALIDATE ... stage=X result=N" lines and the
+    fault firing is telemetry event 35 with the CELL number in src. Neither is an
+    R8_OBS row, and R9 runs with R8 observation disarmed, so a derivation that reads
+    only obs rows reports legitimate_ready_sent=false on a run whose READY succeeded.
+    """
+
+    # the two shapes, verbatim from r9-f1/attempt-02/raw-logcat.txt
+    READY_OK = ("I/LorieNative: GATEA_VALIDATE version=1 generation=1 bufferId=6 "
+                "stage=READY_SEND_RETURN result=1 errno=0 elapsed_us=314\n")
+    FAULT16 = ("I/gatea-telemetry: GATEA_EVENT seq=20 role=2 event=35 generation=1 "
+               "serial=0 src=16 dst=2\n")
+    FATAL = "F/gatea-a1: GATEA_FATAL_HALT what=x-wrong-generation reason=6\n"
+
+    def test_reads_the_validate_stage_line_not_just_obs_rows(self):
+        d = E.stale_replay(self.READY_OK + self.FAULT16 + self.FATAL)
         self.assertTrue(d["legitimate_ready_sent"])
         self.assertTrue(d["stale_frame_sent"])
         self.assertTrue(d["gate_a_active_on_arrival"])
+        self.assertFalse(d["stale_tuple_accepted"])
 
-    def test_no_fatal_means_dropped_or_not_sent(self):
-        raw = ("I/R8_OBS: R8_OBS {\"v\":1,\"role\":\"r\","
-               "\"phase\":\"VALIDATE_TERMINAL_READY\"}\n")
+    def test_obs_row_path_still_works(self):
+        # kept for builds that do carry the renderer obs rows
+        raw = ('I/R8_OBS: R8_OBS {"v":1,"role":"r",'
+               '"phase":"VALIDATE_TERMINAL_READY"}\n') + self.FAULT16 + self.FATAL
+        self.assertTrue(E.stale_replay(raw)["legitimate_ready_sent"])
+
+    def test_stale_frame_sent_is_not_inferred_from_the_fatal(self):
+        """Circularity guard. If the fatal were taken as proof the frame was sent,
+        the judge would then require that same fatal for the verdict and the two
+        checks would be one check. The fault-fired telemetry is independent."""
+        d = E.stale_replay(self.READY_OK + self.FATAL)   # fatal, but no event 35
+        self.assertFalse(d["stale_frame_sent"])
+
+    def test_a_different_cells_fault_does_not_count(self):
+        other = self.FAULT16.replace("src=16", "src=8")
+        self.assertFalse(E.stale_replay(self.READY_OK + other)["stale_frame_sent"])
+
+    def test_fired_but_no_fatal_is_the_silent_drop(self):
+        d = E.stale_replay(self.READY_OK + self.FAULT16)
+        self.assertIs(d["gate_a_active_on_arrival"], False)
+
+    def test_a_different_fatal_leaves_the_frames_fate_unknown(self):
+        raw = self.READY_OK + self.FAULT16 + \
+            "F/gatea-a1: GATEA_FATAL_HALT what=x-hup reason=6\n"
         d = E.stale_replay(raw)
-        self.assertFalse(d["gate_a_active_on_arrival"])
+        self.assertIsNone(d["gate_a_active_on_arrival"])
+        self.assertIsNone(d["stale_tuple_accepted"])
 
     def test_no_ready_means_validate_import_not_reached(self):
         self.assertFalse(E.stale_replay("")["legitimate_ready_sent"])
 
+    def test_failed_ready_send_does_not_count_as_sent(self):
+        bad = self.READY_OK.replace("result=1", "result=0")
+        self.assertFalse(E.stale_replay(bad)["legitimate_ready_sent"])
+
+
+class FdTable(unittest.TestCase):
+    """Q9-F1: did X's fd table still hold the PREVIOUS conn_fd at this boundary?"""
+
+    LIST = ("total 0\n"
+            "lrwx------. 1 u u 64 Sep 22 14:39 0 -> /dev/null\n"
+            "lrwx------. 1 u u 64 Sep 22 14:39 9 -> socket:[123456]\n")
+    ONE_BIND = ('I/R8_OBS: R8_OBS {"v":1,"role":"r","phase":"R_EPOCH_BEGIN",'
+                '"epoch_id":1}\n')
+
+    def test_no_listing_is_not_observed(self):
+        self.assertIsNone(E.fd_previous_conn("", E.binds_observed(self.ONE_BIND)))
+
+    def test_single_bind_with_a_listing_is_false(self):
+        self.assertIs(E.fd_previous_conn(self.LIST, E.binds_observed(self.ONE_BIND)),
+                      False)
+
+    def test_rebind_is_not_answered_by_a_bare_count(self):
+        two = self.ONE_BIND + self.ONE_BIND.replace('"epoch_id":1', '"epoch_id":2')
+        self.assertIsNone(E.fd_previous_conn(self.LIST, E.binds_observed(two)))
+
+    def test_absent_obs_stream_is_not_zero_binds(self):
+        self.assertIsNone(E.binds_observed("nothing here"))
+        self.assertIsNone(E.fd_previous_conn(self.LIST, E.binds_observed("nothing")))
+
+    def test_obs_stream_present_but_no_epochs_is_zero(self):
+        raw = 'I/R8_OBS: R8_OBS {"v":1,"role":"r","phase":"BEGIN"}\n'
+        self.assertEqual(E.binds_observed(raw), 0)
+        self.assertIs(E.fd_previous_conn(self.LIST, E.binds_observed(raw)), False)
+
+
 
 class RegistryState(unittest.TestCase):
-    def test_counters_read(self):
+    """The live event stream is the source; the summary counters are the fallback.
+
+    c25/c26 exist only when lorieGateADumpSummary ran, and it runs on a fatal, a clean
+    close or a terminate - never on a healthy session. r9-f2/attempt-01 measured
+    exactly that: an empty gatea-summary.txt on a run whose registry demonstrably
+    emptied itself, and a SIGTERM that did not reach CloseScreen and fatalled the
+    renderer with r-hup instead.
+    """
+
+    @staticmethod
+    def ev(role, event, src):
+        return (f"I/gatea-telemetry: GATEA_EVENT seq=1 role={role} event={event} "
+                f"generation=1 serial=0 src={src} dst=0\n")
+
+    def test_counters_used_when_there_is_no_event_stream(self):
         s = "GATEA_SUMMARY where=x c24=0 c25=3 c26=2 c27=1"
-        self.assertEqual(E.registry_state(s), {"x_entries": 3, "renderer_ready_entries": 2})
+        r = E.registry_state(s)
+        self.assertEqual((r["x_entries"], r["renderer_ready_entries"]), (3, 2))
+        self.assertEqual(r["source"], "summary_counters")
 
     def test_absent_counter_is_none_not_zero(self):
-        self.assertEqual(E.registry_state("GATEA_SUMMARY where=x"),
-                         {"x_entries": None, "renderer_ready_entries": None})
+        r = E.registry_state("GATEA_SUMMARY where=x")
+        self.assertIsNone(r["x_entries"])
+        self.assertIsNone(r["renderer_ready_entries"])
+        self.assertEqual(r["source"], "none")
+
+    def test_registered_then_acked_on_both_roles_is_empty(self):
+        # the shape r9-f2/attempt-01 actually produced for ids 6 and 7
+        raw = ""
+        for sid in (6, 7):
+            for role in (1, 2):
+                raw += self.ev(role, 1, sid) + self.ev(role, 25, sid)
+        r = E.registry_state("", raw)
+        self.assertEqual((r["x_entries"], r["renderer_ready_entries"]), (0, 0))
+        self.assertEqual(r["source"], "telemetry_events")
+
+    def test_registered_and_never_acked_is_held(self):
+        raw = self.ev(1, 1, 6) + self.ev(2, 1, 6) + self.ev(2, 25, 6)
+        r = E.registry_state("", raw)
+        self.assertEqual(r["x_entries"], 1)            # X never acked
+        self.assertEqual(r["renderer_ready_entries"], 0)
+
+    def test_events_beat_counters_when_both_exist(self):
+        raw = self.ev(1, 1, 6) + self.ev(1, 25, 6) + self.ev(2, 1, 6) + self.ev(2, 25, 6)
+        r = E.registry_state("GATEA_SUMMARY where=x c25=9 c26=9", raw)
+        self.assertEqual((r["x_entries"], r["renderer_ready_entries"]), (0, 0))
+        self.assertEqual((r["counters_c25"], r["counters_c26"]), (9, 9))
 
 
 class EndToEnd(unittest.TestCase):
@@ -162,6 +270,63 @@ class EndToEnd(unittest.TestCase):
                 if f.suffix in (".json", ".jsonl"):
                     out[f.name] = f.read_text()
             return out
+
+    # ---- how many identity boundaries a cell actually has ----
+
+    def test_f1_writes_exactly_one_boundary(self):
+        """F1 crosses no process boundary and X halting IS its expected outcome, so
+        there is no live 'after' identity to observe. A second, all-None record would
+        make judge-r9.py refuse a correct run for missing evidence that never
+        existed (load_boundaries treats None as NOT OBSERVED)."""
+        raw = ("I/gatea: GATEA_SUMMARY where=x nonce=777 generation=1\n"
+               "I/gatea: GATEA_BIND version=1 nonce=777 generation=1 bound=1\n"
+               'I/R8_OBS: R8_OBS {"v":1,"role":"r","phase":"R_EPOCH_BEGIN","epoch_id":1}\n'
+               "F/gatea-a1: GATEA_FATAL_HALT what=x-wrong-generation reason=6\n")
+        out = self._run("R9-F1", raw, "c25=1 c26=1", [], None)
+        rows = [l for l in out["identity-boundaries.jsonl"].splitlines() if l.strip()]
+        self.assertEqual(len(rows), 1)
+        rec = json.loads(rows[0])
+        self.assertEqual(rec["x_pid"], 10)
+        self.assertIsNotNone(rec["shared_nonce"])
+
+    def test_f2_boundary_before_half_comes_from_the_previous_attempt(self):
+        """F2's boundary is F1 -> F2. Its 'before' half must be F1's captures, not a
+        second read of F2's own session, or the nonce and both process identities
+        would compare equal and the judge would report NONCE_NOT_REFRESHED /
+        X_DID_NOT_RESTART on a perfectly good run."""
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            prev_raw = d / "prev-raw.txt"
+            prev_raw.write_text(
+                "I/gatea: GATEA_SUMMARY where=x nonce=111 generation=1\n"
+                "I/gatea: GATEA_BIND version=1 nonce=111 generation=1 bound=1\n"
+                'I/R8_OBS: R8_OBS {"v":1,"role":"r","phase":"R_EPOCH_BEGIN","epoch_id":1}\n')
+            prev_x = d / "prev-x"; prev_x.write_text("90 (Xlorie) S" + " 0" * 18 + " 1111" + " 0" * 30)
+            prev_a = d / "prev-a"; prev_a.write_text("91 (Activity) S" + " 0" * 18 + " 2222" + " 0" * 30)
+            raw = ("I/gatea: GATEA_SUMMARY where=x nonce=999 generation=1\n"
+                   "I/gatea: GATEA_BIND version=1 nonce=999 generation=1 bound=1\n"
+                   'I/R8_OBS: R8_OBS {"v":1,"role":"r","phase":"R_EPOCH_BEGIN","epoch_id":1}\n')
+            out = self._run("R9-F2", raw, "c25=0 c26=0",
+                            ["--prev-x-stat", str(prev_x),
+                             "--prev-act-stat", str(prev_a),
+                             "--prev-raw", str(prev_raw)], None)
+        rows = [json.loads(l) for l in out["identity-boundaries.jsonl"].splitlines() if l.strip()]
+        self.assertEqual(len(rows), 2)
+        a, b = rows
+        self.assertEqual((a["x_pid"], a["x_starttime"]), (90, 1111))
+        self.assertEqual((a["activity_pid"], a["activity_starttime"]), (91, 2222))
+        self.assertEqual(a["shared_nonce"], 111)
+        self.assertEqual(b["shared_nonce"], 999)
+        self.assertNotEqual((a["x_pid"], a["x_starttime"]), (b["x_pid"], b["x_starttime"]))
+
+    def test_f2_without_prev_evidence_yields_unobserved_not_a_guess(self):
+        """Missing previous evidence must surface as NOT OBSERVED (None), so the
+        judge refuses, rather than silently defaulting to this run's own identity."""
+        raw = "I/gatea: GATEA_SUMMARY where=x nonce=999 generation=1\n"
+        out = self._run("R9-F2", raw, "c25=0 c26=0", [], None)
+        rows = [json.loads(l) for l in out["identity-boundaries.jsonl"].splitlines() if l.strip()]
+        self.assertIsNone(rows[0]["x_pid"])
+        self.assertIsNone(rows[0]["activity_pid"])
 
     def test_f1_derivation_feeds_judge_invalid_when_dropped(self):
         # no fatal at all -> the derivation must report gate_a_active_on_arrival

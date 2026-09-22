@@ -149,57 +149,48 @@ def require_exact_fatal(ev: Path, what: str, reason: int) -> None:
 
 
 def ring_events(ev: Path) -> list[int]:
-    return [int(m) for m in RING_EVENT_PAT.findall(read_text(ev / "gatea-ring.txt"))]
+    """Every Gate A telemetry event this attempt produced, from BOTH sinks.
+
+    gatea-ring.txt is a post-mortem snapshot: lorieGateADumpSummary writes it, and
+    that only runs on a fatal, a clean close or a terminate. A cell that leaves X
+    healthy (R9-F2) produces no file at all, and the file is a bounded ring that can
+    overflow even when it does exist. The gatea-telemetry logcat stream carries the
+    same GATEA_EVENT lines live and is windowed to this attempt by the runner's
+    `logcat -T <since>`, so it is the more complete of the two, not a fallback.
+    Union, so neither source alone can make an event disappear."""
+    text = read_text(ev / "gatea-ring.txt") + "\n" + read_text(ev / "raw-logcat.txt")
+    return [int(m) for m in RING_EVENT_PAT.findall(text)]
 
 
 # ------------------------------------------------------------------- the cells
 
-def judge_cold2(ev: Path, xrows: list[dict], rrows: list[dict],
-                bounds: list[dict]) -> None:
-    # the renderer must have PUBLISHED before dying, else X would have taken
-    # x-eof and not survived at all (the COLD trilemma)
-    pub = load_json(ev / "renderer-fatal.json")
-    if pub in (None, "INVALID_JSON"):
-        raise Verdict(INVALID, "RENDERER_FATAL_EVIDENCE_MISSING")
-    if not pub.get("published"):
-        raise Verdict(INVALID, "RENDERER_FATAL_NOT_PUBLISHED")
+# R9-COLD-2 was REMOVED from the runtime packet on 2026-09-22 as
+# SOURCE-PROVEN / RUNTIME-NOT-CONSTRUCTIBLE — see
+# planning-v2/r9-fixture/COLD2-ROUTE-SEARCH.md. Its expected fatal
+# x-bump-unterminal (cmdentrypoint.cpp:391) needs a SECOND
+# lorieActivityConnected() with generation != 0, and no X process can reach one:
+# X outlives its Activity only when lorieGateAActive() is already false
+# (InitOutput.c:620-624), a clean close zeroes sessionNonce too
+# (InitOutput.c:3334-3335), and every fatal publisher that would clear the gate
+# exits X in the same breath (lorie.h:1414-1416; InitOutput.c:3539 ->
+# lorie.h:296-297 -> InitOutput.c:3546 -> :3212-3217).
+#
+# The judge is kept as a hard refusal rather than deleted: a removed cell must
+# never be able to yield PASS, FAIL or INVALID. BLOCKED is the only answer.
+REMOVED_CELLS = {
+    "R9-COLD-2": "COLD2-ROUTE-SEARCH.md",
+    "R9-COLD-1": "COLD1-ROUTE-SEARCH.md",
+    "R9-COLD-3": "COLD1-ROUTE-SEARCH.md",
+    "R9-WARM-1": "V2-R9-DESIGN.md",
+    "R9-WARM-2": "V2-R9-DESIGN.md",
+    "R9-WARM-3": "V2-R9-DESIGN.md",
+}
 
-    # X must have survived that death
-    surv = load_json(ev / "x-survival.json")
-    if surv in (None, "INVALID_JSON"):
-        raise Verdict(INVALID, "X_SURVIVAL_EVIDENCE_MISSING")
-    if not surv.get("x_alive_after_renderer_death"):
-        raise Verdict(FAIL, "X_DID_NOT_SURVIVE")
-    if surv.get("x_eof_fatal"):
-        raise Verdict(FAIL, "X_TOOK_X_EOF")
 
-    if len(bounds) < 2:
-        raise Verdict(INVALID, "BOUNDARY_RECORDS_INSUFFICIENT")
-    a, b = bounds[0], bounds[-1]
-
-    # the nonce is per X PROCESS and X survived, so it must be unchanged and live
-    if a["shared_nonce"] != b["shared_nonce"]:
-        raise Verdict(FAIL, "SESSION_NONCE_CHANGED")
-    if int(b["shared_nonce"]) == 0:
-        raise Verdict(FAIL, "SESSION_NONCE_ZEROED")
-
-    # COLD is classified from the Activity process identity ONLY (Q2-F2)
-    if (a["activity_pid"], a["activity_starttime"]) == \
-       (b["activity_pid"], b["activity_starttime"]):
-        raise Verdict(INVALID, "ACTIVITY_DID_NOT_RESTART")
-
-    reg = load_json(ev / "registry-at-bump.json")
-    if reg in (None, "INVALID_JSON"):
-        raise Verdict(INVALID, "REGISTRY_EVIDENCE_MISSING")
-    if reg.get("pending_count") in (None, 0) and reg.get("last_submitted_serial") in (None, 0):
-        # the lease did not persist across the renderer death: the construction
-        # never produced the state the cell exists to test
-        raise Verdict(INVALID, "REGISTRY_WAS_TERMINAL")
-
-    require_exact_fatal(ev, "x-bump-unterminal", 6)
-
-    if b.get("shared_generation") != a.get("shared_generation"):
-        raise Verdict(FAIL, "GENERATION_OPENED_OVER_NONTERMINAL_REGISTRY")
+def judge_removed(cell: str) -> None:
+    raise Verdict(BLOCKED,
+                  f"CELL_REMOVED_SOURCE_PROVEN_NOT_CONSTRUCTIBLE_{cell}"
+                  f"_see_{REMOVED_CELLS[cell]}")
 
 
 def judge_f1(ev: Path, xrows: list[dict], rrows: list[dict],
@@ -253,6 +244,12 @@ def judge_f2(ev: Path, xrows: list[dict], rrows: list[dict],
     reg = load_json(ev / "registry-fresh.json")
     if reg in (None, "INVALID_JSON"):
         raise Verdict(INVALID, "REGISTRY_EVIDENCE_MISSING")
+    # policy.null_means: NOT OBSERVED, never inferred, never defaulted. The counters
+    # come from lorieGateADumpSummary, which only runs on a fatal, a clean close or a
+    # terminate; a run that produced no dump has no counters, and reading that
+    # absence as "empty" would turn a missing measurement into a pass.
+    if reg.get("x_entries") is None or reg.get("renderer_ready_entries") is None:
+        raise Verdict(INVALID, "REGISTRY_COUNTERS_NOT_OBSERVED")
     if reg.get("x_entries") or reg.get("renderer_ready_entries"):
         raise Verdict(FAIL, "STALE_RESIDUE_PRESENT")
 
@@ -264,7 +261,7 @@ def judge_f2(ev: Path, xrows: list[dict], rrows: list[dict],
         raise Verdict(FAIL, "NO_DIRECT_SUCCESS_EVENT5_ABSENT")
 
 
-DISPATCH = {"R9-COLD-2": judge_cold2, "R9-F1": judge_f1, "R9-F2": judge_f2}
+DISPATCH = {"R9-F1": judge_f1, "R9-F2": judge_f2}
 
 
 def main() -> int:
@@ -280,6 +277,8 @@ def main() -> int:
     cell = args.cell
     code, reason = PASS, "ACCEPT"
     try:
+        if cell in REMOVED_CELLS:
+            judge_removed(cell)
         if cell not in DISPATCH:
             raise Verdict(BLOCKED, f"UNKNOWN_CELL_{cell}")
         manifest = load_json(Path(args.manifest)) if args.manifest else None

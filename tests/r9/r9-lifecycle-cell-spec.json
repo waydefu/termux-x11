@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "status": "R9_CELL_SPEC_FROZEN_V1",
+  "status": "R9_CELL_SPEC_FROZEN_V2",
   "frozen": "2026-09-22",
   "product_sha": "dc94485a7ef4f74cada36ea3c1d35d0aa0f48693",
   "ci_run": 35673085569,
@@ -9,7 +9,8 @@
     "V2-R9-FIXTURE construction proofs (planning-v2/r9-fixture/)",
     "D-01 ACCEPTED (-noreset)",
     "D-02 ACCEPTED+IMPLEMENTED",
-    "D-12 ACCEPTED"
+    "D-12 ACCEPTED",
+    "COLD2-ROUTE-SEARCH.md 2026-09-22 — CONTRADICTION_FOUND, R9-COLD-2 removed"
   ],
   "runtime_authorization": "NOT GRANTED. This spec is frozen; no attempt is authorized by its existence.",
   "policy": {
@@ -31,67 +32,13 @@
   },
   "identity_contract": "planning-v2/r9-design/r9-identity-contract.json",
   "cell_order": [
-    "R9-COLD-2",
     "R9-F1",
     "R9-F2"
   ],
   "cells": [
     {
-      "id": "R9-COLD-2",
-      "name": "cold restart with a non-terminal old registry \u2014 containment halt",
-      "kind": "cold-containment",
-      "grounds": [
-        "Q2-F1",
-        "Q3",
-        "Q11"
-      ],
-      "test_fault": 8,
-      "test_fault_name": "LORIE_GATEA_TEST_RENDERER_FATAL_PRE_FENCE",
-      "construction": [
-        "arm fault 8 via TERMUX_X11_GATEA_TEST_FAULT=8 and TERMUX_X11_GATEA_TEST_ARM=1",
-        "drive one direct exact composite so the pair is LEASED (X sets pendingCount=1 on both endpoints at cmdentrypoint.cpp:226-227)",
-        "fault 8 fires after CONSUME_DIRECT is traced but BEFORE the fence: gateARendererFatal PUBLISHES generationFatal and the renderer exits",
-        "X observes EOF with fatal != 0, so lorieGateAActive() is FALSE and X takes the else-branch (closeLorieConnection) instead of x-eof: X SURVIVES with sessionNonce intact",
-        "relaunch the Activity process",
-        "the next lorieActivityConnected() attempts the generation bump and meets a registry entry with pendingCount != 0"
-      ],
-      "require": [
-        "renderer_fatal_published",
-        "x_survived_renderer_death",
-        "session_nonce_unchanged_and_nonzero",
-        "activity_process_identity_changed",
-        "registry_nonterminal_at_bump",
-        "expected_fatal_x_bump_unterminal"
-      ],
-      "forbid": [
-        "x_taking_x_eof_fatal",
-        "any_clean_generation_close_before_the_bump",
-        "treating_the_halt_as_a_failure"
-      ],
-      "fatal": {
-        "what": "x-bump-unterminal",
-        "reason": 6,
-        "reason_name": "LORIE_GATEA_FAIL_GENERATION",
-        "site": "cmdentrypoint.cpp:389-393"
-      },
-      "attempts": 1,
-      "pass_requires": "the EXACT expected fatal fired AND the new generation was NOT opened",
-      "invalid": [
-        "the renderer died without publishing (then X would take x-eof and not survive) -> INVALID_CONSTRUCTION",
-        "the registry was terminal at the bump -> INVALID_CONSTRUCTION, the lease did not persist"
-      ],
-      "fail": "the bump SUCCEEDED over a non-terminal registry",
-      "next": "R9-F1",
-      "test_fault_env_name": "renderer-fatal-pre-fence",
-      "arming": {
-        "TERMUX_X11_GATEA_TEST_FAULT": "renderer-fatal-pre-fence",
-        "TERMUX_X11_GATEA_TEST_ARM": "1",
-        "note": "The env var takes the NAME, not the number: lorieGateATestFaultPublishFromEnv calls gateATestCellFromName (InitOutput.c), which looks the string up in gateATestCellNames and returns 0 for anything unknown. A numeric value would resolve to 0 and the X server would fatal-halt with x-test-fault-env before the cell ever ran."
-      }
-    },
-    {
       "id": "R9-F1",
-      "name": "stale-ready replay \u2014 expected containment fatal",
+      "name": "stale-ready replay — expected containment fatal",
       "kind": "stale-replay-containment",
       "grounds": [
         "V-11",
@@ -114,7 +61,7 @@
         "current_generation_state_not_polluted"
       ],
       "forbid": [
-        "concluding PASS from absence of harm \u2014 the EXACT expected fatal is required (\u00a78.8)",
+        "concluding PASS from absence of harm — the EXACT expected fatal is required (§8.8)",
         "designing this as a defence: Q5 proved a stale READY cannot be CONSUMED by a new generation; F1 proves the frame-path HALT"
       ],
       "fatal": {
@@ -146,7 +93,7 @@
         "Q11"
       ],
       "test_fault": null,
-      "precondition": "R9-F1 PASS with its expected fatal. \u00a78.8: if that fatal does not exist, F2 is BLOCKED, and manufacturing another fatal to satisfy the precondition is FORBIDDEN.",
+      "precondition": "R9-F1 PASS with its expected fatal. §8.8: if that fatal does not exist, F2 is BLOCKED, and manufacturing another fatal to satisfy the precondition is FORBIDDEN.",
       "construction": [
         "start a genuinely fresh session: a new X process and a new Activity process",
         "drive one clean direct exact composite"
@@ -160,28 +107,32 @@
       ],
       "forbid": [
         "manufacturing another fatal to satisfy the precondition",
-        "judging residue against an unwindowed logcat capture \u2014 the obs sink survives process death and `logcat -c` is a redline (Q11-F2); logcat-since.txt must be recorded",
+        "judging residue against an unwindowed logcat capture — the obs sink survives process death and `logcat -c` is a redline (Q11-F2); logcat-since.txt must be recorded",
         "inferring the Activity died from socket closure alone (Q11-F1); (PID, starttime) is required"
       ],
       "fatal": null,
       "attempts": 1,
       "pass_requires": "new nonce AND empty registry AND a clean direct SUCCESS with event=5 in the ring",
       "invalid": [
-        "F1's expected fatal absent -> BLOCKED, not INVALID"
+        "F1's expected fatal absent -> BLOCKED, not INVALID",
+        "neither the telemetry events nor the counters were observed -> INVALID REGISTRY_COUNTERS_NOT_OBSERVED, never a pass"
       ],
       "fail": "stale residue present, or no direct success",
-      "next": "R9-AGG"
+      "next": "R9-AGG",
+      "require_note": "empty_registry_both_sides is measured from the LIVE telemetry stream, not from the c25/c26 summary counters. REGISTER_READY (event 1) and UNREGISTER_ACK (event 25) are traced per buffer id and per role unconditionally, so what each side still holds is (ready - acked) per role; 0 and 0 is the registry empty on both sides. The counters exist only when lorieGateADumpSummary ran, which needs a fatal, a clean close or a terminate, and a healthy F2 has none of those. Measured on r9-f2/attempt-01: gatea-summary.txt empty on a run whose registry demonstrably emptied itself (ids 6 and 7, event 1 then event 25 on both roles). Forcing a dump with SIGTERM was tried and REJECTED: it does not reach CloseScreen in this build and it fatals the renderer with r-hup, which the judge then reads - correctly - as UNEXPECTED_FATAL_IN_FRESH_SESSION.",
+      "evidence_note": "new_session_nonce is read from GATEA_SUMMARY when a dump exists and otherwise from GATEA_BIND, which logs lorieGateALoadU64Acquire(&state->gateA.sessionNonce) and .generation (activity.cpp:202-203) BEFORE latching them (:219-220) - i.e. a real read of the shared words, not the renderer's private copy. The record says which source it used in shared_tuple_source, and renderer_bound_* stays a separate field: the two halves have different lifetimes and are never merged."
     }
   ],
   "removed_cells": {
-    "note": "SOURCE_PROVEN_RUNTIME_NOT_CONSTRUCTIBLE. Not PASS, not FAIL, not INVALID, not runtime-qualified. Each names the condition that reopens it.",
+    "note": "SOURCE_PROVEN_RUNTIME_NOT_CONSTRUCTIBLE. Not PASS, not FAIL, not INVALID, not runtime-qualified. Each names the condition that reopens it. Frozen attempts already consumed against a removed cell stay frozen INVALID and are never reclassified by the removal (r9-cold-2/attempt-01, attempt-02).",
     "R9-WARM-1": "no product entry point for same-Activity warm reconnect; reopen if one is added",
     "R9-WARM-2": "same; the r-rebind-busy containment is source-proven by Q1-F1 and Q5",
     "R9-WARM-3": "same; the Q4-F1 fix is source-verified and pinned by five static checks",
     "R9-COLD-1": "no drivable published renderer fatal with a TERMINAL registry; reopen if one appears at a pre-lease point",
     "R9-COLD-3": "inherits R9-COLD-1",
-    "V2-R9-RESET": "does not exist (Q10 / D-01)"
+    "V2-R9-RESET": "does not exist (Q10 / D-01)",
+    "R9-COLD-2": "no route: x-bump-unterminal (cmdentrypoint.cpp:389-392) requires a SECOND lorieActivityConnected() with generation != 0, and no X process can reach one. X survives losing its Activity only when lorieGateAActive() is already false (InitOutput.c:620-624); a clean close zeroes BOTH generation and sessionNonce (InitOutput.c:3334-3335) so the bump is gated off forever (InitOutput.c:567), and every fatal publisher that would make it false exits the X process in the same breath — X-side via gateAXFatal/lorieGateAFatalHalt _exit(127) (lorie.h:1414-1416), renderer-side because all 14 publish sites fire while X is inside gateAWaitTerminal for that serial (COLD1 sweep + InitOutput.c:3539 -> lorie.h:296-297 -> InitOutput.c:3546 -> :3212-3217). Proof: planning-v2/r9-fixture/COLD2-ROUTE-SEARCH.md. REOPEN if the product gains a renderer fatal publisher reachable outside an X terminal wait, or a warm reconnect/rebind entry point (the same one that would reopen WARM-1/2/3)."
   },
-  "product_level_finding": "GATE A HAS NO REACHABLE CLEAN SAME-PROCESS GENERATION BOUNDARY. A clean close zeroes sessionNonce and is terminal (Q10); the bump path is correctly built but reaching it needs either a warm reconnect entry point that does not exist, or an Activity death, which fatals X unless generationFatal is ALREADY set. Every generation boundary in a surviving X therefore requires a prior fatal \u2014 which is why all three surviving cells are fatal-path cells. Belongs to D-06; recorded, not decided.",
+  "product_level_finding": "GATE A HAS NO REACHABLE GENERATION BOUNDARY AT ALL. The bump path (InitOutput.c:565-589) is correctly built and runs exactly once per X process: the first lorieActivityConnected() takes the generation == 0 branch and sets generation 1. A second one is unreachable. A clean close zeroes sessionNonce as well as generation (InitOutput.c:3334-3335, Q10), so it is terminal; and an Activity death fatals X unless generationFatal is ALREADY set, while every way to set generationFatal exits the X process in the same breath (COLD2-ROUTE-SEARCH.md §C-§E). Consequence: lorieGateARegistryCloseGeneration (cmdentrypoint.cpp:380) has no runtime caller, and x-bump-unterminal (cmdentrypoint.cpp:391) and x-share-in-lease (InitOutput.c:570) are defensive-only. Corroboration, not proof: across all recorded evidence (201989 GATEA_EVENT lines) generation has never been observed above 1. Belongs to D-06; recorded, not decided.",
   "arming_contract": "TERMUX_X11_GATEA_TEST_FAULT is a NAME. It also requires TERMUX_X11_GATEA_TEST_ARM=1, Gate A proto enabled and telemetry requested; any other combination fatal-halts with x-test-fault-env."
 }

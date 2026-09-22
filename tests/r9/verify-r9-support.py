@@ -38,16 +38,16 @@ def main() -> int:
     spec_path = HERE / "r9-lifecycle-cell-spec.json"
     need(spec_path.is_file(), "spec_present", bad)
     spec = json.loads(spec_path.read_text())
-    need(spec.get("status") == "R9_CELL_SPEC_FROZEN_V1", "spec_frozen", bad)
-    need(spec["cell_order"] == ["R9-COLD-2", "R9-F1", "R9-F2"], "spec_cell_order", bad)
-    need(len(spec["cells"]) == 3, "spec_cell_count", bad)
+    need(spec.get("status") == "R9_CELL_SPEC_FROZEN_V2", "spec_frozen", bad)
+    need(spec["cell_order"] == ["R9-F1", "R9-F2"], "spec_cell_order", bad)
+    need(len(spec["cells"]) == 2, "spec_cell_count", bad)
     need("-noreset" in spec["policy"]["x_launch_flags"], "spec_noreset_required", bad)
     need(spec["policy"]["experimental_display"] == ":3", "spec_display_pinned", bad)
     need(spec["policy"]["stable_policy"] == "never touched", "spec_stable_redline", bad)
     need(spec["runtime_authorization"].startswith("NOT GRANTED"),
          "spec_no_implicit_authorization", bad)
     # the six removals must stay recorded with their reopen conditions
-    need(len(spec["removed_cells"]) >= 7, "spec_removals_recorded", bad)
+    need(len(spec["removed_cells"]) >= 8, "spec_removals_recorded", bad)
     for k in ("R9-WARM-1", "R9-WARM-2", "R9-WARM-3", "R9-COLD-1", "R9-COLD-3",
               "V2-R9-RESET"):
         need(k in spec["removed_cells"], f"spec_removal_{k}", bad)
@@ -79,15 +79,43 @@ def main() -> int:
     lorie_h = (LORIE / "lorie.h").read_text()
     renderer = (LORIE / "renderer.cpp").read_text()
     cmdentry = (LORIE / "cmdentrypoint.cpp").read_text()
+    init_c = (LORIE / "InitOutput.c").read_text()
 
     # reason code 6 must still be FAIL_GENERATION
     need("LORIE_GATEA_FAIL_GENERATION = 6," in lorie_h, "src_reason6_is_generation", bad)
 
-    # COLD-2 depends on fault 8 publishing. If it ever stops publishing, X takes
-    # x-eof and the cell becomes unconstructible (COLD1-ROUTE-SEARCH.md).
+    # ---- R9-COLD-2 REOPEN GUARD ----
+    # COLD-2 was removed on 2026-09-22 as SOURCE-PROVEN / RUNTIME-NOT-CONSTRUCTIBLE
+    # (planning-v2/r9-fixture/COLD2-ROUTE-SEARCH.md). These checks pin the exact
+    # source facts the removal rests on. If any of them stops holding, the removal
+    # is no longer justified and the cell MUST be reopened — that is what a failure
+    # here means. It is not a regression in R9's tooling.
+    need("R9-COLD-2" in spec["removed_cells"], "spec_cold2_removed", bad)
+    need("R9-COLD-2" not in cells, "spec_cold2_not_runnable", bad)
+    # (a) every Gate A fatal halt exits the X process
+    need("_exit(127);" in lorie_h.split("lorieGateAFatalHalt(const char *what", 1)[-1][:400],
+         "src_fatalhalt_exits", bad)
+    # (b) X observing an already-published fatal exits instead of continuing
+    gx = init_c.rsplit("static void gateAXFatal(const char *what", 1)[-1][:900]
+    need("published != 0" in gx and "_exit(127);" in gx, "src_gateaxfatal_exits", bad)
+    # (c) a published fatal short-circuits the terminal wait to RESULT_FATAL, so the
+    #     renderer's fatal always reaches X inside its own Done wait
+    dr = lorie_h.split("lorieGateADeriveResult(", 1)[-1][:300]
+    need("if (fatal != 0)" in dr and "LORIE_GATEA_RESULT_FATAL" in dr,
+         "src_derive_fatal_short_circuits", bad)
+    need('gateAXFatal("x-direct-not-success"' in init_c, "src_direct_not_success", bad)
+    # (d) the clean close zeroes sessionNonce too, so it can never lead to a bump
+    cg = init_c.rsplit("static void gateACloseGeneration(void)", 1)[-1][:2600]
+    need("StoreU64Release(&shared->sessionNonce, 0)" in cg, "src_close_zeroes_nonce", bad)
+    # (e) the bump is gated on a non-zero sessionNonce
+    ac = init_c.split("void lorieActivityConnected(void)", 1)[-1][:900]
+    need("gateA.sessionNonce != 0" in ac, "src_bump_gated_on_nonce", bad)
+    # (f) losing the Activity with Gate A active is x-eof, i.e. X dies
+    need('? "x-eof" : "x-record-error"' in cmdentry, "src_peer_closed_is_x_eof", bad)
+    # fault 8 itself must still exist and still publish: it is the fault the reopened
+    # cell would use, and its disappearance would change the reopen condition.
     need("LORIE_GATEA_TEST_RENDERER_FATAL_PRE_FENCE = 8," in lorie_h,
          "src_fault8_number", bad)
-    need(cells["R9-COLD-2"]["test_fault"] == 8, "spec_cold2_fault8", bad)
     i = renderer.find("LORIE_GATEA_TEST_RENDERER_FATAL_PRE_FENCE")
     need(i > 0, "src_fault8_consumed", bad)
     need("gateARendererFatal" in renderer[i:i + 400], "src_fault8_publishes", bad)
@@ -105,11 +133,9 @@ def main() -> int:
     # cell 0 and the X server fatal-halts with x-test-fault-env before the cell
     # runs - an attempt spent on nothing. Pin each name to its index in the
     # product's own table.
-    init_c = (LORIE / "InitOutput.c").read_text()
     tbl = init_c.split("gateATestCellNames[] = {", 1)[-1].split("};", 1)[0]
     entries = [e.strip().strip('",') for e in tbl.split("\n") if e.strip()]
-    for cid, idx, nm in (("R9-COLD-2", 8, "renderer-fatal-pre-fence"),
-                         ("R9-F1", 16, "stale-ready-replay")):
+    for cid, idx, nm in (("R9-F1", 16, "stale-ready-replay"),):
         need(cells[cid].get("test_fault_env_name") == nm, f"spec_arming_name_{cid}", bad)
         need(idx < len(entries) and entries[idx] == nm,
              f"src_fault_name_index_{idx}", bad)
@@ -118,12 +144,29 @@ def main() -> int:
         need(arm.get("TERMUX_X11_GATEA_TEST_ARM") == "1", f"spec_arming_flag_{cid}", bad)
     need("gateATestCellFromName" in init_c, "src_fault_name_lookup", bad)
 
+    # parseArm hard-codes the allowed (R8 case, fault) pairs and rejects every other
+    # combination with r8EnvFatal -> x-r8-env at startup. R9's faults are neither of
+    # the two permitted pairs, so R9 must run with R8 observation DISARMED. Pin the
+    # rule so a future change to parseArm is caught here rather than on device.
+    obs_c = (LORIE / "lorie_r8_obs.c").read_text()
+    pa = obs_c.split("static int parseArm(void)", 1)[-1].split("\nint lorieR8Armed", 1)[0]
+    need("destroy-while-gpu-owned" in pa and "close-while-lease" in pa,
+         "src_parsearm_pairs_pinned", bad)
+    need("else if (fault != NULL || tarm != NULL)" in pa,
+         "src_parsearm_rejects_other_faults", bad)
+    # and the renderer stream must stay ungated, or disarming would cost the epochs
+    need("role[0] == 'x' && !lorieR8Armed()" in obs_c,
+         "src_obs_guard_is_x_only", bad)
+
     # the two expected fatals must exist at the cited sites
+    # x-bump-unterminal is defensive-only now (no runtime caller: COLD2 §E) but it
+    # must still exist, because its reappearance in a trace would be the signal that
+    # a generation boundary became reachable again.
     need('"x-bump-unterminal", LORIE_GATEA_FAIL_GENERATION' in cmdentry,
          "src_fatal_x_bump_unterminal", bad)
     need('LORIE_GATEA_FAIL_GENERATION, "x-wrong-generation"' in cmdentry,
          "src_fatal_x_wrong_generation", bad)
-    for cid, what in (("R9-COLD-2", "x-bump-unterminal"), ("R9-F1", "x-wrong-generation")):
+    for cid, what in (("R9-F1", "x-wrong-generation"),):
         f = cells[cid]["fatal"]
         need(f["what"] == what and f["reason"] == 6, f"spec_fatal_{cid}", bad)
 

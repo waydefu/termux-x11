@@ -37,7 +37,7 @@ def boundary(**over):
 
 
 def base(d: Path, cell: str, halt: tuple[str, int] | None, bounds: list[dict],
-         ring_events=(1, 2, 3, 4, 5)) -> None:
+         ring_events=(1, 2, 3, 4, 5), ring_sink="file") -> None:
     (d / "artifact-binding.json").write_text(json.dumps(MANIFEST))
     (d / "manifest.json").write_text(json.dumps(MANIFEST))
     st = {"pid": 5, "cmdline": "x", "versionName": "v", "versionCode": 1,
@@ -53,10 +53,19 @@ def base(d: Path, cell: str, halt: tuple[str, int] | None, bounds: list[dict],
     raw = ""
     if halt:
         raw = f"F/gatea-a1: GATEA_FATAL_HALT what={halt[0]} reason={halt[1]}\n"
+    lines = "".join(
+        f"GATEA_EVENT seq={i} role=1 event={e} generation=1 serial=0 src=0 dst=0\n"
+        for i, e in enumerate(ring_events))
+    # ring_sink picks WHICH of the two real sinks carries the events. A cell that
+    # leaves X healthy never dumps gatea-ring.txt, so "logcat" is the shape R9-F2
+    # actually produces on device and must pass.
+    if ring_sink in ("file", "both"):
+        (d / "gatea-ring.txt").write_text(lines)
+    else:
+        (d / "gatea-ring.txt").write_text("")
+    if ring_sink in ("logcat", "both"):
+        raw += "".join("I/gatea-telemetry: " + l for l in lines.splitlines(True))
     (d / "raw-logcat.txt").write_text(raw)
-    (d / "gatea-ring.txt").write_text(
-        "".join(f"GATEA_EVENT seq={i} role=1 event={e} generation=1 serial=0 src=0 dst=0\n"
-                for i, e in enumerate(ring_events)))
 
 
 def build_cold2(d: Path, **mut) -> None:
@@ -95,7 +104,8 @@ def build_f2(d: Path, **mut) -> None:
     if mut.get("same_act"):
         b1["activity_pid"], b1["activity_starttime"] = 200, 2000
     base(d, "R9-F2", mut.get("halt"), [b0, b1],
-         ring_events=mut.get("ring", (1, 2, 3, 4, 5)))
+         ring_events=mut.get("ring", (1, 2, 3, 4, 5)),
+         ring_sink=mut.get("ring_sink", "file"))
     if not mut.get("no_pre"):
         (d / "f1-precondition.json").write_text(json.dumps(
             {"f1_expected_fatal_observed": mut.get("pre_ok", True)}))
@@ -104,18 +114,31 @@ def build_f2(d: Path, **mut) -> None:
          "renderer_ready_entries": mut.get("r_entries", 0)}))
 
 
+DISPATCH_CELLS = ("R9-F1", "R9-F2")  # runtime packet after the 2026-09-22 removal
+
 CASES = [
-    # ---- R9-COLD-2 ----
-    ("V01", "R9-COLD-2", build_cold2, {}, "R9_PASS", "ACCEPT"),
-    ("N01", "R9-COLD-2", build_cold2, {"published": False}, "R9_INVALID", "RENDERER_FATAL_NOT_PUBLISHED"),
-    ("N02", "R9-COLD-2", build_cold2, {"x_alive": False}, "R9_FAIL", "X_DID_NOT_SURVIVE"),
-    ("N03", "R9-COLD-2", build_cold2, {"x_eof": True}, "R9_FAIL", "X_TOOK_X_EOF"),
-    ("N04", "R9-COLD-2", build_cold2, {"nonce2": 999}, "R9_FAIL", "SESSION_NONCE_CHANGED"),
-    ("N05", "R9-COLD-2", build_cold2, {"act_pid": 200, "act_start": 2000}, "R9_INVALID", "ACTIVITY_DID_NOT_RESTART"),
-    ("N06", "R9-COLD-2", build_cold2, {"pending": 0}, "R9_INVALID", "REGISTRY_WAS_TERMINAL"),
-    ("N07", "R9-COLD-2", build_cold2, {"halt": ("x-eof", 6)}, "R9_FAIL", "WRONG_FATAL_x-eof_6"),
-    ("N08", "R9-COLD-2", build_cold2, {"halt": None}, "R9_INVALID", "EXPECTED_FATAL_ABSENT"),
-    ("N09", "R9-COLD-2", build_cold2, {"gen2": 2}, "R9_FAIL", "GENERATION_OPENED_OVER_NONTERMINAL_REGISTRY"),
+    # ---- REMOVED CELLS (2026-09-22) ----
+    # build_cold2 still produces a PERFECT R9-COLD-2 evidence directory — the one
+    # that used to be V01 R9_PASS. It must now be refused anyway. That is the point:
+    # a cell removed as SOURCE-PROVEN / RUNTIME-NOT-CONSTRUCTIBLE must be incapable
+    # of yielding PASS, FAIL or INVALID no matter what evidence is presented to it,
+    # including evidence that would once have passed.
+    ("R01", "R9-COLD-2", build_cold2, {}, "R9_BLOCKED",
+     "CELL_REMOVED_SOURCE_PROVEN_NOT_CONSTRUCTIBLE_R9-COLD-2_see_COLD2-ROUTE-SEARCH.md"),
+    ("R02", "R9-COLD-2", build_cold2, {"pending": 0}, "R9_BLOCKED",
+     "CELL_REMOVED_SOURCE_PROVEN_NOT_CONSTRUCTIBLE_R9-COLD-2_see_COLD2-ROUTE-SEARCH.md"),
+    ("R03", "R9-COLD-2", build_cold2, {"halt": None}, "R9_BLOCKED",
+     "CELL_REMOVED_SOURCE_PROVEN_NOT_CONSTRUCTIBLE_R9-COLD-2_see_COLD2-ROUTE-SEARCH.md"),
+    ("R04", "R9-COLD-1", build_cold2, {}, "R9_BLOCKED",
+     "CELL_REMOVED_SOURCE_PROVEN_NOT_CONSTRUCTIBLE_R9-COLD-1_see_COLD1-ROUTE-SEARCH.md"),
+    ("R05", "R9-COLD-3", build_cold2, {}, "R9_BLOCKED",
+     "CELL_REMOVED_SOURCE_PROVEN_NOT_CONSTRUCTIBLE_R9-COLD-3_see_COLD1-ROUTE-SEARCH.md"),
+    ("R06", "R9-WARM-1", build_cold2, {}, "R9_BLOCKED",
+     "CELL_REMOVED_SOURCE_PROVEN_NOT_CONSTRUCTIBLE_R9-WARM-1_see_V2-R9-DESIGN.md"),
+    ("R07", "R9-WARM-2", build_cold2, {}, "R9_BLOCKED",
+     "CELL_REMOVED_SOURCE_PROVEN_NOT_CONSTRUCTIBLE_R9-WARM-2_see_V2-R9-DESIGN.md"),
+    ("R08", "R9-WARM-3", build_cold2, {}, "R9_BLOCKED",
+     "CELL_REMOVED_SOURCE_PROVEN_NOT_CONSTRUCTIBLE_R9-WARM-3_see_V2-R9-DESIGN.md"),
     # ---- R9-F1 ----
     ("V02", "R9-F1", build_f1, {}, "R9_PASS", "ACCEPT"),
     ("N10", "R9-F1", build_f1, {"legit": False}, "R9_INVALID", "VALIDATE_IMPORT_NOT_REACHED"),
@@ -133,6 +156,15 @@ CASES = [
     ("N20", "R9-F2", build_f2, {"x_entries": 1}, "R9_FAIL", "STALE_RESIDUE_PRESENT"),
     ("N21", "R9-F2", build_f2, {"ring": (1, 2, 3)}, "R9_FAIL", "NO_DIRECT_SUCCESS_EVENT5_ABSENT"),
     ("N22", "R9-F2", build_f2, {"halt": ("x-anything", 6)}, "R9_FAIL", "UNEXPECTED_FATAL_IN_FRESH_SESSION"),
+    # gatea-ring.txt only exists when lorieGateADumpSummary ran, which a healthy F2
+    # never does. The live gatea-telemetry stream must count on its own.
+    ("N23", "R9-F2", build_f2, {"ring_sink": "logcat"}, "R9_PASS", "ACCEPT"),
+    ("N24", "R9-F2", build_f2, {"ring_sink": "both"}, "R9_PASS", "ACCEPT"),
+    ("N25", "R9-F2", build_f2, {"ring_sink": "logcat", "ring": (1, 2, 3)}, "R9_FAIL", "NO_DIRECT_SUCCESS_EVENT5_ABSENT"),
+    ("N26", "R9-F2", build_f2, {"ring_sink": "none"}, "R9_FAIL", "NO_DIRECT_SUCCESS_EVENT5_ABSENT"),
+    # an unobserved counter is not an empty registry
+    ("N27", "R9-F2", build_f2, {"x_entries": None}, "R9_INVALID", "REGISTRY_COUNTERS_NOT_OBSERVED"),
+    ("N28", "R9-F2", build_f2, {"r_entries": None}, "R9_INVALID", "REGISTRY_COUNTERS_NOT_OBSERVED"),
 ]
 
 
@@ -194,7 +226,7 @@ def main() -> int:
             if not ok:
                 failures.append(vid)
     total = len(CASES) + len(COMMON)
-    print(f"r9_judge_vectors={total} device_cells=3 failures={len(failures)}")
+    print(f"r9_judge_vectors={total} device_cells={len(DISPATCH_CELLS)} failures={len(failures)}")
     return 0 if not failures else 1
 
 
