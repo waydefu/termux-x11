@@ -19,6 +19,7 @@ import argparse
 import collections
 import json
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -152,6 +153,15 @@ def main() -> int:
                 rest = st[st.rindex(")") + 2:].split()
                 c[f"{pid}:X3"] = int(rest[11]) + int(rest[12])
             except OSError:
+                pass
+            # the PRoot tracer that serves every process in this rootfs (ours included)
+            try:
+                tp = int(re.search(r"TracerPid:\s+(\d+)", Path("/proc/self/status").read_text()).group(1))
+                if tp:
+                    st = Path(f"/proc/{tp}/stat").read_text()
+                    rest = st[st.rindex(")") + 2:].split()
+                    c[f"{tp}:proot-tracer"] = int(rest[11]) + int(rest[12])
+            except (OSError, AttributeError, ValueError):
                 pass
             cpu_f.write(json.dumps({"epoch": now, "run_id": run_id, "ticks": c}) + "\n")
             cpu_f.flush()
