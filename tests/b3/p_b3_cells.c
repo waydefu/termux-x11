@@ -1,6 +1,8 @@
 /* p_b3_cells.c - V2-B3 performance fixture. One X connection runs a whole cell list.
  *
  *   p_b3_cells --cells cells.tsv --seed N [--iters 20 --warmup 3 --noise-every 25 --x-pid P]
+ *              [--quiet-ms Q]   idle Q ms before CELL_BEGIN and after CELL_END (attribution runs
+ *                               only: windows never touch; timing runs leave it 0 = unchanged)
  *
  * Per cell (columns of cells.tsv: id group rw rh sw sh ratio reuse batch residency readback)
  * it prints ONE JSON line: CELL {...}. Timing is client-side CLOCK_MONOTONIC around exactly
@@ -30,6 +32,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 #include <xcb/render.h>
 #include <xcb/xcb.h>
 
@@ -193,12 +196,15 @@ static int cmp_u64(const void *a, const void *b) {
     return (x > y) - (x < y);
 }
 
+static int quiet_ms = 0;
+
 static void run_cell(const Cell *c, int iters, int warmup, int xpid, int seq) {
     uint64_t *t = calloc((size_t) iters, sizeof(uint64_t));
     int nsets = !strcmp(c->residency, "warm") ? c->reuse : 1;
     Set *sets = calloc((size_t) nsets, sizeof(Set)), prev = {0};
     int have_prev = 0;
     errors = 0;
+    if (quiet_ms > 0) usleep((useconds_t) quiet_ms * 1000);
     double w0 = wall();
     long x0 = x_ticks(xpid);
     printf("MARK CELL_BEGIN %s %.6f\n", c->id, w0);
@@ -248,6 +254,7 @@ static void run_cell(const Cell *c, int iters, int warmup, int xpid, int seq) {
     drain_errors();
     double w1 = wall();
     printf("MARK CELL_END %s %.6f\n", c->id, w1);
+    if (quiet_ms > 0) usleep((useconds_t) quiet_ms * 1000);
     uint64_t *s2 = malloc((size_t) iters * sizeof(uint64_t));
     memcpy(s2, t, (size_t) iters * sizeof(uint64_t));
     qsort(s2, (size_t) iters, sizeof(uint64_t), cmp_u64);
@@ -276,6 +283,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--warmup") && i + 1 < argc) warmup = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--noise-every") && i + 1 < argc) every = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--x-pid") && i + 1 < argc) xpid = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--quiet-ms") && i + 1 < argc) quiet_ms = atoi(argv[++i]);
     }
     if (!cells_path || iters < 1) { fprintf(stderr, "usage\n"); return 64; }
     setvbuf(stdout, NULL, _IOLBF, 0);

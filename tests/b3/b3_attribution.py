@@ -12,7 +12,16 @@ and GATEA_EVENT event=5 (LEASE_GPU_OWNED) in the same window. Classification:
   MIXED    otherwise       (registry pressure: some pairs direct, some refused)
 The shape is always Over a8r8g8b8 -> x8r8g8b8 here, so in G mode a non-direct composite is
 staging unless its FD clone failed; the analysis reports NONE/MIXED, it does not guess
-further. Attribution needs the event stream complete; otherwise every cell is null.
+further. Attribution needs every event=5 line; otherwise every cell is null.
+
+V2 (after b3-attr-01, whose cells were all null):
+  * event=5 completeness: all events complete, OR no fatal and event=5 lines == c0
+    (DIRECT_PUBLISH). Same source proof as ORACLE_FROZEN_V3: one LEASE_GPU_OWNED and one
+    DIRECT_PUBLISH trace site in one function, only halting paths between them. b3-attr-01
+    lost one OTHER line (seq 100919) with event=5 lines == c0 == 6790.
+  * window (BEGIN - 1 ms, END]: logcat stamps are truncated to the ms. The V1 +-5 ms
+    widening counted boundary lines in two back-to-back cells; ATTR runs now pass
+    --quiet-ms to the fixture so windows never touch (checked: windows_disjoint).
 """
 from __future__ import annotations
 
@@ -73,14 +82,21 @@ def main() -> int:
     summ = COL.summary_counters((ev / "gatea-summary.txt").read_text(errors="replace")
                                 if (ev / "gatea-summary.txt").exists() else "") or {}
     nxt = summ.get("nextSequence")
-    complete = seqs.complete(nxt)
+    all_complete = seqs.complete(nxt)
+    c0 = summ.get("c0")
+    no_fatal = (summ.get("where") == "x-close-screen" and summ.get("generationFatal") == 0
+                and summ.get("firstFailed") == 0)
+    complete = all_complete or (no_fatal and c0 is not None and len(ev5) == c0)
+    # windows must not overlap under the V2 rule, or a line could be credited twice
+    ws = sorted((b, e) for _, b, e in windows if b is not None)
+    disjoint = all(ws[i][1] <= ws[i + 1][0] - 0.001 for i in range(len(ws) - 1))
     res = {}
     for cid, b, e in windows:
         d = cells.get(cid)
         if d is None or b is None:
             continue
         issued = (a.warmup + a.iters) * d["batch"] + d["batch"]
-        n5 = (sum(1 for t in ev5 if b - 0.005 <= t <= e + 0.005) if complete else None)
+        n5 = (sum(1 for t in ev5 if b - 0.001 < t <= e) if complete and disjoint else None)
         cls = None if n5 is None else "DIRECT" if n5 == issued else "NONE" if n5 == 0 else "MIXED"
         key = cid if cid not in res else f"{cid}#{sum(1 for k in res if k.split('#')[0] == cid)}"
         res[key] = {"issued": issued, "event5": n5, "class": cls, "rect": f"{d['rw']}x{d['rh']}",
@@ -89,10 +105,12 @@ def main() -> int:
     counts = {}
     for v in res.values():
         counts[str(v["class"])] = counts.get(str(v["class"]), 0) + 1
-    out = {"schema": "b3-attribution/1", "events_complete": complete, "nextSequence": nxt,
+    out = {"schema": "b3-attribution/2", "events_complete": all_complete,
+           "event5_complete": complete, "c0_direct_publish": c0, "event5_lines": len(ev5),
+           "windows_disjoint": disjoint, "nextSequence": nxt,
            "event_lines": seqs.count, "counts": counts, "cells": res}
     Path(a.out).write_text(json.dumps(out, indent=2, sort_keys=True) + "\n")
-    print(f"B3_ATTRIBUTION complete={complete} counts={counts}")
+    print(f"B3_ATTRIBUTION event5_complete={complete} disjoint={disjoint} counts={counts}")
     return 0
 
 

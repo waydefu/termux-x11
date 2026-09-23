@@ -24,11 +24,14 @@ class Ev:
         self.noise = 20           # event 30 lines inside every window (same pids)
         self.foreign5 = 0         # event 5 lines from a pid that is not ours, inside c3
         self.drop = 0
+        self.drop_noise = 0       # lose event 30 lines (logd drop of a NON-direct line)
+        self.span = 10            # cell i window: [B + span*i, B + span*i + 5]; span 5 = touching
+        self.first_failed = 0
 
     def write(self):
         out, L, seq = [], [], 0
         for i, (cid, (batch, n5)) in enumerate(self.cells.items()):
-            b, e = B + 10 * i, B + 10 * i + 5
+            b, e = B + self.span * i, B + self.span * i + 5
             out += [f"MARK CELL_BEGIN {cid} {b:.6f}",
                     "CELL " + json.dumps({"id": cid, "batch": batch, "rw": 64, "rh": 64,
                                           "reuse": 1, "residency": "warm", "ratio": "1x",
@@ -46,14 +49,17 @@ class Ev:
                 for k in range(self.foreign5):
                     L.append(lc(b + 2 + k * 0.01, STABLE, "gatea-telemetry",
                                 f"GATEA_EVENT seq={k} role=1 event=5 generation=1 serial=0 src=1 dst=2"))
+        c0 = sum(1 for ln in L if " event=5 " in ln and f"  {X} " in ln)
         del L[:self.drop]
+        for _ in range(self.drop_noise):
+            L.remove(next(ln for ln in L if " event=30 " in ln))
         (self.d / "b3-cells.out").write_text("\n".join(out) + "\n")
         (self.d / "raw-logcat.txt").write_text("\n".join(L) + "\n")
         (self.d / "x3-pid.txt").write_text(f"x3_pid={X}\n")
         (self.d / "activity-pid.txt").write_text(f"activity_pid={ACT}\n")
         (self.d / "gatea-summary.txt").write_text(
             f"GATEA_SUMMARY where=x-close-screen nonce=0 generation=0 nextSequence={seq} overflow=1 "
-            "firstFailed=0 generationFatal=0 fatalReason=0\n")
+            f"firstFailed={self.first_failed} generationFatal=0 fatalReason=0 c0={c0}\n")
 
     def run(self):
         self.write()
@@ -86,6 +92,25 @@ class T(unittest.TestCase):
         a = self.e.run()
         self.assertEqual(a["cells"]["c3"]["event5"], 0)
         self.assertEqual(a["cells"]["c3"]["class"], "NONE")
+
+    def test_non_direct_line_lost_still_attributes(self):
+        self.e.drop_noise = 1
+        a = self.e.run()
+        self.assertFalse(a["events_complete"])
+        self.assertTrue(a["event5_complete"])
+        self.assertEqual(a["cells"]["c1"]["class"], "DIRECT")
+
+    def test_touching_windows_null_every_cell(self):
+        # back-to-back cells (V1 fixture): a line could be credited to two cells
+        self.e.span = 5
+        a = self.e.run()
+        self.assertFalse(a["windows_disjoint"])
+        self.assertTrue(all(v["class"] is None for v in a["cells"].values()))
+
+    def test_fatal_disables_the_c0_rule(self):
+        self.e.drop_noise = 1; self.e.first_failed = 3
+        a = self.e.run()
+        self.assertFalse(a["event5_complete"])
 
     def test_incomplete_events_null_every_cell(self):
         self.e.drop = 1
