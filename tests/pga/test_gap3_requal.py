@@ -23,10 +23,12 @@ def make(d: Path, staged_mb=4096, swap=(4000, 4100), avail=(5000, 4500), maps=(4
         (d / "MEM-GUARD-TRIPPED.txt").write_text("MEM_GUARD_TRIPPED reason=x\n")
 
 
-def run(d):
+def run(d, control=None):
     o = d / "out.json"
-    subprocess.run([sys.executable, str(HERE / "gap3_requal.py"), "--evidence", str(d), "--out", str(o)],
-                   check=True, capture_output=True)
+    cmd = [sys.executable, str(HERE / "gap3_requal.py"), "--evidence", str(d), "--out", str(o)]
+    if control is not None:
+        cmd += ["--control", str(control)]
+    subprocess.run(cmd, check=True, capture_output=True)
     return json.loads(o.read_text())["verdict"]
 
 
@@ -58,6 +60,27 @@ class T(unittest.TestCase):
 
     def test_missing_maps_is_invalid(self):
         make(self.t / "e", maps=None); self.assertEqual(run(self.t / "e"), "GAP3_REQUAL_INVALID")
+
+
+class Control(unittest.TestCase):
+    """requal-02: the maps criterion is the residue over a no-staging control."""
+    def setUp(self):
+        self.t = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        shutil.rmtree(self.t, ignore_errors=True)
+
+    def test_residue_within_16_passes(self):
+        make(self.t / "s", maps=(4000, 4025)); make(self.t / "c", staged_mb=0, maps=(4000, 4015))
+        self.assertEqual(run(self.t / "s", self.t / "c"), "GAP3_REQUAL_PASS")
+
+    def test_residue_over_16_fails(self):
+        make(self.t / "s", maps=(4000, 4040)); make(self.t / "c", staged_mb=0, maps=(4000, 4010))
+        self.assertEqual(run(self.t / "s", self.t / "c"), "GAP3_REQUAL_FAIL")
+
+    def test_control_that_stages_is_invalid(self):
+        make(self.t / "s", maps=(4000, 4010)); make(self.t / "c", staged_mb=100, maps=(4000, 4010))
+        self.assertEqual(run(self.t / "s", self.t / "c"), "GAP3_REQUAL_INVALID")
 
 
 if __name__ == "__main__":
