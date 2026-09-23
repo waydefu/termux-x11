@@ -159,7 +159,6 @@ typedef struct {
 
 static void lorieExaAsyncFlushAll(void);
 static void lorieExaAsyncLogCounters(const char *where);
-static void lorieUnlockBgraAhb(PixmapPtr pPix);
 
 #define LORIE_PIXMAP_PRIV_FROM_PIXMAP(pixmap) (pixmap ? ((LoriePixmapPriv*) exaGetPixmapDriverPrivate(pixmap)) : NULL)
 #define LORIE_BUFFER_FROM_PIXMAP(pixmap) (pixmap ? ((LoriePixmapPriv*) exaGetPixmapDriverPrivate(pixmap))->buffer : NULL)
@@ -1841,12 +1840,12 @@ static Bool lorieTryScheduleGpuBlit(PixmapPtr pixmap, PixmapPtr dst, RegionPtr u
     if (lorieGateAProtoEnabled()
         && (gateAPairOverlapsBuffer(srcBuffer) || gateAPairOverlapsBuffer(dstBuffer)))
         return FALSE;
-    /* PGA-GAP-4: lorieEnsureGpuSampleable leaves a promoted B8G8R8A8 (depth 32) buffer CPU-locked
-     * for good. A GPU write into it is then never seen by the CPU: every later GetImage / fb access
-     * reads the lock-time contents (all zero on the device). Unlock before the GPU writes; the next
-     * loriePrepareAccess locks again and sees the result. Sources were already unlocked for copy.
-     * After the Gate A lease refusal above: a leased endpoint's lock state is Gate A's. */
-    lorieUnlockBgraAhb(dst);
+    /* PGA-GAP-4: a B8G8R8A8 (depth 32) buffer is never an EGLImage in the renderer
+     * (LorieBuffer_attachToGL: "BGRA AHB EGLImages sample as black on this GPU"); its GL texture is
+     * a private upload of the CPU bytes. A GPU write into it lands only in that texture and never
+     * reaches the AHardwareBuffer the X server reads, so it must not be a GPU destination. */
+    if (!LorieBuffer_isRgba(dstBuffer))
+        return FALSE;
 
     if (update) {
         numRects = RegionNumRects(update);
@@ -2234,7 +2233,8 @@ static Bool lorieTryScheduleGpuSolid(PixmapPtr dst, int x1, int y1, int x2, int 
     /* P2: same lease rule as the blit path (Present/Copy/Solid included). */
     if (lorieGateAProtoEnabled() && gateAPairOverlapsBuffer(dstBuffer))
         return FALSE;
-    lorieUnlockBgraAhb(dst);   /* PGA-GAP-4, see lorieTryScheduleGpuBlit */
+    if (!LorieBuffer_isRgba(dstBuffer))   /* PGA-GAP-4, see lorieTryScheduleGpuBlit */
+        return FALSE;
 
     writeIndex = lorieGateAObserveWriteIndex(&pvfb->state->gpuCopyQueue.writeIndex);
     readIndex = lorieGateAObserveReadIndex(&pvfb->state->gpuCopyQueue.readIndex);
@@ -2345,6 +2345,11 @@ static Bool lorieExaPrepareSolid(PixmapPtr dst, int alu, Pixel planemask, Pixel 
         return FALSE;
     }
     if (dst->drawable.bitsPerPixel != 32) {
+        exaSolidFallback++;
+        return FALSE;
+    }
+    /* PGA-GAP-4: depth-32 pixmaps are B8G8R8A8 buffers the renderer cannot write back */
+    if (dst->drawable.depth >= 32) {
         exaSolidFallback++;
         return FALSE;
     }
@@ -2510,6 +2515,8 @@ static Bool lorieExaPrepareCopy(PixmapPtr src, PixmapPtr dst, unused int dx, unu
     if (alu != GXcopy || src == dst)
         return FALSE;
     if (src->drawable.depth != dst->drawable.depth || src->drawable.bitsPerPixel != dst->drawable.bitsPerPixel)
+        return FALSE;
+    if (dst->drawable.depth >= 32)   /* PGA-GAP-4: see lorieTryScheduleGpuBlit */
         return FALSE;
     fullmask = src->drawable.depth >= 32 ? ~((Pixel) 0) : ((((Pixel) 1) << src->drawable.depth) - 1);
     if (planemask != fullmask && planemask != ~((Pixel) 0))
