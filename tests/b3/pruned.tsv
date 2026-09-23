@@ -1,0 +1,9 @@
+group	rect	ratio	reuse	batch	residency	readback	reason
+B	1024x1024	1x	64	1	warm	none	sets_over_256MB
+B	fs-internal	16x	1	1	warm	none	src_over_64MB
+B	fs-internal	1x	16	1	warm	none	sets_over_256MB
+B	fs-internal	1x	64	1	warm	none	sets_over_256MB
+B	fs-external	4x	1	1	warm	none	src_over_64MB
+B	fs-external	16x	1	1	warm	none	src_over_64MB
+B	fs-external	1x	16	1	warm	none	sets_over_256MB
+B	fs-external	1x	64	1	warm	none	sets_over_256MB

@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "status": "B3_FROZEN_V1",
+  "packet": "V2-B3-MATRIX-BIND (plan section 12, D-11)",
+  "frozen_date": "2026-09-23",
+  "frozen_before_any_measurement": true,
+  "binding": {
+    "source_sha": "bfb576940ded333f49d29a8910a785f8d680261c",
+    "apk_sha256": "ff7b9309c405b07245bc352911867a66e8498464e515e09dbd645b3a1ec18472"
+  },
+  "cells": {
+    "file": "cells.tsv",
+    "sha256": "ec2b3e0d0884dd50cef854e73063d7c125353e4b1cfad9da63cd487ba3c6cf9c",
+    "generator": "make_cells.py --seed 20260923 --holdout 40",
+    "pruned_file": "pruned.tsv",
+    "pruned_sha256": "a5e440a6b9c47e207a5903d76320c3191d24c754466a965dfe10d05af7f21f5f",
+    "counts": {
+      "A": 132,
+      "B": 91,
+      "C": 40,
+      "noise_center": 1
+    },
+    "full_feasible_matrix": 3136,
+    "full_nominal_matrix": 8448,
+    "feasibility_rules": [
+      "src bytes <= 64 MB",
+      "reuse x (src+dst) bytes <= 256 MB",
+      "reuse > 1 only with residency warm (reuse rotates LIVE sets)",
+      "pixmap dimensions <= 32767"
+    ]
+  },
+  "fixture": {
+    "source": "p_b3_cells.c",
+    "iters": 20,
+    "warmup": 3,
+    "noise_every": 25,
+    "order_seeds": {
+      "G": 1101,
+      "C": 1102,
+      "S": 1103,
+      "G2": 1104
+    }
+  },
+  "modes": {
+    "G": {
+      "TERMUX_X11_GATEA_PROTO": "1"
+    },
+    "S": {},
+    "C": {
+      "TERMUX_X11_DISABLE_EXA_GPU": "1"
+    },
+    "G2": {
+      "TERMUX_X11_GATEA_PROTO": "1"
+    }
+  },
+  "run_order": [
+    "G",
+    "C",
+    "S",
+    "G2"
+  ],
+  "telemetry": "timing runs: TERMUX_X11_GATEA_TELEMETRY unset, R8 unarmed (production config); X ended by SIGTERM after the fixture exits (construction, pid recorded). Attribution run: G with TELEMETRY=1 + R8-C1 arm, iters 3, clean terminate, event=5 per CELL_BEGIN/CELL_END window",
+  "thresholds": {
+    "gpu_wins_ratio_max": 0.8,
+    "cpu_wins_ratio_min": 1.25,
+    "noise_band_max": 1.25,
+    "holdout_winner_agreement_min": 0.9,
+    "holdout_median_log_error_max": 0.25
+  },
+  "correctness": "every cell's untimed pixel check must pass; a failing cell is excluded from the analysis AND reported as a product correctness finding (production config, TELEMETRY unset)",
+  "environment": "untraced X3, screen Awake+unlocked before/after each run, Stable unchanged, internal panel only (external is offscreen pixmap size only, V-9)"
+}
