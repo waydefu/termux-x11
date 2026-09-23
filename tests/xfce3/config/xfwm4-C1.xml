@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- XFCE-FREEZE-V1 variant C1. Every key that decides the X request mix is pinned;
+     values equal /usr/share/xfwm4/defaults (xfwm4 4.18.0-1build3) except where noted. -->
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="use_compositing" type="bool" value="true"/>
+    <!-- NOT the package default (auto). X3 advertises GLX, so auto would try a GL
+         path through the client-side Mesa, which in this PRoot is a CPU renderer and
+         depends on the caller's Mesa env. off = XRender only, deterministic. -->
+    <property name="vblank_mode" type="string" value="off"/>
+    <property name="sync_to_vblank" type="bool" value="false"/>
+    <property name="unredirect_overlays" type="bool" value="true"/>
+    <property name="show_frame_shadow" type="bool" value="true"/>
+    <property name="show_popup_shadow" type="bool" value="false"/>
+    <property name="show_dock_shadow" type="bool" value="true"/>
+    <property name="shadow_opacity" type="int" value="50"/>
+    <property name="shadow_delta_x" type="int" value="0"/>
+    <property name="shadow_delta_y" type="int" value="-3"/>
+    <property name="shadow_delta_width" type="int" value="0"/>
+    <property name="shadow_delta_height" type="int" value="0"/>
+    <property name="frame_opacity" type="int" value="100"/>
+    <property name="inactive_opacity" type="int" value="100"/>
+    <property name="move_opacity" type="int" value="100"/>
+    <property name="resize_opacity" type="int" value="100"/>
+    <property name="popup_opacity" type="int" value="100"/>
+    <property name="theme" type="string" value="Default"/>
+    <property name="title_shadow_active" type="string" value="false"/>
+    <property name="title_shadow_inactive" type="string" value="false"/>
+    <property name="box_move" type="bool" value="false"/>
+    <property name="box_resize" type="bool" value="false"/>
+    <property name="cycle_preview" type="bool" value="true"/>
+    <property name="placement_mode" type="string" value="center"/>
+    <property name="placement_ratio" type="int" value="20"/>
+    <property name="workspace_count" type="int" value="4"/>
+    <property name="zoom_desktop" type="bool" value="true"/>
+  </property>
+</channel>
