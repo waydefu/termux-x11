@@ -51,5 +51,42 @@ class T(unittest.TestCase):
         self.assertTrue(all(r[p]["holds"] is None for p in ("P1", "P2", "P3", "P4", "P5")))
 
 
+class R(unittest.TestCase):
+    def test_sync_world_confirms(self):
+        g, c = world(True)
+        for w in (16, 64, 256, 1024):            # copy_win is CPU in both modes (src == dst)
+            for sh in ("single", "burst16"):
+                g[("copy_win", w, sh)]["p50_us"] = c[("copy_win", w, sh)]["p50_us"]
+        r = OP.evaluate_replication(g, c)
+        self.assertEqual([r[k]["holds"] for k in ("R1", "R2", "R3")], [True, True, True])
+        self.assertEqual(r["reading"], "O1_O2_CONFIRMED")
+
+    def test_one_size_where_gpu_wins_breaks_r1(self):
+        g, c = world(True)
+        g[("over_argb", 1024, "single")]["p50_us"] = c[("over_argb", 1024, "single")]["p50_us"] - 1
+        r = OP.evaluate_replication(g, c)
+        self.assertFalse(r["R1"]["holds"])
+        self.assertEqual(r["reading"], "NOT_CONFIRMED")
+
+    def test_pipelined_burst_breaks_r2(self):
+        g, c = world(True)
+        g[("solid", 16, "burst16")]["p50_us"] = 3 * g[("solid", 16, "single")]["p50_us"]
+        self.assertFalse(OP.evaluate_replication(g, c)["R2"]["holds"])
+
+    def test_everything_slow_in_g_breaks_control_r3(self):
+        g, c = world(True)
+        for w in (16, 64, 256, 1024):
+            for sh in ("single", "burst16"):
+                g[("copy_win", w, sh)]["p50_us"] = 4 * c[("copy_win", w, sh)]["p50_us"]
+        r = OP.evaluate_replication(g, c)
+        self.assertFalse(r["R3"]["holds"])
+        self.assertEqual(r["reading"], "NOT_CONFIRMED")
+
+    def test_error_cell_is_null(self):
+        g, c = world(True)
+        c[("copy_pix", 256, "single")]["errors"] = 1
+        self.assertIsNone(OP.evaluate_replication(g, c)["R1"]["holds"])
+
+
 if __name__ == "__main__":
     unittest.main()
