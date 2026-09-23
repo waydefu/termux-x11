@@ -147,7 +147,18 @@ typedef struct {
     bool flipped, wasLocked, imported;
     void *locked;
     void *mem;
+    /* EXA async (TERMUX_X11_EXA_ASYNC=1) only. X-byte repairs owed by GPU solids into a depth<32
+     * pixmap, applied on the next CPU access (after the GPU work is complete). One byte value per
+     * pixmap: a solid with a different value flushes first. lockBits/lockDepth remember each
+     * (possibly nested) PrepareAccess's state->lock decision, because a reap between Prepare and
+     * Finish can change the counters lorieNeedsGpuLock reads. */
+    uint8_t nxfix, xfixByte;
+    uint8_t lockBits, lockDepth;
+    BoxRec xfix[32];
 } LoriePixmapPriv;
+
+static void lorieExaAsyncFlushAll(void);
+static void lorieExaAsyncLogCounters(const char *where);
 
 #define LORIE_PIXMAP_PRIV_FROM_PIXMAP(pixmap) (pixmap ? ((LoriePixmapPriv*) exaGetPixmapDriverPrivate(pixmap)) : NULL)
 #define LORIE_BUFFER_FROM_PIXMAP(pixmap) (pixmap ? ((LoriePixmapPriv*) exaGetPixmapDriverPrivate(pixmap))->buffer : NULL)
@@ -1229,6 +1240,9 @@ static Bool lorieCloseScreen(ScreenPtr pScreen) {
     PictureScreenPtr ps = GetPictureScreenIfSet(pScreen);
     Bool ret;
 
+    lorieExaAsyncFlushAll();
+    lorieExaAsyncLogCounters("CloseScreen");
+
 #ifdef LORIE_ENABLE_R8_TEST_SUPPORT
     lorieR8Obs("x", "X_CLOSE_ENTER", "\"path\":\"lorieCloseScreen\"");
 #endif
@@ -1307,6 +1321,8 @@ static Bool lorieRRScreenSetSize(ScreenPtr pScreen, CARD16 width, CARD16 height,
      * in-flight direct write would be a use-after-free. */
     if (lorieGateAProtoEnabled() && gateAPairActive())
         lorieGateAFatalHalt("x-resize-in-lease", LORIE_GATEA_FAIL_CLOSE);
+    /* async: queued ops name the old root buffer; finish them before it is replaced */
+    lorieExaAsyncFlushAll();
 
     // Drain all pending vblanks.
     loriePerformVblanks();
@@ -1602,7 +1618,9 @@ Bool lorieTryScheduleGpuCopy(PixmapPtr pixmap, PixmapPtr dst, RegionPtr update, 
  * call this. Product blit is otherwise identical to lorieTryScheduleGpuCopy. */
 Bool lorieTryScheduleGpuPresentCopy(PixmapPtr pixmap, PixmapPtr dst, RegionPtr update, int16_t x_off, int16_t y_off,
                                     uint64_t *out_serial, void **out_dst_buffer) {
-    Bool ok = lorieTryScheduleGpuBlit(pixmap, dst, update, x_off, y_off, LORIE_GPU_OP_COPY, 1,
+    Bool ok;
+    lorieExaAsyncFlushAll();   /* Present copy stays synchronous */
+    ok = lorieTryScheduleGpuBlit(pixmap, dst, update, x_off, y_off, LORIE_GPU_OP_COPY, 1,
                                       out_serial, out_dst_buffer);
 #ifdef LORIE_ENABLE_R8_TEST_SUPPORT
     if (ok && out_serial) {
@@ -1993,6 +2011,172 @@ static void lorieGpuCopyWaitForCompositeOrFatal(uint64_t serial, int scheduled) 
     }
 }
 
+/* ---- EXA async (PGA-GAP-2 prototype, TERMUX_X11_EXA_ASYNC=1) ----
+ * Design: evidence/session/gate-a-a1/planning-v2/pga/PGA-GAP-2-ASYNC-EXA-DESIGN.md.
+ * Legacy EXA Solid/Copy no longer wait in Done*. Every scheduled op is kept in exaAsyncInflight with
+ * the exact LorieBuffers it acquired; the ack that Done* used to do (gpuCopyPendingDec + release)
+ * happens when completedSerial passes the op (reap). CPU access waits in loriePrepareAccess.
+ * Composite (incl. Gate A) and Present copy stay synchronous. Unset = none of this runs. */
+#define LORIE_EXA_ASYNC_MAX 64
+#define LORIE_EXA_ASYNC_FIXPIX 16
+Bool loriePrepareAccess(PixmapPtr pPix, int index);
+void lorieFinishAccess(PixmapPtr pPix, int index);
+static int exaAsyncMode = -1;
+static struct { uint64_t serial; LorieBuffer *src, *dst; Bool root; } exaAsyncInflight[LORIE_EXA_ASYNC_MAX];
+static int exaAsyncHead, exaAsyncCount;
+static PixmapPtr exaAsyncFixPix[LORIE_EXA_ASYNC_FIXPIX];
+static LoriePixmapPriv *exaAsyncFixPriv[LORIE_EXA_ASYNC_FIXPIX];  /* same index as exaAsyncFixPix */
+static int exaAsyncFixCount;
+static uint64_t exaAsyncPushed, exaAsyncDrainAccess, exaAsyncDrainDestroy, exaAsyncDrainFull,
+    exaAsyncDrainOrder, exaAsyncDrainFailed;
+
+static Bool lorieExaAsync(void) {
+    if (exaAsyncMode < 0) {
+        const char *e = getenv("TERMUX_X11_EXA_ASYNC");
+        exaAsyncMode = e && e[0] && e[0] != '0';
+        if (exaAsyncMode)
+            log(ERROR, "EXA async enabled (legacy Solid/Copy complete asynchronously)");
+    }
+    return exaAsyncMode;
+}
+
+static void lorieExaAsyncRelease(int k) {
+    if (exaAsyncInflight[k].src) {
+        LorieBuffer_gpuCopyPendingDec(exaAsyncInflight[k].src);
+        LorieBuffer_release(exaAsyncInflight[k].src);
+    }
+    if (exaAsyncInflight[k].root)
+        pvfb->rootGpuCopyPending--;
+    else if (exaAsyncInflight[k].dst) {
+        LorieBuffer_gpuCopyPendingDec(exaAsyncInflight[k].dst);
+        LorieBuffer_release(exaAsyncInflight[k].dst);
+    }
+    memset(&exaAsyncInflight[k], 0, sizeof(exaAsyncInflight[k]));
+}
+
+/* Releases every completed op, oldest first. all: first wait for the newest one. A failed wait
+ * (renderer gone / timeout) is treated like the synchronous path treats it: log and ack anyway. */
+static void lorieExaAsyncReap(Bool all) {
+    Bool force = FALSE;
+    if (!exaAsyncCount)
+        return;
+    if (all) {
+        uint64_t newest = exaAsyncInflight[(exaAsyncHead + exaAsyncCount - 1) % LORIE_EXA_ASYNC_MAX].serial;
+        if (!lorieGpuCopyWait(newest, 2000)) {
+            log(ERROR, "EXA async drain wait failed serial=%llu inflight=%d",
+                (unsigned long long) newest, exaAsyncCount);
+            exaAsyncDrainFailed++;
+            force = TRUE;
+        }
+    }
+    while (exaAsyncCount) {
+        if (!force && !lorieGpuCopyIsDone(exaAsyncInflight[exaAsyncHead].serial))
+            break;
+        lorieExaAsyncRelease(exaAsyncHead);
+        exaAsyncHead = (exaAsyncHead + 1) % LORIE_EXA_ASYNC_MAX;
+        exaAsyncCount--;
+    }
+}
+
+static void lorieExaAsyncWaitOldest(void) {
+    if (!exaAsyncCount)
+        return;
+    if (!lorieGpuCopyWait(exaAsyncInflight[exaAsyncHead].serial, 2000))
+        lorieExaAsyncReap(TRUE);            /* failure path: force-ack everything */
+    else
+        lorieExaAsyncReap(FALSE);
+}
+
+static void lorieExaAsyncPush(uint64_t serial, LorieBuffer *src, void *dstBuf) {
+    int k;
+    if (exaAsyncCount == LORIE_EXA_ASYNC_MAX) {
+        exaAsyncDrainFull++;
+        lorieExaAsyncWaitOldest();
+    }
+    k = (exaAsyncHead + exaAsyncCount) % LORIE_EXA_ASYNC_MAX;
+    exaAsyncInflight[k].serial = serial;
+    exaAsyncInflight[k].src = src;
+    exaAsyncInflight[k].dst = (LorieBuffer *) dstBuf;
+    exaAsyncInflight[k].root = dstBuf == NULL;
+    exaAsyncCount++;
+    exaAsyncPushed++;
+}
+
+/* By private pointer: DestroyPixmap only has that. */
+static void lorieExaAsyncForgetFixPriv(LoriePixmapPriv *priv) {
+    int i;
+    for (i = 0; i < exaAsyncFixCount; i++)
+        if (exaAsyncFixPriv[i] == priv) {
+            exaAsyncFixCount--;
+            exaAsyncFixPix[i] = exaAsyncFixPix[exaAsyncFixCount];
+            exaAsyncFixPriv[i] = exaAsyncFixPriv[exaAsyncFixCount];
+            return;
+        }
+}
+
+/* Writes the owed X bytes. Called from loriePrepareAccess with the pixmap mapped and every
+ * in-flight op already complete. */
+static void lorieExaAsyncApplyXfix(PixmapPtr pPix, LoriePixmapPriv *priv) {
+    int b, y, x, x1, y1, x2, y2, dstride = pPix->devKind;
+    uint8_t *d = pPix->devPrivate.ptr;
+    if (d && pPix->drawable.bitsPerPixel == 32) {
+        for (b = 0; b < priv->nxfix; b++) {
+            x1 = priv->xfix[b].x1; y1 = priv->xfix[b].y1; x2 = priv->xfix[b].x2; y2 = priv->xfix[b].y2;
+            if (x1 < 0) x1 = 0;
+            if (y1 < 0) y1 = 0;
+            if (x2 > pPix->drawable.width) x2 = pPix->drawable.width;
+            if (y2 > pPix->drawable.height) y2 = pPix->drawable.height;
+            for (y = y1; y < y2; y++) {
+                uint8_t *row = d + y * dstride + x1 * 4;
+                for (x = 0; x < x2 - x1; x++)
+                    row[x * 4 + 3] = priv->xfixByte;
+            }
+        }
+    }
+    priv->nxfix = 0;
+    lorieExaAsyncForgetFixPriv(priv);
+}
+
+/* Drain + apply owed repairs of one pixmap now (a CPU access does both). */
+static void lorieExaAsyncFlushPixmap(PixmapPtr pPix) {
+    LoriePixmapPriv *priv = pPix ? exaGetPixmapDriverPrivate(pPix) : NULL;
+    if (!priv || !priv->nxfix)
+        return;
+    exaAsyncDrainOrder++;
+    if (loriePrepareAccess(pPix, EXA_PREPARE_DEST))
+        lorieFinishAccess(pPix, EXA_PREPARE_DEST);
+}
+
+/* Before anything that is still synchronous, or reads/replaces pixmaps wholesale (Composite,
+ * Present copy, resize, close): nothing in flight, nothing owed. */
+static void lorieExaAsyncFlushAll(void) {
+    if (!lorieExaAsync() || (!exaAsyncCount && !exaAsyncFixCount))
+        return;
+    exaAsyncDrainOrder++;
+    lorieExaAsyncReap(TRUE);
+    while (exaAsyncFixCount) {
+        PixmapPtr p = exaAsyncFixPix[exaAsyncFixCount - 1];
+        LoriePixmapPriv *priv = exaGetPixmapDriverPrivate(p);
+        LoriePixmapPriv *fp = exaAsyncFixPriv[exaAsyncFixCount - 1];
+        if (!priv || priv != fp || !priv->nxfix || !loriePrepareAccess(p, EXA_PREPARE_DEST)) {
+            fp->nxfix = 0;   /* cannot map: drop, same outcome as a failed repair access */
+            lorieExaAsyncForgetFixPriv(fp);
+            continue;
+        }
+        lorieFinishAccess(p, EXA_PREPARE_DEST);
+    }
+}
+
+static void lorieExaAsyncLogCounters(const char *where) {
+    if (lorieExaAsync())
+        log(ERROR, "EXA async counters at %s: pushed=%llu drain_access=%llu drain_destroy=%llu "
+            "drain_full=%llu drain_order=%llu drain_failed=%llu inflight=%d fixpix=%d", where,
+            (unsigned long long) exaAsyncPushed, (unsigned long long) exaAsyncDrainAccess,
+            (unsigned long long) exaAsyncDrainDestroy, (unsigned long long) exaAsyncDrainFull,
+            (unsigned long long) exaAsyncDrainOrder, (unsigned long long) exaAsyncDrainFailed,
+            exaAsyncCount, exaAsyncFixCount);
+}
+
 static struct {
     PixmapPtr src;
     PixmapPtr dst;
@@ -2179,12 +2363,17 @@ static void lorieExaSolid(PixmapPtr dst, int x1, int y1, int x2, int y2) {
     if (x2 <= x1 || y2 <= y1 || !exaGpuSolid.dst)
         return;
     scheduled = lorieTryScheduleGpuSolid(dst, x1, y1, x2, y2, exaGpuSolid.fg, &serial, &dstBuf);
-    if (!scheduled && exaGpuSolid.scheduled) {
+    if (!scheduled && lorieExaAsync() && exaAsyncCount) {
+        lorieExaAsyncWaitOldest();
+        scheduled = lorieTryScheduleGpuSolid(dst, x1, y1, x2, y2, exaGpuSolid.fg, &serial, &dstBuf);
+    } else if (!scheduled && exaGpuSolid.scheduled) {
         lorieGpuCopyWait(exaGpuSolid.lastSerial, 2000);
         scheduled = lorieTryScheduleGpuSolid(dst, x1, y1, x2, y2, exaGpuSolid.fg, &serial, &dstBuf);
     }
     if (scheduled) {
         BoxRec box = { (short) x1, (short) y1, (short) x2, (short) y2 };
+        if (lorieExaAsync())
+            lorieExaAsyncPush(serial, NULL, dstBuf);
         exaGpuSolid.lastSerial = serial;
         exaGpuSolid.scheduled++;
         exaGpuSolid.dstBuf = dstBuf;
@@ -2202,14 +2391,53 @@ static void lorieExaSolid(PixmapPtr dst, int x1, int y1, int x2, int y2) {
         exaSolidRects++;
         return;
     }
-    if (exaGpuSolid.scheduled)
+    if (exaGpuSolid.scheduled && !lorieExaAsync())
         lorieGpuCopyWait(exaGpuSolid.lastSerial, 2000);
+    /* async: the CPU fill's loriePrepareAccess drains everything still in flight on dst first */
     lorieExaCpuSolidRect(dst, x1, y1, x2, y2, exaGpuSolid.fg);
     exaSolidCpuRects++;
 }
 
+/* async DoneSolid: no wait, no ack (reap does it). Only record the owed X-byte repairs. */
+static void lorieExaAsyncDoneSolid(PixmapPtr dst) {
+    LoriePixmapPriv *priv = dst ? exaGetPixmapDriverPrivate(dst) : NULL;
+    uint8_t xbyte = (uint8_t) ((exaGpuSolid.fg >> 24) & 0xff);
+    int i;
+    if (exaGpuSolid.scheduled && priv && dst->drawable.depth < 32) {
+        if (priv->nxfix && priv->xfixByte != xbyte)
+            lorieExaAsyncFlushPixmap(dst);
+        if (exaGpuSolid.nrepair >= 32 || priv->nxfix + exaGpuSolid.nrepair > 32
+            || (!priv->nxfix && exaAsyncFixCount == LORIE_EXA_ASYNC_FIXPIX)) {
+            /* does not fit: behave exactly like the synchronous path for this batch */
+            lorieExaAsyncFlushPixmap(dst);
+            if (exaAsyncFixCount == LORIE_EXA_ASYNC_FIXPIX)
+                lorieExaAsyncFlushAll();
+            exaAsyncDrainOrder++;
+            lorieExaAsyncReap(TRUE);
+            if (exaGpuSolid.nrepair > 0 && exaGpuSolid.nrepair < 32)
+                lorieExaRepairSolidXByte(dst, exaGpuSolid.repair, exaGpuSolid.nrepair, exaGpuSolid.fg);
+            else
+                lorieExaRepairSolidXByte(dst, &exaGpuSolid.repairUnion, 1, exaGpuSolid.fg);
+        } else {
+            if (!priv->nxfix) {
+                exaAsyncFixPix[exaAsyncFixCount] = dst;
+                exaAsyncFixPriv[exaAsyncFixCount++] = priv;
+            }
+            priv->xfixByte = xbyte;
+            for (i = 0; i < exaGpuSolid.nrepair; i++)
+                priv->xfix[priv->nxfix++] = exaGpuSolid.repair[i];
+        }
+    }
+    lorieExaAsyncReap(FALSE);
+    memset(&exaGpuSolid, 0, sizeof(exaGpuSolid));
+}
+
 static void lorieExaDoneSolid(unused PixmapPtr dst) {
     int i;
+    if (lorieExaAsync()) {
+        lorieExaAsyncDoneSolid(dst);
+        return;
+    }
     if (exaGpuSolid.scheduled) {
         if (!lorieGpuCopyWait(exaGpuSolid.lastSerial, 2000))
             log(ERROR, "EXA GPU solid wait timeout serial=%llu scheduled=%d",
@@ -2281,6 +2509,11 @@ static Bool lorieExaPrepareCopy(PixmapPtr src, PixmapPtr dst, unused int dx, unu
     if (!lorieEnsureGpuSampleable(src, LORIEBUFFER_AHARDWAREBUFFER) ||
         !lorieEnsureGpuSampleable(dst, LORIEBUFFER_AHARDWAREBUFFER))
         return FALSE;
+    if (lorieExaAsync()) {
+        /* owed X-byte repairs must land before a copy reads or overwrites these pixels */
+        lorieExaAsyncFlushPixmap(src);
+        lorieExaAsyncFlushPixmap(dst);
+    }
     exaGpuCopy.src = src;
     exaGpuCopy.dst = dst;
     lorieUnlockBgraAhb(src);
@@ -2302,14 +2535,23 @@ static void lorieExaCopy(PixmapPtr dst, int srcX, int srcY, int dstX, int dstY, 
     scheduled = lorieTryScheduleGpuCopy(exaGpuCopy.src, dst, &region,
                                         (int16_t) (dstX - srcX), (int16_t) (dstY - srcY),
                                         &serial, &dstBuf);
-    if (!scheduled && exaGpuCopy.scheduled) {
-        lorieGpuCopyWait(exaGpuCopy.lastSerial, 2000);
+    if (!scheduled && ((lorieExaAsync() && exaAsyncCount) || exaGpuCopy.scheduled)) {
+        if (lorieExaAsync())
+            lorieExaAsyncWaitOldest();
+        else
+            lorieGpuCopyWait(exaGpuCopy.lastSerial, 2000);
         scheduled = lorieTryScheduleGpuCopy(exaGpuCopy.src, dst, &region,
                                             (int16_t) (dstX - srcX), (int16_t) (dstY - srcY),
                                             &serial, &dstBuf);
     }
     RegionUninit(&region);
     if (scheduled) {
+        if (lorieExaAsync()) {
+            /* the buffer lorieTryScheduleGpuBlit just acquired for the source (the one the
+             * synchronous lorieGpuCopyAck would release) */
+            LoriePixmapPriv *sp = LORIE_PIXMAP_PRIV_FROM_PIXMAP(exaGpuCopy.src);
+            lorieExaAsyncPush(serial, sp ? sp->buffer : NULL, dstBuf);
+        }
         exaGpuCopy.lastSerial = serial;
         exaGpuCopy.scheduled++;
         exaGpuCopy.dstBuf = dstBuf;
@@ -2317,7 +2559,7 @@ static void lorieExaCopy(PixmapPtr dst, int srcX, int srcY, int dstX, int dstY, 
         lorieGateATraceXCallback(LORIE_GATEA_XOP_COPYAREA, serial, gateACurrentClientSeq());
         return;
     }
-    if (exaGpuCopy.scheduled)
+    if (exaGpuCopy.scheduled && !lorieExaAsync())
         lorieGpuCopyWait(exaGpuCopy.lastSerial, 2000);
     lorieExaCpuCopyRect(exaGpuCopy.src, dst, srcX, srcY, dstX, dstY, width, height);
     exaCopyFallbackRects++;
@@ -2325,6 +2567,11 @@ static void lorieExaCopy(PixmapPtr dst, int srcX, int srcY, int dstX, int dstY, 
 
 static void lorieExaDoneCopy(unused PixmapPtr dst) {
     int i;
+    if (lorieExaAsync()) {
+        lorieExaAsyncReap(FALSE);
+        memset(&exaGpuCopy, 0, sizeof(exaGpuCopy));
+        return;
+    }
     if (exaGpuCopy.scheduled) {
         if (!lorieGpuCopyWait(exaGpuCopy.lastSerial, 2000))
             log(ERROR, "EXA GPU copy wait timeout serial=%llu scheduled=%d",
@@ -2976,6 +3223,9 @@ static Bool lorieExaPrepareComposite(int op, PicturePtr pSrc, PicturePtr pMask, 
                                     PixmapPtr pSrcPix, PixmapPtr pMaskPix, PixmapPtr pDstPix) {
     uint64_t prepare_start = lorieB3aEnabled() ? lorieB3aNowNs() : 0;
     uint32_t b3aRecord = lorieB3aCurrentRecord();
+    /* async: Composite (incl. Gate A) stays synchronous and repairs X bytes itself; start it from
+     * a state with nothing in flight and nothing owed, exactly like the synchronous build. */
+    lorieExaAsyncFlushAll();
     memset(&exaGpuComp, 0, sizeof(exaGpuComp));
     lorieGateATraceXCallback(LORIE_GATEA_XOP_COMPOSITE, 0, gateACurrentClientSeq());
     if (!lorieCanAccelComposite(op, pSrc, pMask, pDst, pSrcPix, pMaskPix, pDstPix)) {
@@ -3916,6 +4166,14 @@ void lorieExaDestroyPixmap(__unused ScreenPtr pScreen, void *driverPriv) {
     if (lorieGateAProtoEnabled() && priv && priv->buffer
         && gateAPairOverlapsBuffer(priv->buffer))
         gateAXFatal("x-destroy-in-lease", LORIE_GATEA_FAIL_UNREGISTER, 0);
+    if (lorieExaAsync()) {
+        /* queued ops name this buffer; the renderer must execute them before it is unregistered */
+        lorieExaAsyncForgetFixPriv(priv);   /* owed repairs die with the pixels */
+        if (exaAsyncCount && priv->buffer && LorieBuffer_hasGpuCopyPending(priv->buffer)) {
+            exaAsyncDrainDestroy++;
+            lorieExaAsyncReap(TRUE);
+        }
+    }
     if (priv->buffer) {
         if (lorieGateAProtoEnabled() && gateARetireBuffer(priv->buffer) != 0)
             gateAXFatal("x-retire-buffer", LORIE_GATEA_FAIL_UNREGISTER, 0);
@@ -3948,8 +4206,18 @@ static inline __always_inline Bool lorieNeedsGpuLock(PixmapPtr pPix, LoriePixmap
 
 Bool loriePrepareAccess(PixmapPtr pPix, int index) {
     LoriePixmapPriv *priv = exaGetPixmapDriverPrivate(pPix);
-    Bool needsGpuLock = lorieNeedsGpuLock(pPix, priv, index);
+    Bool needsGpuLock;
     int leaseRefuse;
+    /* async: the CPU must see every GPU write already queued for this pixmap (and must not write
+     * pixels a queued GPU op still reads). Wait BEFORE state->lock: the renderer needs that lock
+     * to execute the queue. */
+    if (lorieExaAsync() && priv && (priv->nxfix || (exaAsyncCount &&
+            (pScreenPtr->GetScreenPixmap(pScreenPtr) == pPix ? pvfb->rootGpuCopyPending != 0
+             : (priv->buffer && LorieBuffer_hasGpuCopyPending(priv->buffer)))))) {
+        exaAsyncDrainAccess++;
+        lorieExaAsyncReap(TRUE);
+    }
+    needsGpuLock = lorieNeedsGpuLock(pPix, priv, index);
     /* P2: CPU access to a leased endpoint is refused. The lease only lives
      * inside one synchronous Prepare→Done, so reaching here means reentrancy
      * or a missing Done — never a normal path. The SUCCESS-only repair sets a
@@ -3978,12 +4246,30 @@ Bool loriePrepareAccess(PixmapPtr pPix, int index) {
         priv->wasLocked = TRUE;
 
     pPix->devPrivate.ptr = priv->locked ?: priv->mem;
+    if (lorieExaAsync()) {
+        if (priv->lockDepth < 8) {
+            if (needsGpuLock)
+                priv->lockBits |= (uint8_t) (1u << priv->lockDepth);
+            else
+                priv->lockBits &= (uint8_t) ~(1u << priv->lockDepth);
+        }
+        priv->lockDepth++;
+        if (priv->nxfix)
+            lorieExaAsyncApplyXfix(pPix, priv);
+    }
     return TRUE;
 }
 
 void lorieFinishAccess(PixmapPtr pPix, int index) {
     LoriePixmapPriv *priv = exaGetPixmapDriverPrivate(pPix);
-    if (lorieNeedsGpuLock(pPix, priv, index))
+    Bool unlock;
+    if (lorieExaAsync() && priv->lockDepth) {
+        priv->lockDepth--;
+        unlock = priv->lockDepth < 8 ? (priv->lockBits >> priv->lockDepth) & 1
+                                     : lorieNeedsGpuLock(pPix, priv, index);
+    } else
+        unlock = lorieNeedsGpuLock(pPix, priv, index);
+    if (unlock)
         lorie_mutex_unlock(&pvfb->state->lock, &pvfb->state->lockingPid);
 
     if (!priv->wasLocked) {
