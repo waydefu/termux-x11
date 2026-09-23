@@ -210,6 +210,7 @@ extern int execl_xkbcomp(const char * path, const char * arg, ...);
 /* P2-A.2/A.3 observe-only: logcat + append-only snapshot (survives SIGSEGV without tombstoned). */
 #include <android/log.h>
 #include <fcntl.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 /* B3a portability: neutralize setuid/setgid call sites only AFTER the system
@@ -218,13 +219,30 @@ extern int execl_xkbcomp(const char * path, const char * arg, ...);
  * dix-config.h under -DHAVE_DIX_CONFIG_H (e.g. cmdentrypoint.cpp). */
 #define setgid(a) 0
 #define setuid(a) 0
+/* PGA-GAP-1: the stamps are OFF unless TERMUX_X11_P2A_DIAG is exactly "1".
+ * Each emit opens, appends to and fsyncs /tmp/x11gpu-p2a3.snap; under PRoot that is
+ * >= 332 us, a ceiling of ~3000 emits/s, and a real XFCE session hit it and starved
+ * every client (xfce-c1-03). Crash forensics do not depend on this: the signal handler
+ * writes through p2a3WriteLine. Read once per translation unit. */
+__attribute__((unused))
+static int p2a2_diag_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *e = getenv("TERMUX_X11_P2A_DIAG");
+        cached = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
+    }
+    return cached;
+}
+
 __attribute__((unused))
 static void p2a2_emit(const char *msg)
 {
     size_t n;
     int fd;
 
-    if (!msg)
+    if (!msg || !p2a2_diag_enabled())
         return;
     n = strlen(msg);
     __android_log_print(ANDROID_LOG_INFO, "LorieNative", "%s", msg);
