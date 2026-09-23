@@ -3776,6 +3776,13 @@ static void lorieExaDoneComposite(PixmapPtr dst) {
 
     if (exaGpuComp.scheduled) {
         lorieGpuCopyWaitForCompositeOrFatal(exaGpuComp.lastSerial, exaGpuComp.scheduled);
+        /* PGA-GAP-3: a non-cached staging upload is registered with the renderer by
+         * lorieTryScheduleGpuBlit for THIS transaction only, and releasing it here never
+         * told the renderer (__LorieBuffer_free sends no EVENT_REMOVE_BUFFER): the renderer
+         * kept every copy until X disconnected. The wait above means the renderer is done
+         * with it. The D0a cache buffer keeps its registration (unregistered on replace). */
+        if (upload && upload != d0aStagingCache)
+            lorieUnregisterBuffer(upload);
         if (dst && dst->drawable.depth < 32) {
             if (exaGpuComp.nrepair > 0 && exaGpuComp.nrepair < 32)
                 lorieExaRepairDestXByteZero(dst, exaGpuComp.repair, exaGpuComp.nrepair);
