@@ -10,3 +10,5 @@ d6971d6b470db192dd22d56475361a6925123bd29b4146777aa7d0894f4b6eee  p_b3_cells.c
 e0bad6cb20d41522ed86bc49b4952eb1f1a0aadc3ef6981a936d60dcc57a2672  test_b3_attribution.py
 0836e0f201b9a3afbb4034056db5f4df0453224e8e2121f61df5975188e392d5  ../common/safe-run.sh
 8c04d2a2c34d7063bef32ad9d4f9bdcd6898dd02e6090b78626e8bb8ad3d4028  ../xfce3/xfce_collect.py
+6ab1645a592c4160efca6f1880fe1ea325ae2e77faa5387e8a2e87ae87b71ae1  ../common/mem-guard.sh
+fe4f48d99256ba1f32b9b14dfc4ba6ea10209ebaf6499ad4832e4826b739f277  ../common/test_mem_guard.sh
