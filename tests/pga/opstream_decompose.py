@@ -89,6 +89,57 @@ def load_events(path, xt, rt):
     return ev
 
 
+def detect_tids(path, ops, x3_pid, act_pid, client_comm="p_opstream"):
+    """Thread identities from the trace itself (opstream-g-02: guessing them from logcat was wrong -
+    'gles-renderer: Initialized EGL' is X's own EGL init, and the X3 thread-group leader is the Android
+    Looper running Choreographer callbacks, not the dix thread).
+      X        = the X3 thread (tgid x3_pid) the client wakes most often inside op windows
+      renderer = the Activity thread (tgid act_pid) that X wakes most often inside op windows
+    Returns (x_tid, r_tid, evidence dict)."""
+    wins = [(t0, t1) for _, _, t0, t1 in ops]
+    lo, hi = wins[0][0], wins[-1][1]
+    tg = re.compile(r"^\s*(.+?)-(\d+)\s+\(\s*([-\d]*)\)")
+    wake_by_client, wakes = {}, []
+    k = 0
+    for ln in lines_of(path):
+        if "sched_waking" not in ln:
+            continue
+        m = LINE.match(ln)
+        if not m:
+            continue
+        t = int(round(float(m.group(3)) * 1e9))
+        if t < lo:
+            continue
+        if t > hi:
+            break
+        while k < len(wins) and wins[k][1] < t:
+            k += 1
+        if k == len(wins) or t < wins[k][0]:
+            continue
+        s = WK.match(m.group(5))
+        if not s:
+            continue
+        wakes.append((m.group(1), int(m.group(2)), int(s.group(2))))
+    # tgid of every tid seen as a line owner
+    tgid = {}
+    for ln in lines_of(path):
+        g = tg.match(ln)
+        if g and g.group(3).isdigit():
+            tgid.setdefault(int(g.group(2)), int(g.group(3)))
+    for comm, waker, wakee in wakes:
+        if comm == client_comm and tgid.get(wakee) == x3_pid:
+            wake_by_client[wakee] = wake_by_client.get(wakee, 0) + 1
+    if not wake_by_client:
+        return None, None, {"error": "client never woke an X3 thread"}
+    xt = max(wake_by_client, key=wake_by_client.get)
+    by_x = {}
+    for comm, waker, wakee in wakes:
+        if waker == xt and tgid.get(wakee) == act_pid:
+            by_x[wakee] = by_x.get(wakee, 0) + 1
+    rt = max(by_x, key=by_x.get) if by_x else None
+    return xt, rt, {"client_wakes_x3_threads": wake_by_client, "x_wakes_activity_threads": by_x}
+
+
 def load_ops(path):
     ops, phases = [], {}
     for ln in open(path):
@@ -205,11 +256,22 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--trace", required=True)
     ap.add_argument("--ops", required=True)
-    ap.add_argument("--x-tid", type=int, required=True)
-    ap.add_argument("--r-tid", type=int, required=True)
+    ap.add_argument("--x-tid", type=int)
+    ap.add_argument("--r-tid", type=int)
+    ap.add_argument("--x3-pid", type=int, help="with --act-pid: detect both tids from the trace")
+    ap.add_argument("--act-pid", type=int)
     ap.add_argument("--json")
     a = ap.parse_args()
     ops, phases = load_ops(a.ops)
+    detect = None
+    if a.x3_pid and a.act_pid:
+        a.x_tid, a.r_tid, detect = detect_tids(a.trace, ops, a.x3_pid, a.act_pid)
+        print(f"DETECT x_tid={a.x_tid} r_tid={a.r_tid} {json.dumps(detect)}")
+        if a.x_tid is None or a.r_tid is None:
+            print("DECOMPOSE_TIDS_NOT_FOUND")
+            return 2
+    if a.x_tid is None or a.r_tid is None:
+        ap.error("need --x-tid/--r-tid or --x3-pid/--act-pid")
     ev = load_events(a.trace, a.x_tid, a.r_tid)
     if not ev:
         print("DECOMPOSE_NO_EVENTS")
@@ -218,7 +280,7 @@ def main() -> int:
     lost = sum(1 for _, _, t0, t1 in ops if t0 < cover[0] or t1 > cover[1])
     res = decompose(ev, ops, a.x_tid, a.r_tid)
     summ = summarize(res, phases)
-    doc = {"events": len(ev), "trace_cover_ns": cover, "ops_outside_trace": lost, "phases": summ, "ops": res}
+    doc = {"x_tid": a.x_tid, "r_tid": a.r_tid, "detect": detect, "events": len(ev), "trace_cover_ns": cover, "ops_outside_trace": lost, "phases": summ, "ops": res}
     if a.json:
         json.dump(doc, open(a.json, "w"), indent=1)
     print(f"DECOMPOSE events={len(ev)} ops={len(ops)} ops_outside_trace={lost}")

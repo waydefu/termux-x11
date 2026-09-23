@@ -78,7 +78,28 @@ def main():
     b = o[(1, 1)]
     assert b["kind"] == "handoff" and b["gpu_wait_us"] is None, f"X-only wakes must not count as GPU: {b}"
     assert abs(b["r_other_us"] - 250) < 0.5, b
-    print("TEST_OPSTREAM_DECOMPOSE PASS 3 ops (1 GPU handoff exact, 1 no-handoff, 1 must-not-be-GPU)")
+    # tid detection: X3 tgid 5000 has a Looper leader (5000) that the client never wakes and a dix
+    # thread 5001 it does; the Activity (tgid 7000) has a decoy thread 7003 that X wakes less often.
+    def line(t, comm, tid, tg, ev, args):
+        return f"   {comm}-{tid}  (  {tg}) [001] d..3. {t:.6f}: {ev}: {args}"
+    D = []
+    for k in range(3):
+        c = 200.0 + k
+        D += [line(c + 0.0001, "p_opstream", 6000, 6000, "sched_waking", "comm=main pid=5001 prio=120 target_cpu=001"),
+              line(c + 0.0002, "main", 5001, 5000, "sched_waking", "comm=Thread-7 pid=7002 prio=120 target_cpu=002"),
+              line(c + 0.0003, "Thread-7", 7002, 7000, "sched_switch", "prev_comm=Thread-7 prev_pid=7002 prev_prio=120 prev_state=S ==> next_comm=swapper next_pid=0 next_prio=120"),
+              line(c + 0.0004, "main", 5000, 5000, "sched_switch", "prev_comm=main prev_pid=5000 prev_prio=120 prev_state=S ==> next_comm=swapper next_pid=0 next_prio=120")]
+    D += [line(200.0005, "main", 5001, 5000, "sched_waking", "comm=decoy pid=7003 prio=120 target_cpu=002"),
+          line(200.0006, "main", 5000, 5000, "sched_waking", "comm=Thread-7 pid=7002 prio=120 target_cpu=002")]
+    tz2 = os.path.join(tmp, "d.z")
+    open(tz2, "wb").write(b"TRACE:\n" + zlib.compress(("\n".join(D) + "\n").encode()))
+    ops2 = os.path.join(tmp, "ops2.txt")
+    open(ops2, "w").write("PHASE 0 solid 64 single 3 5 0\n" + "".join(
+        f"OP 0 {k} {int((200 + k) * 1e9)} {int((200 + k) * 1e9) + 1000000}\n" for k in range(3)))
+    r = subprocess.run([sys.executable, os.path.join(HERE, "opstream_decompose.py"), "--trace", tz2, "--ops", ops2,
+                        "--x3-pid", "5000", "--act-pid", "7000"], capture_output=True, text=True)
+    assert "DETECT x_tid=5001 r_tid=7002" in r.stdout, r.stdout + r.stderr
+    print("TEST_OPSTREAM_DECOMPOSE PASS 3 ops (1 GPU handoff exact, 1 no-handoff, 1 must-not-be-GPU) + tid detection with decoys")
 
 if __name__ == "__main__":
     main()
