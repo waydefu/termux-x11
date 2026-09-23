@@ -8,7 +8,7 @@ M = [
   'chk("correctness", f"{ph}_exact", True, r)', "T.test_phase_fail_with_result_pass_line"),
  ('None if d_p is None else d_p == per.get("cases")', 'True', "T.test_not_all_direct_is_attribution"),
  ('None if d_n is None else d_n == 0, d_n)', 'True, d_n)', "T.test_direct_in_negative_is_correctness"),
- ('complete = nxt is not None and len(evs) == nxt and seqs == set(range(nxt))', 'complete = True',
+ ('complete = seqs.complete(nxt)', 'complete = True',
   "T.test_events_incomplete_is_invalid"),
  ('r is not None and r["cases"] == exp[ph]', 'r is not None', "T.test_case_count_wrong_is_invalid"),
  ('COL._int(tr.get("TracerPid")) == 0', 'True', "T.test_traced_is_invalid"),
@@ -16,6 +16,9 @@ M = [
  ('if failed("correctness"):\n        verdict = "FAIL_CORRECTNESS"\n    elif failed("validity")',
   'if failed("validity"):\n        verdict = "INVALID"\n    elif failed("correctness")', "T.test_correctness_beats_invalid"),
  ('act is not None and act == act_after', 'True', "T.test_activity_died"),
+ ('if int(m.group(3)) == 5:', 'if True:', "T.test_other_events_in_window_are_not_direct"),
+ ('chk("correctness", "no_fatal", n_fat == 0, fat)', 'chk("correctness", "no_fatal", True, fat)',
+  "T.test_fatal_line"),
 ]
 bad = 0
 for i, (old, new, test) in enumerate(M):

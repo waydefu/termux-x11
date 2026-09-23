@@ -94,12 +94,31 @@ def judge(ev: Path, freeze: dict) -> dict:
     act_after = COL._int(COL.read_kv(ev / "activity-pid-after-close.txt").get("activity_pid_after_close"))
     begin = (orc["marks"].get("persistent") or {}).get("BEGIN")
     year = dt.datetime.fromtimestamp(begin).year if begin else dt.datetime.now().year
-    rows = COL.parse_logcat(ev / "raw-logcat.txt", year) or []
     ours = {p for p in (x_pid, act) if p}
-    fat = [r["msg"][:160] for r in rows if (r["pid"] in ours and any(
-        p in r["msg"] for p in COL.FATAL_PATTERNS)) or (r["tag"] == "DEBUG" and r["lvl"] == "F"
-        and any(re.search(rf"\bpid: {p},", r["msg"]) for p in ours))]
-    chk("correctness", "no_fatal", fat == [], fat[:5])
+    names_ours = [re.compile(rf"\bpid: {p},") for p in ours]
+    # ONE streaming pass (INCIDENT-20260923: never hold a TELEMETRY=1 capture in memory);
+    # keeps only the first fatal lines, the seq bitmap and the epochs of event 5.
+    fat, n_fat, ev5 = [], 0, []
+    seqs = COL.SeqSet()
+    f = COL.open_logcat(ev / "raw-logcat.txt")
+    if f is not None:
+        with f:
+            for r in COL.iter_logcat(f, year):
+                msg = r["msg"]
+                mine = r["pid"] in ours
+                if (mine and any(p in msg for p in COL.FATAL_PATTERNS)) or (
+                        r["tag"] == "DEBUG" and r["lvl"] == "F"
+                        and any(rx.search(msg) for rx in names_ours)):
+                    n_fat += 1
+                    if len(fat) < 5:
+                        fat.append(msg[:160])
+                if mine:
+                    m = COL.EVENT_RE.search(msg)
+                    if m:
+                        seqs.add(int(m.group(1)))
+                        if int(m.group(3)) == 5:
+                            ev5.append(r["epoch"])
+    chk("correctness", "no_fatal", n_fat == 0, fat)
     close = jload(ev / "close.json") or {}
     chk("correctness", "x_ends_only_by_terminate",
         close.get("x_alive_after_terminate") is False and have, close)
@@ -120,27 +139,22 @@ def judge(ev: Path, freeze: dict) -> dict:
     chk("validity", "stable_unchanged", bool(sb) and sb == sa, None)
     ce = jload(ev / "capture-end.json") or {}
     chk("validity", "logcat_alive_at_end", ce.get("logcat_alive") is True, ce)
-    evs = []
-    for r in rows:
-        m = COL.EVENT_RE.search(r["msg"])
-        if m and r["pid"] in ours:
-            evs.append((r["epoch"], int(m.group(1)), int(m.group(3))))
     nxt = summ.get("nextSequence")
-    seqs = {e[1] for e in evs}
-    complete = nxt is not None and len(evs) == nxt and seqs == set(range(nxt))
-    chk("validity", "events_complete", complete, {"lines": len(evs), "nextSequence": nxt})
+    complete = seqs.complete(nxt)
+    chk("validity", "events_complete", complete, {"lines": seqs.count, "nextSequence": nxt})
 
     # ---- attribution
-    def in_phase(ph, event):
+    def in_phase(ph):
+        """event 5 (LEASE_GPU_OWNED) lines inside the phase's MARK window"""
         w = orc["marks"].get(ph) or {}
         if "BEGIN" not in w or "END" not in w:
             return None
         # logcat has ms resolution: widen by 5 ms on each side
-        return sum(1 for e in evs if e[2] == event and w["BEGIN"] - 0.005 <= e[0] <= w["END"] + 0.005)
+        return sum(1 for t in ev5 if w["BEGIN"] - 0.005 <= t <= w["END"] + 0.005)
     per = orc["phases"].get("persistent") or {}
-    d_p = in_phase("persistent", 5) if complete else None
-    d_n = in_phase("negative", 5) if complete else None
-    d_f = in_phase("fresh", 5) if complete else None
+    d_p = in_phase("persistent") if complete else None
+    d_n = in_phase("negative") if complete else None
+    d_f = in_phase("fresh") if complete else None
     chk("attribution", "persistent_all_direct",
         None if d_p is None else d_p == per.get("cases"), {"event5": d_p, "cases": per.get("cases")})
     chk("attribution", "negative_no_direct", None if d_n is None else d_n == 0, d_n)

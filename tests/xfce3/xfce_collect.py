@@ -96,21 +96,76 @@ def pct(values: list[float], q: float):
     return s[k - 1]
 
 
-def parse_logcat(path: Path, year: int):
-    rows = []
+def open_logcat(path: Path):
+    """The capture as a text stream, or None if it cannot be opened."""
     try:
-        text = path.read_text(errors="replace")
+        return open(path, encoding="utf-8", errors="replace", buffering=1 << 20)
     except OSError:
         return None
-    for line in text.splitlines():
-        m = LOGCAT_RE.match(line)
-        if not m:
-            continue
-        mo, d, h, mi, s, ms, pid, tid, lvl, tag, msg = m.groups()
-        t = dt.datetime(year, int(mo), int(d), int(h), int(mi), int(s), int(ms) * 1000)
-        rows.append({"epoch": t.timestamp(), "pid": int(pid), "tid": int(tid),
-                     "lvl": lvl, "tag": tag, "msg": msg})
-    return rows
+
+
+def iter_logcat(f, year: int):
+    """Yield one row per logcat line, never holding more than one line.
+
+    A TELEMETRY=1 capture is 0.2-1.3 GB (GATEA_EVENT is ~99% of it); reading one whole
+    got com.termux killed by lmkd (INCIDENT-20260923-LMK-KILLED-TERMUX). Rows and their
+    order are exactly those of text.splitlines() on the whole file: the file is read with
+    universal newlines and each physical line is re-split with str.splitlines().
+    The epoch is the same float as datetime(...).timestamp() (whole local seconds +
+    microseconds / 1e6); the whole-second part is cached per 'MM-DD HH:MM:SS'."""
+    secs: dict = {}
+    for phys in f:
+        for line in phys.splitlines():
+            m = LOGCAT_RE.match(line)
+            if not m:
+                continue
+            mo, d, h, mi, s, ms, pid, tid, lvl, tag, msg = m.groups()
+            key = line[:14]
+            base = secs.get(key)
+            if base is None:
+                base = int(dt.datetime(year, int(mo), int(d), int(h), int(mi), int(s)).timestamp())
+                secs[key] = base
+            yield {"epoch": base + (int(ms) * 1000) / 1e6, "pid": int(pid), "tid": int(tid),
+                   "lvl": lvl, "tag": tag, "msg": msg}
+
+
+def parse_logcat(path: Path, year: int):
+    """Whole capture as a list - small files only (tests); collectors stream."""
+    f = open_logcat(path)
+    if f is None:
+        return None
+    with f:
+        return list(iter_logcat(f, year))
+
+
+class SeqSet:
+    """Distinct GATEA_EVENT sequence numbers in a bitmap: flat memory, and
+    complete(n) is exactly 'count == n and set(seqs) == set(range(n))'."""
+
+    def __init__(self):
+        self.bits = bytearray()
+        self.big: set = set()          # a corrupt line could carry any number
+        self.count = 0
+        self.distinct = 0
+        self.max = -1
+
+    def add(self, seq: int):
+        self.count += 1
+        self.max = max(self.max, seq)
+        if seq >= 1 << 32:
+            if seq not in self.big:
+                self.big.add(seq)
+                self.distinct += 1
+            return
+        i, b = seq >> 3, 1 << (seq & 7)
+        if i >= len(self.bits):
+            self.bits.extend(bytes(i + 1 - len(self.bits) + (1 << 16)))
+        if not self.bits[i] & b:
+            self.bits[i] |= b
+            self.distinct += 1
+
+    def complete(self, n) -> bool:
+        return n is not None and self.count == n and self.distinct == n and self.max < n
 
 
 def stat_cpu_ticks(text: str | None):
@@ -249,59 +304,88 @@ def collect(ev: Path, freeze: dict) -> dict:
     out["window"] = {"epoch": [e0, e1], "mono_ns": [n0, n1]}
     year = dt.datetime.fromtimestamp(e0).year
 
-    rows = parse_logcat(ev / "raw-logcat.txt", year)
-    out["logcat_parsed"] = rows is not None
-    rows = rows or []
-    if out["summary"] is None:
-        # second, independent source: the dump also goes to logcat from the X pid
-        line = next((r["msg"] for r in rows if x_pid is not None and r["pid"] == x_pid
-                     and "GATEA_SUMMARY" in r["msg"]), "")
-        out["summary"] = summary_counters(line)
-        out["summary_source"] = "logcat" if out["summary"] else None
-    inwin = [r for r in rows if e0 <= r["epoch"] < e1]
-
-    # ---- X-pid only
-    xw = [r for r in inwin if x_pid is not None and r["pid"] == x_pid]
+    # ---- ONE streaming pass over the capture (see iter_logcat); every logcat-derived
+    # quantity below is accumulated here with the same rule the list version used.
+    ours = {p for p in (x_pid, act_pid) if p is not None}
+    # "Fatal signal" is logged by libc INSIDE the crashing process (our pid), but the
+    # tombstone lines ("F DEBUG : pid: N, tid: ...", "Abort message") come from the
+    # crash_dump helper under ITS OWN pid - so those are matched on the pid they name.
+    names_ours = [re.compile(rf"\bpid: {p},") for p in ours]
     five = {f: 0 for f in FIVE_S_FIELDS}
     n5 = 0
-    for r in xw:
-        m = FIVE_S_RE.search(r["msg"])
-        if m:
-            n5 += 1
-            for f, v in zip(FIVE_S_FIELDS, m.groups()):
-                five[f] += int(v)
+    stamps = 0
+    summ_line = ""
+    seqs = SeqSet()
+    hist_all: dict[int, int] = {}
+    hist_w: dict[int, int] = {}
+    gens: set = set()
+    bind = 0
+    fat: list = []
+    anr: list = []
+    sfr: list = []
+    f = open_logcat(ev / "raw-logcat.txt")
+    out["logcat_parsed"] = f is not None
+    if f is not None:
+        with f:
+            for r in iter_logcat(f, year):
+                pid, msg = r["pid"], r["msg"]
+                inw = e0 <= r["epoch"] < e1
+                is_x = x_pid is not None and pid == x_pid
+                if is_x and not summ_line and "GATEA_SUMMARY" in msg:
+                    summ_line = msg
+                if is_x and msg.startswith(STAMP_PREFIXES):
+                    stamps += 1
+                if is_x and inw:
+                    m = FIVE_S_RE.search(msg)
+                    if m:
+                        n5 += 1
+                        for fld, v in zip(FIVE_S_FIELDS, m.groups()):
+                            five[fld] += int(v)
+                mine = pid in ours
+                if mine:
+                    m = EVENT_RE.search(msg)
+                    if m:
+                        seq, event, gen = int(m.group(1)), int(m.group(3)), int(m.group(4))
+                        seqs.add(seq)
+                        hist_all[event] = hist_all.get(event, 0) + 1
+                        if inw:
+                            hist_w[event] = hist_w.get(event, 0) + 1
+                        gens.add(gen)
+                    if "GATEA_BIND" in msg:
+                        bind += 1
+                if len(fat) < 50 and (
+                        (mine and any(p in msg for p in FATAL_PATTERNS))
+                        or (r["tag"] == "DEBUG" and r["lvl"] == "F"
+                            and any(rx.search(msg) for rx in names_ours))):
+                    fat.append(f'{pid} {r["tag"]}: {msg[:200]}')
+                if len(anr) < 10 and "ANR in com.waydefu.x11gpu" in msg:
+                    anr.append(msg[:200])
+                if inw and stable_pid is not None and pid == stable_pid:
+                    m = STABLE_FRAMES_RE.match(msg) or FIVE_S_RE.search(msg)
+                    if m:
+                        sfr.append(int(m.group(1)))
+    if out["summary"] is None:
+        # second, independent source: the dump also goes to logcat from the X pid
+        out["summary"] = summary_counters(summ_line)
+        out["summary_source"] = "logcat" if out["summary"] else None
+
+    # ---- X-pid only
     out["xrender_5s"] = five if n5 else {f: None for f in FIVE_S_FIELDS}
     out["xrender_5s_lines"] = n5
     # V2: from the 5 s counter line (xrender_ops is incremented for EVERY composite by
     # lorieCompositeProbe, InitOutput.c:1037), not from 'Probe ENTER' stamps
     out["composite_total"] = out["xrender_5s"]["xrender_ops"]
-    out["diag_stamp_lines"] = sum(1 for r in rows if x_pid is not None and r["pid"] == x_pid
-                                  and r["msg"].startswith(STAMP_PREFIXES))
+    out["diag_stamp_lines"] = stamps
 
     # ---- events: completeness over the whole run, counts inside the window
-    ev_all = []
-    for r in rows:
-        m = EVENT_RE.search(r["msg"])
-        if m and r["pid"] in (x_pid, act_pid):
-            seq, role, event, gen, serial, src, dst = map(int, m.groups())
-            ev_all.append({"epoch": r["epoch"], "seq": seq, "role": role, "event": event,
-                           "generation": gen})
     nxt = (out["summary"] or {}).get("nextSequence")
-    seqs = {e["seq"] for e in ev_all}
-    complete = nxt is not None and len(ev_all) == nxt and seqs == set(range(nxt))
-    out["events_total"] = len(ev_all)
+    complete = seqs.complete(nxt)
+    out["events_total"] = seqs.count
     out["events_complete"] = complete
-    out["events_dup_seq"] = len(ev_all) - len(seqs)
-    hist_all: dict[int, int] = {}
-    for e in ev_all:
-        hist_all[e["event"]] = hist_all.get(e["event"], 0) + 1
+    out["events_dup_seq"] = seqs.count - seqs.distinct
     out["event_hist_run"] = {str(k): v for k, v in sorted(hist_all.items())}
-    hist_w: dict[int, int] = {}
-    for e in ev_all:
-        if e0 <= e["epoch"] < e1:
-            hist_w[e["event"]] = hist_w.get(e["event"], 0) + 1
     out["event_hist_window"] = {str(k): v for k, v in sorted(hist_w.items())} if complete else None
-    out["generations_seen"] = sorted({e["generation"] for e in ev_all})
+    out["generations_seen"] = sorted(gens)
     out["gatea_direct"] = hist_w.get(5, 0) if complete else None
     pre_t_w = out["xrender_5s"]["prepare_true"]
     out["d0a_staged"] = (None if out["gatea_direct"] is None or pre_t_w is None
@@ -320,27 +404,11 @@ def collect(ev: Path, freeze: dict) -> dict:
                                   else pre_t / out["composite_total"])
 
     # ---- GATEA_BIND, fatals, ANR over the WHOLE run
-    out["gatea_bind_lines"] = sum(1 for r in rows if "GATEA_BIND" in r["msg"]
-                                  and r["pid"] in (x_pid, act_pid))
-    ours = {p for p in (x_pid, act_pid) if p is not None}
-    # "Fatal signal" is logged by libc INSIDE the crashing process (our pid), but the
-    # tombstone lines ("F DEBUG : pid: N, tid: ...", "Abort message") come from the
-    # crash_dump helper under ITS OWN pid - so those are matched on the pid they name.
-    def names_ours(msg):
-        return any(re.search(rf"\bpid: {p},", msg) for p in ours)
-    fat = [r for r in rows if
-           (r["pid"] in ours and any(p in r["msg"] for p in FATAL_PATTERNS))
-           or (r["tag"] == "DEBUG" and r["lvl"] == "F" and names_ours(r["msg"]))]
-    out["fatal_lines"] = [f'{r["pid"]} {r["tag"]}: {r["msg"][:200]}' for r in fat][:50]
-    out["anr_lines"] = [r["msg"][:200] for r in rows if "ANR in com.waydefu.x11gpu" in r["msg"]][:10]
+    out["gatea_bind_lines"] = bind
+    out["fatal_lines"] = fat
+    out["anr_lines"] = anr
 
     # ---- Stable background covariate (passive read of lines Stable already emits)
-    sfr = []
-    for r in inwin:
-        if stable_pid is not None and r["pid"] == stable_pid:
-            m = STABLE_FRAMES_RE.match(r["msg"]) or FIVE_S_RE.search(r["msg"])
-            if m:
-                sfr.append(int(m.group(1)))
     out["stable_background_frames_5s"] = sfr
 
     # ---- SurfaceFlinger

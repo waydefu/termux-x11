@@ -455,6 +455,76 @@ class Soft(Base):
         self.assertTrue(any("x.fd_count" in f for f in v["findings"]))
 
 
+def _reference_rows(text: str, year: int):
+    """The pre-streaming parse_logcat body (whole text in memory) - the oracle the
+    streaming reader must reproduce row for row."""
+    rows = []
+    for line in text.splitlines():
+        m = COL.LOGCAT_RE.match(line)
+        if not m:
+            continue
+        mo, d, h, mi, s, ms, pid, tid, lvl, tag, msg = m.groups()
+        t = dt.datetime(year, int(mo), int(d), int(h), int(mi), int(s), int(ms) * 1000)
+        rows.append({"epoch": t.timestamp(), "pid": int(pid), "tid": int(tid),
+                     "lvl": lvl, "tag": tag, "msg": msg})
+    return rows
+
+
+class Streaming(unittest.TestCase):
+    """INCIDENT-20260923: the collector must stream. Streaming must not change a row."""
+
+    def test_iter_logcat_matches_whole_text_parse(self):
+        import random
+        rnd = random.Random(20260923)
+        seps = ["\n", "\r\n", "\r", "\x0c", "\x1c", "\x85", " ", "\x0b"]
+        parts = []
+        for i in range(4000):
+            ms = rnd.randint(0, 999)
+            parts.append(f"09-23 {rnd.randint(0, 23):02d}:{rnd.randint(0, 59):02d}:"
+                         f"{rnd.randint(0, 59):02d}.{ms:03d}  {rnd.randint(1, 32000)}  "
+                         f"{rnd.randint(1, 32000)} I tag{i % 7}: m{i} "
+                         + ("x" * rnd.randint(0, 3000)))
+            parts.append(rnd.choice(seps) if i % 11 == 0 else "\n")
+            if i % 97 == 0:
+                parts.append("garbage \udcff line\n")
+        text = "".join(parts)
+        raw = text.encode("utf-8", errors="surrogateescape") + b"\xff\xfe tail"
+        p = Path(tempfile.mkdtemp(prefix="xfce-stream-")) / "raw-logcat.txt"
+        try:
+            p.write_bytes(raw)
+            want = _reference_rows(raw.decode("utf-8", errors="replace"), 2026)
+            f = COL.open_logcat(p)
+            with f:
+                got = list(COL.iter_logcat(f, 2026))
+            self.assertGreater(len(want), 3000)
+            self.assertEqual(len(got), len(want))
+            self.assertEqual(got, want)
+        finally:
+            shutil.rmtree(p.parent, ignore_errors=True)
+
+    def test_seqset_matches_set_semantics(self):
+        import random
+        rnd = random.Random(7)
+        for trial in range(3000):
+            n = rnd.randint(0, 40)
+            seqs = list(range(n))
+            rnd.shuffle(seqs)
+            k = rnd.randint(0, 3)
+            if k == 1 and seqs:
+                seqs[rnd.randrange(len(seqs))] = rnd.randint(0, 60)     # gap + dup or out of range
+            elif k == 2 and seqs:
+                seqs.pop()                                              # missing
+            elif k == 3:
+                seqs.append(rnd.choice(seqs) if seqs else 0)            # dup
+            s = COL.SeqSet()
+            for q in seqs:
+                s.add(q)
+            for nxt in (None, n, n - 1, n + 1, len(seqs)):
+                want = nxt is not None and len(seqs) == nxt and set(seqs) == set(range(nxt))
+                self.assertEqual(s.complete(nxt), want, (seqs, nxt))
+            self.assertEqual(s.count - s.distinct, len(seqs) - len(set(seqs)))
+
+
 class Choreo(unittest.TestCase):
     """The driver's bookkeeping, against fake xdotool / terminal binaries."""
 

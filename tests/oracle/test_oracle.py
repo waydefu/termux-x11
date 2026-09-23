@@ -36,6 +36,7 @@ class Run:
                         "c18=0 c19=0 c20=0 c21=0 c22=0 c23=0 c24=0 c25=9 c26=9 c27=1")
         self.drop = 0
         self.extra = []
+        self.noise = 0          # non-direct GATEA_EVENT lines per phase window (event 30)
         (d / "x3-pid.txt").write_text(f"x3_pid={X}\n")
         (d / "activity-pid.txt").write_text(f"activity_pid={ACT}\n")
         (d / "activity-pid-after-close.txt").write_text(f"activity_pid_after_close={ACT}\n")
@@ -65,6 +66,10 @@ class Run:
             for i in range(n):
                 L.append(lc(b + (e - b) * (i + 0.5) / max(n, 1), X, "gatea-telemetry",
                             f"GATEA_EVENT seq={seq} role=1 event=5 generation=1 serial={seq} src=1 dst=2"))
+                seq += 1
+            for i in range(self.noise):
+                L.append(lc(b + (e - b) * (i + 0.25) / max(self.noise, 1), X, "gatea-telemetry",
+                            f"GATEA_EVENT seq={seq} role=1 event=30 generation=1 serial={seq} src=1 dst=2"))
                 seq += 1
         for i in range(self.drop):
             L.pop(0)
@@ -108,6 +113,12 @@ class T(unittest.TestCase):
     def test_not_all_direct_is_attribution(self):
         self.r.direct["persistent"] = 1290; self.r.write()
         self.assertEqual(self.v(), "FAIL_ATTRIBUTION")
+
+    def test_other_events_in_window_are_not_direct(self):
+        # only event 5 (LEASE_GPU_OWNED) is a direct composite; the far more frequent
+        # event 30 lines in the same windows must not be counted
+        self.r.noise = 50; self.r.write()
+        self.assertEqual(self.v(), "PASS")
 
     def test_direct_in_negative_is_correctness(self):
         self.r.direct["negative"] = 1; self.r.write()
