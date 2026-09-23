@@ -4226,9 +4226,13 @@ Bool loriePrepareAccess(PixmapPtr pPix, int index) {
     /* async: the CPU must see every GPU write already queued for this pixmap (and must not write
      * pixels a queued GPU op still reads). Wait BEFORE state->lock: the renderer needs that lock
      * to execute the queue. */
+    /* Both counters for the root: rootGpuCopyPending only counts ops that WRITE the root; an op
+     * that READS it (copy from the screen pixmap) counts on its buffer. d1c86dd missed the second:
+     * a CPU Composite into the window overwrote pixels a queued GPU copy had yet to read
+     * (runtime-d1c86dd/oracle-ga-*, op #251 copy win->p24a, op #253 CPU composite into win). */
     if (lorieExaAsync() && priv && (priv->nxfix || (exaAsyncCount &&
-            (pScreenPtr->GetScreenPixmap(pScreenPtr) == pPix ? pvfb->rootGpuCopyPending != 0
-             : (priv->buffer && LorieBuffer_hasGpuCopyPending(priv->buffer)))))) {
+            ((pScreenPtr->GetScreenPixmap(pScreenPtr) == pPix && pvfb->rootGpuCopyPending != 0)
+             || (priv->buffer && LorieBuffer_hasGpuCopyPending(priv->buffer)))))) {
         exaAsyncDrainAccess++;
         lorieExaAsyncReap(TRUE);
     }

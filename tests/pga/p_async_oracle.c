@@ -38,6 +38,15 @@ static uint32_t M[T_N][S * S];                /* model, RGB (depth 24) or ARGB (
 static uint64_t rng;
 static int mutant_skip_copy;
 static int x_errors;
+/* --watch t:x:y  prints the model value of one pixel after every op that changes it (RCA aid) */
+static int watch_t = -1, watch_x, watch_y, op_index;
+static const char *op_name = "";
+static uint32_t watch_last;
+static void watch_after(void) {
+    if (watch_t < 0) return;
+    uint32_t v = M[watch_t][watch_y * S + watch_x];
+    if (v != watch_last) { printf("WATCH op#%d %s -> %08x\n", op_index, op_name, v); watch_last = v; }
+}
 
 static uint32_t rnd(void) { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; return (uint32_t) rng; }
 static int rr(int n) { return (int) (rnd() % (uint32_t) n); }
@@ -80,6 +89,7 @@ static void op_copy(void) {
     dx = rr(S - w + 1); dy = rr(S - h + 1);
     xcb_copy_area(C, D[s], D[d], gc_for(d), (int16_t) x, (int16_t) y, (int16_t) dx, (int16_t) dy, (uint16_t) w, (uint16_t) h);
     if (!mutant_skip_copy) m_copy(s, d, x, y, dx, dy, w, h);
+    if (watch_t >= 0) printf("OPCOPY op#%d %s(%d,%d %dx%d) -> %s(%d,%d)\n", op_index, TN[s], x, y, w, h, TN[d], dx, dy);
 }
 
 static void op_composite_src(void) {                          /* Render Src a8r8g8b8 -> x8r8g8b8 window */
@@ -148,6 +158,11 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "--seed")) rng = strtoull(argv[i + 1], NULL, 10) | 1;
         else if (!strcmp(argv[i], "--ops")) nops = atoi(argv[i + 1]);
         else if (!strcmp(argv[i], "--mutant")) mutant_skip_copy = !strcmp(argv[i + 1], "skip-copy");
+        else if (!strcmp(argv[i], "--watch")) {
+            char tn[16];
+            if (sscanf(argv[i + 1], "%15[^:]:%d:%d", tn, &watch_x, &watch_y) == 3)
+                for (int t = 0; t < T_N; t++) if (!strcmp(tn, TN[t])) watch_t = t;
+        }
         else { printf("FAIL usage %s\n", argv[i]); return 64; }
     }
     uint64_t seed = rng;
@@ -196,12 +211,15 @@ int main(int argc, char **argv) {
         int g = 1 + rr(12);
         for (int k = 0; k < g && done < nops; k++, done++) {
             int o = rr(100);
-            if (o < 45) op_solid();
-            else if (o < 80) op_copy();
-            else if (o < 90) op_composite_src();
-            else op_temp_pixmap();
+            op_index = done;
+            if (o < 45) { op_name = "solid"; op_solid(); }
+            else if (o < 80) { op_name = "copy"; op_copy(); }
+            else if (o < 90) { op_name = "composite_src"; op_composite_src(); }
+            else { op_name = "temp_pixmap"; op_temp_pixmap(); }
+            watch_after();
         }
         groups++;
+        if (watch_t >= 0) printf("GROUP %d ends at op#%d, getimage#%ld next\n", groups, done - 1, getimages + 1);
         check(rr(T_N));
         xcb_generic_event_t *e;
         while ((e = xcb_poll_for_event(C))) { if (e->response_type == 0) x_errors++; free(e); }
