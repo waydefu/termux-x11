@@ -109,11 +109,22 @@ def main() -> int:
     rtt = None
     for _ in range(200):
         if Path("/tmp/.X11-unix/X3").exists():
-            rtt = subprocess.Popen([a.x_rtt, ":3", "250", str(int(a.duration))],
-                                   stdout=open(out / "rtt.txt", "w"), stderr=subprocess.STDOUT,
-                                   stdin=subprocess.DEVNULL)
             break
         time.sleep(0.2)
+    # The socket file can exist before X accepts (or be a stale one): x_rtt then prints
+    # RTT_CONNECT_FAIL and exits, and xfce-c0-gat-01 (709dfac) lost its whole RTT series that way.
+    # Retry until the connection holds; every attempt stays in rtt.txt.
+    rtt_f = open(out / "rtt.txt", "w")
+    for attempt in range(60):
+        rtt = subprocess.Popen([a.x_rtt, ":3", "250", str(int(a.duration))],
+                               stdout=rtt_f, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+        time.sleep(1.0)
+        if rtt.poll() is None:
+            break
+        rtt_f.write(f"RTT_RETRY attempt={attempt + 1} rc={rtt.returncode}\n")
+        rtt_f.flush()
+        rtt = None
+        time.sleep(0.5)
     counts = collections.defaultdict(collections.Counter)   # tid -> Counter(state:wchan)
     comms = {}
     search_f = open(out / "search.jsonl", "w")
