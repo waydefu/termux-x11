@@ -237,6 +237,18 @@ static LorieBuffer *lorieEnsureGpuSampleable(PixmapPtr pixmap, int8_t type) {
 
     desc = LorieBuffer_description(priv->buffer);
     if (desc->type == LORIEBUFFER_REGULAR) {
+        /* PGA-GAP-5 causal test (experiment, not a routing decision): TERMUX_X11_GPU_MIN_PIXELS=N
+         * leaves pixmaps with width*height < N in regular memory, so they never get an AHB, never
+         * get shared with the renderer and every op on them runs on the CPU. Unset = no change. */
+        static long minPixels = -1;
+        if (minPixels < 0) {
+            const char *e = getenv("TERMUX_X11_GPU_MIN_PIXELS");
+            minPixels = e && e[0] ? atol(e) : 0;
+            if (minPixels > 0)
+                log(ERROR, "GPU min pixels %ld (smaller pixmaps are never promoted)", minPixels);
+        }
+        if (minPixels > 0 && (long) pixmap->drawable.width * pixmap->drawable.height < minPixels)
+            return NULL;
         int8_t format = pixmap->drawable.depth >= 32
             ? AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM
             : AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM;
