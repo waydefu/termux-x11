@@ -14,6 +14,15 @@
  *   PHASE negative    ops OUTSIDE the Over a8r8g8b8->x8r8g8b8 slice; each must complete,
  *                     produce the exact software result, and take no direct lease.
  *
+ * ORACLE_FROZEN_V2 (after oracle-01, which V1 judged FAIL_CORRECTNESS; both causes were
+ * construction, see evidence p2-oracle-runtime/ORACLE-01-TRIAGE.md):
+ *   - phases (and every negative case) are separated by a QUIET_MS idle gap, so an event's
+ *     window is unambiguous (V1's phases were 17 us apart and the judge widened +-5 ms);
+ *   - every negative case has its own MARK neg-<kind> BEGIN|END, so a direct lease is named;
+ *   - "repeat" composites 8x8 from the 4x4 source: repeat must take effect. In V1 the 4x4
+ *     composite of a 4x4 source was a USELESS repeat, which the EXA core strips before the
+ *     driver sees the op (exaComposite, exa_render.c:887-891) - an in-slice op, legally direct.
+ *
  * Exact RGB is required everywhere; nothing is pre-declared as tolerable.
  *   cc -O2 -Wall -o /tmp/p_v1_oracle p_v1_oracle.c -lxcb -lxcb-render
  *   DISPLAY=:3 /tmp/p_v1_oracle
@@ -24,6 +33,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 #include <xcb/render.h>
 #include <xcb/xcb.h>
 #include <xcb/xproto.h>
@@ -192,14 +202,19 @@ static void phase_result(const char *ph, struct Stats *st) {
            ph, st->cases, st->fail, st->max_d, st->exact_px, st->xnz_px);
 }
 
+#define QUIET_MS 100
+static void quiet(void) { usleep(QUIET_MS * 1000); }
+
 /* --------------------------------------------------------------- negative --- */
 /* Every negative uses a UNIFORM 4x4 source, so the correct software result has a
  * closed form even for bilinear / repeat / transform: it is the plain per-pixel op. */
 static int neg_case(xcb_connection_t *c, xcb_screen_t *s, xcb_render_pictformat_t f32,
                     xcb_render_pictformat_t f24, xcb_render_pictformat_t fa8, const char *kind,
                     struct Stats *st) {
-    const uint16_t w = 4, h = 4;
-    uint32_t spx = premul(0x80, 255, 0, 0), dpx = 0x000000ff, sb[16], db[16], got[16], exp;
+    const uint16_t sw = 4, sh = 4;
+    /* repeat: the composite (and dst) is 8x8, twice the source, so the repeat is used */
+    const uint16_t w = strcmp(kind, "repeat") ? 4 : 8, h = w;
+    uint32_t spx = premul(0x80, 255, 0, 0), dpx = 0x000000ff, sb[16], db[64], got[64], exp;
     uint8_t op = XCB_RENDER_PICT_OP_OVER, ddepth = 24;
     xcb_render_pictformat_t dfmt = f24;
     xcb_pixmap_t spm = xcb_generate_id(c), dpm = xcb_generate_id(c), mpm = 0;
@@ -209,12 +224,13 @@ static int neg_case(xcb_connection_t *c, xcb_screen_t *s, xcb_render_pictformat_
 
     if (!strcmp(kind, "src-op")) op = XCB_RENDER_PICT_OP_SRC;
     if (!strcmp(kind, "dst-argb")) { ddepth = 32; dfmt = f32; }
-    for (int i = 0; i < 16; i++) { sb[i] = spx; db[i] = ddepth == 32 ? (0xff000000u | dpx) : dpx; }
-    xcb_create_pixmap(c, 32, spm, s->root, w, h);
+    for (int i = 0; i < 16; i++) sb[i] = spx;
+    for (int i = 0; i < w * h; i++) db[i] = ddepth == 32 ? (0xff000000u | dpx) : dpx;
+    xcb_create_pixmap(c, 32, spm, s->root, sw, sh);
     xcb_create_pixmap(c, ddepth, dpm, s->root, w, h);
     xcb_create_gc(c, sgc, spm, 0, NULL);
     xcb_create_gc(c, dgc, dpm, 0, NULL);
-    put(c, spm, sgc, 32, w, h, sb);
+    put(c, spm, sgc, 32, sw, sh, sb);
     put(c, dpm, dgc, ddepth, w, h, db);
     xcb_render_create_picture(c, sp, spm, f32, 0, NULL);
     xcb_render_create_picture(c, dp, dpm, dfmt, 0, NULL);
@@ -259,7 +275,7 @@ static int neg_case(xcb_connection_t *c, xcb_screen_t *s, xcb_render_pictformat_
         fail = 1;
     } else {
         exp = op == XCB_RENDER_PICT_OP_SRC ? (spx & 0x00ffffffu) : ref_over_x8(spx, dpx);
-        for (int i = 0; i < 16; i++)
+        for (int i = 0; i < w * h; i++)
             if ((got[i] & 0x00ffffffu) != exp) {
                 printf("FAIL neg %s px%d got=%08x exp=%06x\n", kind, i, got[i], exp);
                 fail = 1;
@@ -333,6 +349,7 @@ int main(void) {
     sync_ok(c);
     printf("MARK persistent END %.6f\n", wall());
     phase_result("persistent", &sp);
+    quiet();
 
     /* ---- fresh: a new pair per case (registration churn under correctness) */
     struct Stats sf = {0};
@@ -349,14 +366,20 @@ int main(void) {
     sync_ok(c);
     printf("MARK fresh END %.6f\n", wall());
     phase_result("fresh", &sf);
+    quiet();
 
     /* ---- negative: outside the slice */
     struct Stats sn = {0};
     static const char *NEG[] = { "src-op", "mask-a8", "dst-argb", "bilinear", "repeat",
                                  "transform", "component-alpha" };
     printf("MARK negative BEGIN %.6f\n", wall());
-    for (unsigned i = 0; i < N(NEG); i++)
+    for (unsigned i = 0; i < N(NEG); i++) {
+        quiet();
+        printf("MARK neg-%s BEGIN %.6f\n", NEG[i], wall());
         rc |= neg_case(c, s, f32, f24, fa8, NEG[i], &sn);
+        printf("MARK neg-%s END %.6f\n", NEG[i], wall());
+    }
+    quiet();
     printf("MARK negative END %.6f\n", wall());
     phase_result("negative", &sn);
 

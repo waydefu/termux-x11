@@ -37,6 +37,11 @@ class Run:
         self.drop = 0
         self.extra = []
         self.noise = 0          # non-direct GATEA_EVENT lines per phase window (event 30)
+        # V2: one MARK window per negative case, QUIET_MS-like gaps inside the negative phase
+        self.neg_kinds = ["src-op", "mask-a8", "dst-argb", "bilinear", "repeat", "transform",
+                          "component-alpha"]
+        self.neg_direct = {}    # kind -> event=5 lines inside that case's window
+        self.at = []            # extra event=5 lines at these exact epochs (boundary tests)
         (d / "x3-pid.txt").write_text(f"x3_pid={X}\n")
         (d / "activity-pid.txt").write_text(f"activity_pid={ACT}\n")
         (d / "activity-pid-after-close.txt").write_text(f"activity_pid_after_close={ACT}\n")
@@ -54,7 +59,11 @@ class Run:
         for ph in ("persistent", "fresh", "negative"):
             b, e = self.marks[ph]
             cases, fail, maxd = self.phases[ph]
-            o += [f"MARK {ph} BEGIN {b:.6f}", f"MARK {ph} END {e:.6f}",
+            o += [f"MARK {ph} BEGIN {b:.6f}"]
+            if ph == "negative":
+                for k, (nb, ne) in self.neg_windows().items():
+                    o += [f"MARK neg-{k} BEGIN {nb:.6f}", f"MARK neg-{k} END {ne:.6f}"]
+            o += [f"MARK {ph} END {e:.6f}",
                   f"PHASE_RESULT {ph} cases={cases} fail={fail} maxd={maxd} exact_px=1 xnz_px=0"]
         fail_any = any(v[1] for v in self.phases.values())
         o.append(f"RESULT p_v1_oracle {'FAIL' if fail_any else 'PASS'}")
@@ -71,11 +80,25 @@ class Run:
                 L.append(lc(b + (e - b) * (i + 0.25) / max(self.noise, 1), X, "gatea-telemetry",
                             f"GATEA_EVENT seq={seq} role=1 event=30 generation=1 serial={seq} src=1 dst=2"))
                 seq += 1
+        for k, n in self.neg_direct.items():
+            nb, ne = self.neg_windows()[k]
+            for i in range(n):
+                L.append(lc((nb + ne) / 2, X, "gatea-telemetry",
+                            f"GATEA_EVENT seq={seq} role=1 event=5 generation=1 serial={seq} src=1 dst=2"))
+                seq += 1
+        for t in self.at:
+            L.append(lc(t, X, "gatea-telemetry",
+                        f"GATEA_EVENT seq={seq} role=1 event=5 generation=1 serial={seq} src=1 dst=2"))
+            seq += 1
         for i in range(self.drop):
             L.pop(0)
         L += self.extra
         (self.d / "raw-logcat.txt").write_text("\n".join(L) + "\n")
         (self.d / "gatea-summary.txt").write_text(self.summary.format(n=seq) + "\n")
+
+    def neg_windows(self):
+        b = self.marks["negative"][0]
+        return {k: (b + 0.05 + i * 0.13, b + 0.11 + i * 0.13) for i, k in enumerate(self.neg_kinds)}
 
     def judge(self):
         return J.judge(self.d, FREEZE)
@@ -119,6 +142,45 @@ class T(unittest.TestCase):
         # event 30 lines in the same windows must not be counted
         self.r.noise = 50; self.r.write()
         self.assertEqual(self.v(), "PASS")
+
+    def test_boundary_event_counted_once(self):
+        # V2 window (BEGIN - 1 ms, END]. Three extra event=5 lines:
+        #   at persistent END exactly            -> persistent only
+        #   true time 0.2 ms after fresh BEGIN, whose ms-truncated stamp falls BEFORE BEGIN
+        #                                        -> fresh (the 1 ms allowance), once
+        #   3 ms before fresh BEGIN (quiet gap)  -> no phase (V1's +-5 ms credited it to fresh)
+        self.r.direct["persistent"] = 1297
+        self.r.direct["fresh"] = 30
+        pe = self.r.marks["persistent"][1]
+        fb = pe + 0.0605                       # BEGIN not on a millisecond boundary
+        self.r.marks["fresh"] = (fb, self.r.marks["fresh"][1])
+        self.r.at = [pe, fb + 0.0002, fb - 0.003]
+        self.r.write()
+        v = self.r.judge()
+        det = {c["check"]: c["detail"] for c in v["checks"]["attribution"]}
+        self.assertEqual(det["persistent_all_direct"]["event5"], 1298)
+        self.assertEqual(v["fresh_direct_reported"], 31)
+        self.assertEqual(v["verdict"], "PASS")
+
+    def test_direct_in_named_negative_case(self):
+        self.r.neg_direct = {"repeat": 1}; self.r.write()
+        v = self.r.judge()
+        self.assertEqual(v["verdict"], "FAIL_CORRECTNESS")
+        det = {c["check"]: c["detail"] for c in v["checks"]["attribution"]}
+        self.assertEqual(det["negative_no_direct"]["per_case"]["neg-repeat"], 1)
+        self.assertEqual(det["negative_no_direct"]["per_case"]["neg-src-op"], 0)
+
+    def test_back_to_back_phases_are_invalid(self):
+        # the V1 construction: no quiet gap -> windows can overlap -> not a V2 run
+        pe = self.r.marks["persistent"][1]
+        self.r.marks["fresh"] = (pe + 0.00002, self.r.marks["fresh"][1]); self.r.write()
+        v = self.r.judge()
+        self.assertIn("phase_gaps_quiet", v["failed"]["validity"])
+        self.assertEqual(v["verdict"], "INVALID")
+
+    def test_missing_negative_case_marks_is_invalid(self):
+        self.r.neg_kinds = self.r.neg_kinds[:6]; self.r.write()
+        self.assertIn("phase_gaps_quiet", self.r.judge()["failed"]["validity"])
 
     def test_direct_in_negative_is_correctness(self):
         self.r.direct["negative"] = 1; self.r.write()

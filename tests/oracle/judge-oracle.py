@@ -30,7 +30,7 @@ def _load(name, file):
 
 COL = _load("xfce_collect_v3", HERE.parent / "xfce3" / "xfce_collect.py")
 
-MARK_RE = re.compile(r"^MARK (\w+) (BEGIN|END) ([\d.]+)$")
+MARK_RE = re.compile(r"^MARK ([\w-]+) (BEGIN|END) ([\d.]+)$")
 PHASE_RE = re.compile(r"^PHASE_RESULT (\w+) cases=(\d+) fail=(\d+) maxd=(\d+) exact_px=(\d+) xnz_px=(\d+)$")
 
 
@@ -139,25 +139,42 @@ def judge(ev: Path, freeze: dict) -> dict:
     chk("validity", "stable_unchanged", bool(sb) and sb == sa, None)
     ce = jload(ev / "capture-end.json") or {}
     chk("validity", "logcat_alive_at_end", ce.get("logcat_alive") is True, ce)
+    mk = orc["marks"]
+    order = ["persistent", "fresh", "negative"]
+    gaps = []
+    for a_, b_ in zip(order, order[1:]):
+        e_, b2 = (mk.get(a_) or {}).get("END"), (mk.get(b_) or {}).get("BEGIN")
+        gaps.append(None if e_ is None or b2 is None else round(b2 - e_, 4))
+    negk = [k for k in mk if k.startswith("neg-") and "BEGIN" in mk[k] and "END" in mk[k]]
+    need = freeze["fixture"]["quiet_gap_min_s"]
+    chk("validity", "phase_gaps_quiet",
+        all(g is not None and g >= need for g in gaps) and len(negk) == exp["negative"],
+        {"gaps_s": gaps, "min_s": need, "negative_case_marks": len(negk)})
     nxt = summ.get("nextSequence")
     complete = seqs.complete(nxt)
     chk("validity", "events_complete", complete, {"lines": seqs.count, "nextSequence": nxt})
 
     # ---- attribution
     def in_phase(ph):
-        """event 5 (LEASE_GPU_OWNED) lines inside the phase's MARK window"""
+        """event 5 (LEASE_GPU_OWNED) lines inside the phase's MARK window.
+        V2 window (BEGIN - 1 ms, END]: a logcat stamp is the true time truncated to the
+        millisecond, i.e. in (t - 1 ms, t]. V1 widened +-5 ms on both sides while the
+        phases were 17 us apart, so boundary events were counted in two phases
+        (oracle-01: persistent 1300 for 1298 cases). The fixture now leaves QUIET_MS
+        between windows (checked below), so the windows cannot overlap."""
         w = orc["marks"].get(ph) or {}
         if "BEGIN" not in w or "END" not in w:
             return None
-        # logcat has ms resolution: widen by 5 ms on each side
-        return sum(1 for t in ev5 if w["BEGIN"] - 0.005 <= t <= w["END"] + 0.005)
+        return sum(1 for t in ev5 if w["BEGIN"] - 0.001 < t <= w["END"])
     per = orc["phases"].get("persistent") or {}
     d_p = in_phase("persistent") if complete else None
     d_n = in_phase("negative") if complete else None
     d_f = in_phase("fresh") if complete else None
     chk("attribution", "persistent_all_direct",
         None if d_p is None else d_p == per.get("cases"), {"event5": d_p, "cases": per.get("cases")})
-    chk("attribution", "negative_no_direct", None if d_n is None else d_n == 0, d_n)
+    neg = {k: (in_phase(k) if complete else None) for k in sorted(orc["marks"]) if k.startswith("neg-")}
+    chk("attribution", "negative_no_direct", None if d_n is None else d_n == 0,
+        {"negative_window": d_n, "per_case": neg})
 
     def failed(g):
         return [x["check"] for x in checks[g] if x["ok"] is False]
