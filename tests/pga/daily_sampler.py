@@ -1,91 +1,110 @@
 #!/usr/bin/env python3
-"""Phase-0 instrument: where does the CPU go on the user's DAILY desktop (:1)? Read-only.
+"""Phase-0 instrument v2: is the PRoot tracer what makes the DAILY desktop (:1) stutter?
 
-    daily_sampler.py --out DIR --serial S --x-rtt BIN [--baseline 60] [--loaded 240]
-                     [--launch "cmd1" --launch "cmd2"]
+    daily_sampler.py --out DIR --serial S --x-rtt BIN --traced-lat BIN
+                     [--baseline 60] [--loaded 240] [--floor-mb 2000]
+                     [--launch "cmd1" --launch "cmd2"] [--close-launched]
 
-Nothing of Stable is changed: it reads /proc counters, one GetInputFocus round trip every
-250 ms on :1 (x_rtt), the Stable Activity's /proc/<pid>/stat via adb, and Stable's own
-'frames in 5.0 seconds' logcat line (tag LorieNative only). After --baseline seconds it
-starts each --launch command (the user asked for Cursor + Hermes: "open both and it
-starts to stutter"), detached, on DISPLAY=:1, and samples --loaded seconds more.
-Every second: busy cores (/proc/stat), CPU cores per group, MemAvailable. Groups:
-  x1          termux-x11 com.termux.x11 :1        (the daily X server)
-  proot       every process named proot            (the ptrace tracer serving the rootfs)
-  claude      /usr/lib/claude-desktop/*            cursor  cmdline has 'cursor'
-  hermes      cmdline has 'Hermes' or 'hermes'     sampler  this process + x_rtt
-  other       everything else visible here
-Stops early (records why) if MemAvailable < 1500 MB. Launched apps are left running.
+Stable is only observed. Everything is written straight into DIR (on disk, not /tmp, so a
+Termux kill cannot take the evidence with it).
+
+Why v2 (v1 = commit 0d74fe2): v1 walked PRoot's /proc every second and spawned one adb per
+second. Inside PRoot every open() of a path is a trapped syscall, so the sampler itself
+loaded the one tracer thread it was measuring. v2 moves process accounting to the PHONE
+side (one long-lived `adb shell` loop; the phone shell is not traced) and keeps only
+socket / already-open-fd work in PRoot:
+  phone.txt     every 1 s: phone /proc/stat cpu line, tracer /proc/<pid>/stat and its
+                voluntary_ctxt_switches (one wakeup per ptrace stop it serves), :1 X and
+                the Stable Activity stat; every 5 s: /proc/[0-9]*/stat of EVERY process
+  events.txt    logcat (events+main+system) kill / lmk / ANR / Stable frame lines, streamed
+  rtt.txt       x_rtt :1 every 250 ms (X :1 is not traced; its own dispatch latency)
+  tl.txt        traced_lat every 100 ms: fstatat (trapped -> waits for the tracer) vs
+                getppid (not trapped: the CPU-contention control)
+  host.jsonl    every 1 s: MemAvailable / SwapFree (meminfo kept open: no path lookup)
+After --baseline seconds the --launch commands start (setsid, DISPLAY=:1). If MemAvailable
+drops below --floor-mb the launched process groups get SIGTERM (construction, recorded in
+end.json with pgid + cmd) and the run stops. --close-launched does the same at the end.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import shlex
+import signal
 import subprocess
 import time
 from pathlib import Path
 
-HZ = os.sysconf("SC_CLK_TCK")
 TADB = "/data/data/com.termux/files/usr/bin/adb"
+X1_PREFIX = "termux-x11 com.termux.x11 :1"
+
+PHONE_LOOP = r"""
+T={tracer}; X={x1}; A={act}; N={n}; i=0
+echo "HZ $(getconf CLK_TCK)"
+while [ $i -lt $N ]; do
+  echo "S $EPOCHREALTIME"
+  head -1 /proc/stat
+  cat /proc/$T/stat /proc/$X/stat /proc/$A/stat 2>/dev/null
+  grep -E '^(non)?voluntary_ctxt_switches' /proc/$T/status
+  if [ $((i % 5)) -eq 0 ]; then echo "FULL $EPOCHREALTIME"; cat /proc/[0-9]*/stat 2>/dev/null; echo ENDFULL; fi
+  i=$((i+1)); sleep 1
+done
+echo PHONE_LOOP_END
+"""
+
+LOGCAT_FILTER = ("killinfo:I am_kill:I am_proc_died:I am_low_memory:I am_anr:I "
+                 "lowmemorykiller:I lmkd:I LorieNative:I *:S")
 
 
-def adb(serial, *args, timeout=10):
-    env = {k: v for k, v in os.environ.items()
-           if k not in ("ADB_SERVER_SOCKET", "ANDROID_ADB_SERVER_ADDRESS", "ANDROID_ADB_SERVER_PORT")}
-    env.update(HOME="/data/data/com.termux/files/home", ANDROID_NO_USE_FWMARK_CLIENT="1")
+def adb_argv(serial, *args):
+    return ["env", "-u", "ADB_SERVER_SOCKET", "-u", "ANDROID_ADB_SERVER_ADDRESS", "-u",
+            "ANDROID_ADB_SERVER_PORT", "HOME=/data/data/com.termux/files/home",
+            "ANDROID_NO_USE_FWMARK_CLIENT=1", TADB, "-H", "127.0.0.1", "-P", "5038",
+            "-s", serial, *args]
+
+
+def adb(serial, *args, timeout=15):
     try:
-        return subprocess.run([TADB, "-H", "127.0.0.1", "-P", "5038", "-s", serial, *args],
-                              capture_output=True, text=True, timeout=timeout, env=env,
-                              stdin=subprocess.DEVNULL).stdout
+        return subprocess.run(adb_argv(serial, *args), capture_output=True, text=True,
+                              timeout=timeout, stdin=subprocess.DEVNULL).stdout
     except (subprocess.TimeoutExpired, OSError):
         return ""
 
 
-def busy_ticks(serial):
-    """The PHONE's /proc/stat via adb: PRoot's own /proc/stat is synthetic (it barely moves)."""
-    line = adb(serial, "shell", "head -1 /proc/stat", timeout=5).split()
-    if len(line) < 5 or line[0] != "cpu":
-        return None, None
-    v = [int(x) for x in line[1:]]
-    idle = v[3] + v[4]
-    return sum(v) - idle, sum(v)
-
-
-def group_of(cmd: str, comm: str, pid: int, mine: set) -> str:
-    if pid in mine:
-        return "sampler"
-    if cmd.startswith("termux-x11 com.termux.x11 :1"):
-        return "x1"
-    if comm == "proot":
-        return "proot"
-    if "/claude-desktop" in cmd:
-        return "claude"
-    if "cursor" in cmd.lower():
-        return "cursor"
-    if "hermes" in cmd.lower():
-        return "hermes"
-    return "other"
-
-
-def proc_ticks(mine: set):
-    out, top = {}, {}
+def find_pid(pred):
+    """One /proc walk at setup time only (not during sampling)."""
     for p in os.listdir("/proc"):
         if not p.isdigit():
             continue
         try:
-            st = open(f"/proc/{p}/stat").read()
-            rest = st[st.rindex(")") + 2:].split()
-            t = int(rest[11]) + int(rest[12])
-            comm = st[st.index("(") + 1:st.rindex(")")]
+            comm = open(f"/proc/{p}/comm").read().strip()
             cmd = open(f"/proc/{p}/cmdline", "rb").read().replace(b"\0", b" ").decode(errors="replace")
-        except (OSError, ValueError):
+        except OSError:
             continue
-        g = group_of(cmd, comm, int(p), mine)
-        out[g] = out.get(g, 0) + t
-        top[int(p)] = (t, g, cmd[:80] or comm)
-    return out, top
+        if pred(comm, cmd):
+            return int(p), cmd
+    return None, None
+
+
+def meminfo(fh):
+    fh.seek(0)
+    m = {}
+    for ln in fh.read().splitlines():
+        k, v = ln.split(":", 1)
+        if k in ("MemAvailable", "SwapFree", "SwapTotal"):
+            m[k] = int(v.split()[0]) // 1024
+    return m
+
+
+def stop_groups(launched, why):
+    done = []
+    for g in launched:
+        try:
+            os.killpg(g["pgid"], signal.SIGTERM)
+            done.append({"signal": "SIGTERM", "pgid": g["pgid"], "cmd": g["cmd"], "why": why})
+        except ProcessLookupError:
+            done.append({"signal": None, "pgid": g["pgid"], "cmd": g["cmd"], "why": "already_gone"})
+    return done
 
 
 def main() -> int:
@@ -93,78 +112,91 @@ def main() -> int:
     ap.add_argument("--out", required=True)
     ap.add_argument("--serial", required=True)
     ap.add_argument("--x-rtt", required=True)
+    ap.add_argument("--traced-lat", required=True)
     ap.add_argument("--baseline", type=float, default=60)
     ap.add_argument("--loaded", type=float, default=240)
+    ap.add_argument("--floor-mb", type=int, default=2000)
     ap.add_argument("--launch", action="append", default=[])
+    ap.add_argument("--close-launched", action="store_true")
     a = ap.parse_args()
     out = Path(a.out)
-    out.mkdir(parents=True, exist_ok=True)
+    out.mkdir(parents=True, exist_ok=False)          # never write into an old run
     total = a.baseline + a.loaded
-    rtt = subprocess.Popen([a.x_rtt, ":1", "250", str(int(total) + 5)], stdout=open(out / "rtt.txt", "w"),
-                           stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
-    lc = subprocess.Popen(["env", "HOME=/data/data/com.termux/files/home", TADB, "-H", "127.0.0.1", "-P", "5038", "-s", a.serial, "logcat", "-v", "threadtime",
-                           "-T", "1", "LorieNative:I", "*:S"], stdout=open(out / "lorienative.txt", "w"),
-                          stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
-    mine = {os.getpid(), rtt.pid, lc.pid}
-    act = adb(a.serial, "shell", "pidof", "com.termux.x11").split()
-    act = act[0] if act else None
-    (out / "meta.json").write_text(json.dumps({"stable_activity_pid": act, "hz": HZ, "launch": a.launch,
-                                               "baseline_s": a.baseline, "loaded_s": a.loaded,
-                                               "start_epoch": time.time()}))
-    f = open(out / "samples.jsonl", "w")
-    b0, t0 = busy_ticks(a.serial)
-    g0, top0 = proc_ticks(mine)
-    first_top = dict(top0)
-    a0 = None
-    t_start = time.monotonic()
-    m_prev = t_start
-    launched = False
+
+    tracer, tcmd = find_pid(lambda comm, cmd: comm == "proot")
+    x1, _ = find_pid(lambda comm, cmd: cmd.startswith(X1_PREFIX))
+    act = (adb(a.serial, "shell", "pidof", "com.termux.x11").split() or [None])[0]
+    screen = adb(a.serial, "shell", "dumpsys power | grep -E 'mWakefulness='; "
+                 "dumpsys window | grep -m1 isKeyguardShowing")
+    meta = {"tracer_pid": tracer, "tracer_cmd": tcmd, "x1_pid": x1, "stable_activity_pid": act,
+            "screen": screen.split(), "launch": a.launch, "baseline_s": a.baseline,
+            "loaded_s": a.loaded, "floor_mb": a.floor_mb, "sampler_pid": os.getpid(),
+            "start_epoch": time.time()}
+    (out / "meta.json").write_text(json.dumps(meta, indent=1))
+    if not (tracer and x1 and act):
+        (out / "end.json").write_text(json.dumps({"reason": "preflight_missing_pid", **meta}))
+        print("DAILY_SAMPLER preflight_missing_pid")
+        return 2
+
+    n = int(total) + 10
+    procs = {
+        "phone": subprocess.Popen(adb_argv(a.serial, "shell", PHONE_LOOP.format(tracer=tracer, x1=x1, act=act, n=n)),
+                                  stdout=open(out / "phone.txt", "w"), stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL),
+        "events": subprocess.Popen(adb_argv(a.serial, "shell", f"timeout {n} logcat -b events -b main -b system "
+                                            f"-v epoch -T 1 {LOGCAT_FILTER}"),
+                                   stdout=open(out / "events.txt", "w"), stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL),
+        "rtt": subprocess.Popen([a.x_rtt, ":1", "250", str(n)], stdout=open(out / "rtt.txt", "w"),
+                                stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL),
+        "tl": subprocess.Popen([a.traced_lat, "100", str(n)], stdout=open(out / "tl.txt", "w"),
+                               stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL),
+    }
+    meta["helper_pids"] = {k: p.pid for k, p in procs.items()}
+    (out / "meta.json").write_text(json.dumps(meta, indent=1))
+
+    mfh = open("/proc/meminfo")
+    f = open(out / "host.jsonl", "w")
+    launched, construction = [], []
     reason = "completed"
+    t0 = time.monotonic()
     while True:
         time.sleep(1.0)
-        el = time.monotonic() - t_start
-        if not launched and el >= a.baseline:
+        el = time.monotonic() - t0
+        if a.launch and not launched and el >= a.baseline:
             for c in a.launch:
-                subprocess.Popen(["setsid", "nohup", "sh", "-c", f"DISPLAY=:1 exec {c}"],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
-            launched = True
-            f.write(json.dumps({"event": "launch", "t": round(el, 2), "cmds": a.launch}) + "\n")
-        b1, t1 = busy_ticks(a.serial)
-        g1, top1 = proc_ticks(mine)
-        m_now = time.monotonic()
-        dt = m_now - m_prev
-        m_prev = m_now
-        cores = {g: round((g1.get(g, 0) - g0.get(g, 0)) / HZ / dt, 3) for g in set(g0) | set(g1)}
-        ast = adb(a.serial, "shell", "cat", f"/proc/{act}/stat", timeout=5) if act and int(el) % 5 == 0 else ""
-        act_t = None
-        if ast and ")" in ast:
-            r = ast[ast.rindex(")") + 2:].split()
-            act_t = int(r[11]) + int(r[12])
-        mem = {ln.split(":")[0]: int(ln.split()[1]) for ln in open("/proc/meminfo")
-               if ln.startswith(("MemAvailable", "SwapFree"))}
-        rec = {"t": round(el, 2), "phase": "loaded" if launched else "baseline",
-               "busy_cores": (round((b1 - b0) / (t1 - t0) * 8, 3)
-                              if None not in (b0, b1, t0, t1) and t1 > t0 else None),   # 8 cores on the phone
-               "cores": cores, "mem_available_mb": mem["MemAvailable"] // 1024,
-               "swap_free_mb": mem["SwapFree"] // 1024, "stable_activity_ticks": act_t}
-        f.write(json.dumps(rec) + "\n")
+                p = subprocess.Popen(["setsid", "sh", "-c", f"DISPLAY=:1 exec {c}"],
+                                     stdout=open(out / f"launch-{len(launched)}.log", "w"),
+                                     stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+                launched.append({"pgid": p.pid, "cmd": c, "t": round(el, 2), "epoch": time.time()})
+            f.write(json.dumps({"event": "launch", "t": round(el, 2), "epoch": time.time(),
+                                "launched": launched}) + "\n")
+        m = meminfo(mfh)
+        f.write(json.dumps({"t": round(el, 2), "epoch": round(time.time(), 3),
+                            "phase": "loaded" if launched else "baseline",
+                            "mem_available_mb": m["MemAvailable"],
+                            "swap_used_mb": m["SwapTotal"] - m["SwapFree"]}) + "\n")
         f.flush()
-        b0, t0, g0, top0 = b1, t1, g1, top1
-        if rec["mem_available_mb"] < 1500:
+        if m["MemAvailable"] < a.floor_mb:
             reason = "stopped_low_memory"
+            construction += stop_groups(launched, f"mem_available_mb={m['MemAvailable']}<{a.floor_mb}")
+            break
+        dead = [k for k, p in procs.items() if p.poll() is not None]
+        if dead:
+            reason = "helper_exited:" + ",".join(dead)
             break
         if el >= total:
             break
-    # per-process CPU over the whole run (top consumers)
-    per = []
-    for pid, (t, g, c) in top0.items():
-        per.append((t - first_top.get(pid, (0,))[0], pid, g, c))
-    per.sort(reverse=True)
-    (out / "top-processes.json").write_text(json.dumps(
-        [{"cpu_s": round(d / HZ, 2), "pid": pid, "group": g, "cmd": c} for d, pid, g, c in per[:30]], indent=1))
-    rtt.terminate()
-    lc.terminate()
-    (out / "end.json").write_text(json.dumps({"reason": reason, "end_epoch": time.time()}))
+    if a.close_launched and reason == "completed":
+        construction += stop_groups(launched, "close_launched_at_end")
+    for p in procs.values():
+        if p.poll() is None:
+            p.terminate()
+    for p in procs.values():
+        try:
+            p.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            p.kill()
+    (out / "end.json").write_text(json.dumps({"reason": reason, "end_epoch": time.time(),
+                                              "launched": launched, "construction": construction}, indent=1))
     print("DAILY_SAMPLER", reason)
     return 0
 
