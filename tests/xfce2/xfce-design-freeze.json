@@ -1,0 +1,772 @@
+{
+  "schema_version": 1,
+  "status": "XFCE_DESIGN_FROZEN_V2",
+  "packet": "V2-XFCE-DESIGN-FREEZE",
+  "plan": "V1-CORE-EXECUTOR-MASTER-PLAN-V2.3 section 11",
+  "frozen_date": "2026-09-23",
+  "frozen_before_any_xfce_session": true,
+  "binding": {
+    "source_sha": "bfb576940ded333f49d29a8910a785f8d680261c",
+    "apk_sha256": "ff7b9309c405b07245bc352911867a66e8498464e515e09dbd645b3a1ec18472",
+    "package": "com.waydefu.x11gpu",
+    "version_name": "1.03.01-bfb5769-23.09.26",
+    "ci_run": 35811368916,
+    "fixture_terminate_bin_sha256": "2aca8ae15d536065168b3a819de1414c5520792712ea56ce254efbdde05ae50b",
+    "build_id": "890db760a77a7d22945b9640705f70d025b5d518",
+    "smoke": "R8-D R8_PASS runtime-bfb5769/r8-d/attempt-01; R8-P2 R8_PASS runtime-bfb5769/r8-p2/attempt-01"
+  },
+  "baseline_vs_final": {
+    "rule": "plan section 11: Production Gate A gap inventory not closed -> the PRODUCT_SHA will change -> every run under this freeze is BASELINE, never a final Gate W",
+    "pga_closed": false,
+    "classification": "BASELINE"
+  },
+  "p01_duration": {
+    "session_ready_timeout_s": 90,
+    "settle_after_ready_s": 20,
+    "choreography_window_s": 150,
+    "logout_timeout_s": 45,
+    "terminate_timeout_s": 30,
+    "T0": "the instant choreo.py starts, which is after K1 was sampled",
+    "step_lateness_invalid_s": 2.0
+  },
+  "p02_resolution": {
+    "display": "internal",
+    "panel_px": [
+      1200,
+      2608
+    ],
+    "panel_mode_hz": 120,
+    "rotation": 0,
+    "external_display_connected": false,
+    "experimental_pref_displayResolutionMode": "native",
+    "x_root_px": [
+      1200,
+      2191
+    ],
+    "x_root_measured_in": [
+      "p2-xfce-probe/probe-01/xdpyinfo.txt",
+      "p2-xfce-probe/probe-02/xdpyinfo.txt"
+    ],
+    "x_root_note": "X boots at 1280x1024 and is resized by the Activity; the check MUST run after the Activity bound. 2608 - 2191 = 417 px of system bars / cutout, as laid out by the Activity window.",
+    "mismatch": "BLOCKED before XFCE starts (run not consumed)"
+  },
+  "p03_compositor": {
+    "wm": "xfwm4 4.18.0-1build3",
+    "variants": {
+      "C1": {
+        "use_compositing": true,
+        "config": "config/xfwm4-C1.xml",
+        "why": "XFCE package default; same compositor state as the historical B.1 census and B.2e run on :3, so it is comparable with them"
+      },
+      "C0": {
+        "use_compositing": false,
+        "config": "config/xfwm4-C0.xml",
+        "why": "the user's daily :1 XFCE runs with use_compositing=false (~/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml, read 2026-09-23); Gate W measures the daily desktop, so the baseline must show what that configuration actually sends to Gate A"
+      }
+    },
+    "vblank_mode": "off (pinned, not the package default auto: X3 advertises GLX, and auto would route through client-side Mesa, a CPU renderer in this PRoot)",
+    "C1_C0_are_distinct_cells": "never pooled, never compared as the same cell"
+  },
+  "p04_window_choreography": {
+    "driver": "choreo.py (xdotool 1:3.20160805.1-5build1), no manual input, no XTEST input events",
+    "windows": {
+      "T1": {
+        "geometry": "80x24+40+160"
+      },
+      "T2": {
+        "geometry": "80x24+280+760"
+      },
+      "T3": {
+        "geometry": "80x24+400+1360"
+      }
+    },
+    "schedule": [
+      {
+        "t": 0.0,
+        "op": "open",
+        "win": "T1"
+      },
+      {
+        "t": 5.0,
+        "op": "open",
+        "win": "T2"
+      },
+      {
+        "t": 10.0,
+        "op": "open",
+        "win": "T3"
+      },
+      {
+        "t": 20.0,
+        "op": "activate",
+        "win": "T1"
+      },
+      {
+        "t": 22.0,
+        "op": "activate",
+        "win": "T2"
+      },
+      {
+        "t": 24.0,
+        "op": "activate",
+        "win": "T3"
+      },
+      {
+        "t": 26.0,
+        "op": "activate",
+        "win": "T1"
+      },
+      {
+        "t": 28.0,
+        "op": "activate",
+        "win": "T2"
+      },
+      {
+        "t": 30.0,
+        "op": "activate",
+        "win": "T3"
+      },
+      {
+        "t": 32.0,
+        "op": "activate",
+        "win": "T1"
+      },
+      {
+        "t": 34.0,
+        "op": "activate",
+        "win": "T2"
+      },
+      {
+        "t": 36.0,
+        "op": "activate",
+        "win": "T3"
+      },
+      {
+        "t": 38.0,
+        "op": "activate",
+        "win": "T1"
+      },
+      {
+        "t": 40.0,
+        "op": "activate",
+        "win": "T2"
+      },
+      {
+        "t": 42.0,
+        "op": "activate",
+        "win": "T3"
+      },
+      {
+        "t": 44.0,
+        "op": "activate",
+        "win": "T1"
+      },
+      {
+        "t": 46.0,
+        "op": "activate",
+        "win": "T2"
+      },
+      {
+        "t": 48.0,
+        "op": "activate",
+        "win": "T3"
+      },
+      {
+        "t": 50.0,
+        "op": "move",
+        "win": "T2",
+        "x": 296,
+        "y": 776
+      },
+      {
+        "t": 51.0,
+        "op": "move",
+        "win": "T2",
+        "x": 312,
+        "y": 792
+      },
+      {
+        "t": 52.0,
+        "op": "move",
+        "win": "T2",
+        "x": 328,
+        "y": 808
+      },
+      {
+        "t": 53.0,
+        "op": "move",
+        "win": "T2",
+        "x": 344,
+        "y": 824
+      },
+      {
+        "t": 54.0,
+        "op": "move",
+        "win": "T2",
+        "x": 360,
+        "y": 840
+      },
+      {
+        "t": 55.0,
+        "op": "move",
+        "win": "T2",
+        "x": 376,
+        "y": 856
+      },
+      {
+        "t": 56.0,
+        "op": "move",
+        "win": "T2",
+        "x": 392,
+        "y": 872
+      },
+      {
+        "t": 57.0,
+        "op": "move",
+        "win": "T2",
+        "x": 408,
+        "y": 888
+      },
+      {
+        "t": 58.0,
+        "op": "move",
+        "win": "T2",
+        "x": 424,
+        "y": 904
+      },
+      {
+        "t": 59.0,
+        "op": "move",
+        "win": "T2",
+        "x": 440,
+        "y": 920
+      },
+      {
+        "t": 60.0,
+        "op": "move",
+        "win": "T2",
+        "x": 424,
+        "y": 904
+      },
+      {
+        "t": 61.0,
+        "op": "move",
+        "win": "T2",
+        "x": 408,
+        "y": 888
+      },
+      {
+        "t": 62.0,
+        "op": "move",
+        "win": "T2",
+        "x": 392,
+        "y": 872
+      },
+      {
+        "t": 63.0,
+        "op": "move",
+        "win": "T2",
+        "x": 376,
+        "y": 856
+      },
+      {
+        "t": 64.0,
+        "op": "move",
+        "win": "T2",
+        "x": 360,
+        "y": 840
+      },
+      {
+        "t": 65.0,
+        "op": "move",
+        "win": "T2",
+        "x": 344,
+        "y": 824
+      },
+      {
+        "t": 66.0,
+        "op": "move",
+        "win": "T2",
+        "x": 328,
+        "y": 808
+      },
+      {
+        "t": 67.0,
+        "op": "move",
+        "win": "T2",
+        "x": 312,
+        "y": 792
+      },
+      {
+        "t": 68.0,
+        "op": "move",
+        "win": "T2",
+        "x": 296,
+        "y": 776
+      },
+      {
+        "t": 69.0,
+        "op": "move",
+        "win": "T2",
+        "x": 280,
+        "y": 760
+      },
+      {
+        "t": 70.0,
+        "op": "resize",
+        "win": "T1",
+        "w": 900,
+        "h": 700
+      },
+      {
+        "t": 72.5,
+        "op": "resize",
+        "win": "T1",
+        "w": 640,
+        "h": 480
+      },
+      {
+        "t": 75.0,
+        "op": "resize",
+        "win": "T1",
+        "w": 900,
+        "h": 700
+      },
+      {
+        "t": 77.5,
+        "op": "resize",
+        "win": "T1",
+        "w": 640,
+        "h": 480
+      },
+      {
+        "t": 80.0,
+        "op": "resize",
+        "win": "T1",
+        "w": 900,
+        "h": 700
+      },
+      {
+        "t": 82.5,
+        "op": "resize",
+        "win": "T1",
+        "w": 640,
+        "h": 480
+      },
+      {
+        "t": 85.0,
+        "op": "resize",
+        "win": "T1",
+        "w": 900,
+        "h": 700
+      },
+      {
+        "t": 87.5,
+        "op": "resize",
+        "win": "T1",
+        "w": 640,
+        "h": 480
+      },
+      {
+        "t": 90.0,
+        "op": "resize",
+        "win": "T1",
+        "w": 900,
+        "h": 700
+      },
+      {
+        "t": 92.5,
+        "op": "resize",
+        "win": "T1",
+        "w": 640,
+        "h": 480
+      },
+      {
+        "t": 100.0,
+        "op": "close",
+        "win": "T3"
+      },
+      {
+        "t": 105.0,
+        "op": "open",
+        "win": "T3"
+      },
+      {
+        "t": 115.0,
+        "op": "close",
+        "win": "T3"
+      },
+      {
+        "t": 120.0,
+        "op": "open",
+        "win": "T3"
+      },
+      {
+        "t": 135.0,
+        "op": "close",
+        "win": "T1"
+      },
+      {
+        "t": 137.0,
+        "op": "close",
+        "win": "T2"
+      },
+      {
+        "t": 139.0,
+        "op": "close",
+        "win": "T3"
+      },
+      {
+        "t": 150.0,
+        "op": "end"
+      }
+    ],
+    "phases": {
+      "open": [
+        0,
+        20
+      ],
+      "focus": [
+        20,
+        50
+      ],
+      "move": [
+        50,
+        70
+      ],
+      "resize": [
+        70,
+        100
+      ],
+      "cycle": [
+        100,
+        135
+      ],
+      "close": [
+        135,
+        140
+      ],
+      "idle": [
+        140,
+        150
+      ]
+    },
+    "window_lookup_timeout_s": 10,
+    "close_exit_timeout_s": 10
+  },
+  "p05_terminal": {
+    "binary": "xfce4-terminal 1.1.3-1build1",
+    "argv": [
+      "xfce4-terminal",
+      "--disable-server",
+      "--hide-menubar",
+      "--hide-toolbar",
+      "--dynamic-title-mode=none",
+      "--title=XFCE-<win>",
+      "--geometry=<geometry>",
+      "-x",
+      "/bin/bash",
+      "<tests/xfce/term_load.sh>",
+      "<n>",
+      "<state_dir>"
+    ],
+    "config": "config/xfce4-terminal.xml",
+    "command": "term_load.sh: one fixed 60-char line every 100 ms until <state_dir>/close-T<n> exists, then exit 0",
+    "why_disable_server": "one process per window, so a window's close is its own process exit with an observable rc"
+  },
+  "p06_open_close": {
+    "opens": 5,
+    "closes": 5,
+    "close_mechanism": "client-side: the flag file makes term_load.sh exit 0, the terminal exits, the window is destroyed by its owner",
+    "timing": "see p04 schedule: opens at 0/5/10/105/120, closes at 100/115/135/137/139"
+  },
+  "p07_resize": {
+    "window": "T1",
+    "count": 10,
+    "sizes_px": [
+      [
+        900,
+        700
+      ],
+      [
+        640,
+        480
+      ]
+    ],
+    "timing": "every 2.5 s from t=70 to t=92.5, alternating, ending at 640x480"
+  },
+  "p08_redraw": {
+    "terminal_output": "10 lines/s per open terminal (continuous scroll)",
+    "focus_changes": 15,
+    "moves": 20,
+    "idle_tail_s": 10,
+    "screen_saver": "xset s off -dpms on :3 before the session, so no blanking interrupts the window"
+  },
+  "p09_expected_gatea_traffic": {
+    "eligible_shape": "PictOpOver, src a8r8g8b8, dst x8r8g8b8, no mask, no transform/repeat, filter Nearest, no componentAlpha/alphaMap, src != dst (InitOutput.c lorieCanAccelCompositePictures)",
+    "predicted_sources": {
+      "C1": "xfwm4 compositor frame shadows (ARGB32 Over onto the x8r8g8b8 root buffer) plus client content",
+      "C0": "client content only: GTK3/cairo icons and ARGB images drawn Over into depth-24 windows"
+    },
+    "registry_capacity": 16,
+    "registry_note": "cmdentrypoint.cpp LORIE_GATEA_XREGISTRY_SIZE 16. A new distinct buffer while full is refused (gateAEnsureReady returns FALSE) and the composite legally takes the D0a staging path (Gcomp FDCLONE) - NOT an error, and NOT CPU.",
+    "allowed_events": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      10,
+      11,
+      14,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      36
+    ],
+    "forbidden_events": {
+      "9": "DIRECT_LOOKUP_FAIL",
+      "12": "FENCE_TIMEOUT",
+      "13": "FENCE_ERROR",
+      "15": "FIRST_FAILED_SERIAL",
+      "16": "GENERATION_FATAL",
+      "35": "TEST_FAULT_FIRED"
+    },
+    "generation": "exactly 1 for the whole session (D-06); exactly one GATEA_BIND for the X pid",
+    "counts_are_measured_not_predicted": true
+  },
+  "p10_shutdown_path": {
+    "steps": [
+      "all terminals closed by their own exit (schedule t=135/137/139)",
+      "xfce4-session-logout --logout --fast, with the session's own DBUS_SESSION_BUS_ADDRESS",
+      "wait <= logout_timeout_s for the xfce4-session process tree to be gone",
+      "K3 sample: X alive with zero XFCE clients (-noreset keeps it up)",
+      "p_r10_ledger --mode terminate: GiveUp -> DE_TERMINATE -> CloseScreen (the R10 clean close)",
+      "K4 sample: X gone, Activity alive and UNBOUND (D-06 section 2.4)",
+      "am force-stop com.waydefu.x11gpu (cleanup, after all evidence is taken)"
+    ],
+    "launch_env": {
+      "TERMUX_X11_GATEA_PROTO": "1",
+      "TERMUX_X11_GATEA_TELEMETRY": "1",
+      "TERMUX_X11_R8_ARM": "1",
+      "TERMUX_X11_R8_CASE": "R8-C1"
+    },
+    "why_r8_arm": "the LORIE-R8-TEST extension provides the only qualified clean close on dc94485. R8-C1 carries no fault; case-dependent code is confined to the test extension's own requests (lorie_r8_test.c :147/:412), which no XFCE client sends, so render paths are unchanged.",
+    "x_flags": "-noreset (D-01)",
+    "never": [
+      "SIGTERM/SIGKILL of X as a shutdown (it does not reach CloseScreen and r-hups the renderer)",
+      "killing any XFCE process as part of the clean path"
+    ],
+    "if_logout_times_out": "INVALID shutdown_unclean; remaining session pids are killed by exact pid as cleanup and recorded"
+  },
+  "p11_metrics": {
+    "k_points": {
+      "K0": "X + Activity bound, root size verified, before any XFCE process",
+      "K1": "session ready + settle_after_ready_s, immediately before T0",
+      "K2": "T0 + 150 s (end of choreography), before logout",
+      "K3": "after logout, X alive, zero XFCE clients",
+      "K4": "after the clean close, X gone, Activity alive"
+    },
+    "at_every_k": [
+      "r10_sample.py (x + activity process metrics, dumpsys meminfo GPU rows)",
+      "X /proc/<pid>/stat utime+stime",
+      "Activity /proc/<pid>/stat utime+stime (adb)",
+      "device /proc/loadavg",
+      "kgsl gpubusy",
+      "dumpsys thermalservice (HAL section + status)"
+    ],
+    "continuous": {
+      "logcat": "raw logcat for the whole run (GATEA_EVENT, LorieNative 5 s lines, Probe ENTER/RETURN, Gcomp Prepare/FDCLONE, R8_OBS, GATEA_*)",
+      "sf_latency_poll_s": 2,
+      "gpubusy_poll_s": 2,
+      "thermal_poll_s": 30
+    },
+    "derived": {
+      "composite_total": "sum of xrender_ops over X-pid 'frames in 5.0 seconds' lines inside [T0, T0+150) (5 s windows attributed by the line's timestamp)",
+      "xrender_5s": "sum over X-pid 'frames in 5.0 seconds' lines whose timestamp falls inside the window: frames, present offload/attempt, EXA copy offload/attempt/cpu_rects, solid gpu/fallback, xrender_ops, exa_comp_check T/F, prepare T/F, gpu_rects, cpu_rects, done",
+      "gatea_direct": "count of GATEA_EVENT event=5 (LEASE_GPU_OWNED) inside the window",
+      "d0a_staged": "prepare_true - gatea_direct when events are complete; null otherwise",
+      "cpu_composite": "exa_comp_check_false + prepare_false",
+      "gatea_hit_rate": "gatea_direct / exa_comp_check_true; null if the denominator is 0",
+      "gpu_composite_share": "prepare_true / composite_total; null if composite_total is 0",
+      "frames_sf": "unique SurfaceFlinger BLAST-layer frames with actualPresent inside the window",
+      "frame_interval_ms_p50_p95_p99": "consecutive actualPresent deltas inside the window",
+      "present_lag_ms_p50_p95_p99": "actualPresent - desiredPresent",
+      "jank_frames": "frames with present_lag > 33.33 ms (4 vsync periods at 120 Hz; the pipeline's typical lag is ~2, measured 12-18 ms in probe-02)",
+      "sf_coverage": "complete iff every consecutive pair of polls overlaps (oldest frame of poll k+1 <= newest frame of poll k); otherwise the frame metrics are null, never partial",
+      "x_cpu_s": "(utime+stime)[K2] - (utime+stime)[K1], in seconds (CLK_TCK 100)",
+      "act_cpu_s": "same for the Activity",
+      "cpu_per_frame_ms": "(x_cpu_s + act_cpu_s) * 1000 / frames_sf",
+      "wall_per_frame_ms": "150000 / frames_sf",
+      "gpu_busy": "mean of busy/total over the gpubusy polls inside the window (system-wide, includes Stable and SurfaceFlinger)",
+      "thermal": "max skin / max CPU / max GPU HAL temperature and max thermal status over the run",
+      "stable_background_fps": "Stable's own LorieNative 5 s frame counts inside the window, read passively from logcat - a covariate, not a Stable interaction",
+      "upload_bytes": "null - B3a telemetry is NOT enabled in this freeze (default-off diagnostic, would add per-op timing); V2-B3-TELEMETRY-VERIFY decides it",
+      "diag_stamp_lines": "count of X-pid lines starting with a p2a2 stamp prefix over the whole run; must be 0"
+    },
+    "null_rule": "unmeasurable is null, never 0; a metric null in one run and numeric in another is reported, not averaged"
+  },
+  "p12_resource_proof": {
+    "k_alignment_with_r10": {
+      "K0": "B0",
+      "K3": "B1 (session over, X alive, no client)",
+      "K4": "B3 (X gone, Activity alive)"
+    },
+    "hard_exact_from_close_summary": [
+      "c12 AHB_ACQUIRE == c13 AHB_RELEASE",
+      "c14 EGLIMAGE_CREATE == c15 EGLIMAGE_DESTROY",
+      "c16 TEXTURE_CREATE == c17 TEXTURE_DELETE",
+      "c18 X_REGISTRY_CURRENT == 0",
+      "c19 RENDERER_REGISTRY_CURRENT == 0",
+      "c20 LEASE_CURRENT == 0",
+      "c21 FENCE_TIMEOUT == 0",
+      "c22 FENCE_ERROR == 0",
+      "c23 FIRST_FAILED == 0",
+      "c24 GENERATION_FATAL == 0",
+      "c27 GENERATION_CLOSE == 1",
+      "generationFatal == 0 and firstFailed == 0 on the summary line"
+    ],
+    "hard_exact_from_event_stream_if_complete": [
+      "count(event 2 LEASE_RESERVED) == count(event 23 LEASE_RELEASE)"
+    ],
+    "soft_from_r10_tolerance": {
+      "source": "tests/r10/r10-tolerance.json (R10_TOLERANCE_FROZEN_V1)",
+      "checks": {
+        "x.fd_count K3-K0": 1,
+        "activity.fd_count K4-K0": 8,
+        "activity.maps_count K4-K0": 2
+      },
+      "outcome_when_exceeded": "FINDING (feeds D-04 / gap inventory), not a verdict failure: R10 established that only counters are exact"
+    }
+  },
+  "p13_crash_proof": [
+    "X pid identical at K0, K1, K2, K3 and gone only after terminate, with a GATEA_SUMMARY where=x-close-screen",
+    "Activity pid identical at K0..K4",
+    "zero 'Fatal signal', 'GATEA_FATAL_HALT', 'Abort message', ' F DEBUG ' lines from the X or Activity pid",
+    "zero 'ANR in com.waydefu.x11gpu'",
+    "xfwm4, xfce4-panel, xfdesktop pids identical at K1 and K2 (xfce4-session restarts a crashed client, so a pid change IS a crash)",
+    "no close summary in either source while the logcat capture WAS alive = X did not reach CloseScreen = crash proof FAIL",
+    "every xfce4-terminal exits within close_exit_timeout_s of its close flag (terminals_exited)",
+    "and that exit code is 0 (terminals_exit_code_0)"
+  ],
+  "validity": {
+    "BLOCKED_not_consumed": [
+      "preflight binding mismatch",
+      "X root size != x_root_px",
+      "package versions != pinned",
+      "freeze or tool sha mismatch",
+      "X3 already running",
+      "ADB serial not verbatim"
+    ],
+    "INVALID": [
+      "session not ready within session_ready_timeout_s",
+      "a choreography step failed (window not found, xdotool rc != 0, close did not exit)",
+      "a step executed more than step_lateness_invalid_s late",
+      "logcat capture not alive at the end",
+      "no close summary in either source (gatea-summary.txt, X-pid GATEA_SUMMARY logcat line) while the logcat capture was NOT alive - a capture failure, not information",
+      "logout timed out",
+      "any X-pid diagnostic stamp line (TERMUX_X11_P2A_DIAG was on)"
+    ],
+    "events_incomplete": "GATEA_EVENT seq not contiguous 0..nextSequence-1 -> event-derived metrics and the event-stream balance check are null; counters still judge; the run stays valid"
+  },
+  "verdict": {
+    "classes": {
+      "BASELINE_VALID": "valid, crash proof PASS, every hard resource check PASS (soft findings listed)",
+      "BASELINE_DEFECT": "valid enough to judge, and crash proof FAIL or a hard resource check FAIL -> product-defect evidence for V2-PGA-GAP-INVENTORY",
+      "INVALID": "the workload did not happen as frozen - no information",
+      "BLOCKED": "stopped before XFCE started - not consumed"
+    },
+    "precedence": "a crash is never downgraded to INVALID: if the crash proof fails, the verdict is BASELINE_DEFECT even when later steps could not run"
+  },
+  "runs": {
+    "repetitions_per_variant": 3,
+    "order": [
+      "C1",
+      "C0",
+      "C1",
+      "C0",
+      "C1",
+      "C0"
+    ],
+    "why_interleaved": "spreads thermal and background-load drift across both variants instead of loading it onto the later one",
+    "each_run_fresh": [
+      "X process",
+      "Activity (am force-stop first)",
+      "HOME / XDG_* directories",
+      "xfconf overlay copied from config/"
+    ]
+  },
+  "pinned_packages": {
+    "xfce4-session": "4.18.3-1build2",
+    "xfwm4": "4.18.0-1build3",
+    "xfce4-panel": "4.18.4-1ubuntu0.1",
+    "xfdesktop4": "4.18.1-1build3",
+    "thunar": "4.18.8-1build3",
+    "xfce4-settings": "4.18.4-0ubuntu3",
+    "xfconf": "4.18.1-1build3",
+    "xfce4-terminal": "1.1.3-1build1",
+    "xfce4-notifyd": "0.9.4-1",
+    "xdotool": "1:3.20160805.1-5build1",
+    "x11-utils": "7.7+6build2",
+    "dbus": "1.14.10-4ubuntu4.1",
+    "dbus-x11": "1.14.10-4ubuntu4.1"
+  },
+  "session_env": {
+    "DISPLAY": ":3",
+    "HOME": "<run>/home",
+    "XDG_CONFIG_HOME": "<run>/config",
+    "XDG_CACHE_HOME": "<run>/cache",
+    "XDG_DATA_HOME": "<run>/data",
+    "XDG_RUNTIME_DIR": "<run>/runtime (mode 0700)",
+    "LANG": "C.UTF-8",
+    "LC_ALL": "C.UTF-8",
+    "NO_AT_BRIDGE": "1",
+    "unset": [
+      "XMODIFIERS",
+      "GTK_IM_MODULE",
+      "QT_IM_MODULE",
+      "DBUS_SESSION_BUS_ADDRESS",
+      "SESSION_MANAGER"
+    ],
+    "launcher": "dbus-run-session -- <session_wrapper> (the wrapper records DBUS_SESSION_BUS_ADDRESS, then execs xfce4-session)",
+    "autostart": "every /etc/xdg/autostart/*.desktop is overridden with Hidden=true in <run>/config/autostart; the session is exactly the system Failsafe client list",
+    "run_root": "/tmp/xfce-x3-run-<id> (the Termux tmp bind), removed after its logs are copied into the evidence",
+    "x3_launch_unset": [
+      "TERMUX_X11_P2A_DIAG"
+    ]
+  },
+  "frozen_before_any_xfce_session_note": "no XFCE session has run on the V2 binding before this freeze",
+  "supersedes": {
+    "freeze": "XFCE_DESIGN_FROZEN_V1 (tests/xfce, fork dfb82e6), bound to dc94485",
+    "why": "dc94485 cannot execute the frozen workload: PGA-GAP-1 (diagnostic stamps starve X). V1's two stamp-derived metrics (composite_total from 'Probe ENTER', d0a_staged from 'Gcomp FDCLONE') read 0 lines once the stamps are off by default, which would report 0 for a quantity that was never observed (null != 0).",
+    "v1_evidence": "p2-xfce-runtime/runtime-dc94485/xfce-c1-0{1,2,3}; judged with the V1 tools in planning-v2/xfce-baseline/v1-dc94485/, never re-judged"
+  },
+  "changes_from_v1": [
+    "binding: product bfb5769 (PGA-GAP-1 fix), new APK / CI (filled below)",
+    "metric source: composite_total = sum of xrender_ops over X-pid 5 s lines (the counter lorieCompositeProbe increments for every composite, InitOutput.c:1037), not 'Probe ENTER' lines",
+    "metric source: d0a_staged = prepare_true - gatea_direct when the event stream is complete, else null; not 'Gcomp FDCLONE' lines",
+    "validity: diag_stamps_absent - zero X-pid stamp lines (Probe/Gcomp/Sprep/Sfb/E0u/E1/D0-D3/R3); a present stamp means TERMUX_X11_P2A_DIAG was on and the run measured the diagnostic build, not the product",
+    "crash proof: terminals_exit_0 split into terminals_exited (every close returned an rc within close_exit_timeout_s) and terminals_exit_code_0 (that rc is 0); same class, more precise label",
+    "covariates recorded, not judged: SF refresh period (MIUI switches 60/120 Hz on its own; changing it needs a system setting, which is out of bounds), device loadavg at every K",
+    "launch env: TERMUX_X11_P2A_DIAG explicitly unset",
+    "UNCHANGED: every p01-p13 parameter value, the schedule, the timeouts (window_lookup_timeout_s stays 10), variants, run order, repetitions, tolerances"
+  ]
+}
