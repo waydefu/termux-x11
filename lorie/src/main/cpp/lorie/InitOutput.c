@@ -159,6 +159,7 @@ typedef struct {
 
 static void lorieExaAsyncFlushAll(void);
 static void lorieExaAsyncLogCounters(const char *where);
+static void lorieUnlockBgraAhb(PixmapPtr pPix);
 
 #define LORIE_PIXMAP_PRIV_FROM_PIXMAP(pixmap) (pixmap ? ((LoriePixmapPriv*) exaGetPixmapDriverPrivate(pixmap)) : NULL)
 #define LORIE_BUFFER_FROM_PIXMAP(pixmap) (pixmap ? ((LoriePixmapPriv*) exaGetPixmapDriverPrivate(pixmap))->buffer : NULL)
@@ -1840,6 +1841,12 @@ static Bool lorieTryScheduleGpuBlit(PixmapPtr pixmap, PixmapPtr dst, RegionPtr u
     if (lorieGateAProtoEnabled()
         && (gateAPairOverlapsBuffer(srcBuffer) || gateAPairOverlapsBuffer(dstBuffer)))
         return FALSE;
+    /* PGA-GAP-4: lorieEnsureGpuSampleable leaves a promoted B8G8R8A8 (depth 32) buffer CPU-locked
+     * for good. A GPU write into it is then never seen by the CPU: every later GetImage / fb access
+     * reads the lock-time contents (all zero on the device). Unlock before the GPU writes; the next
+     * loriePrepareAccess locks again and sees the result. Sources were already unlocked for copy.
+     * After the Gate A lease refusal above: a leased endpoint's lock state is Gate A's. */
+    lorieUnlockBgraAhb(dst);
 
     if (update) {
         numRects = RegionNumRects(update);
@@ -2227,6 +2234,7 @@ static Bool lorieTryScheduleGpuSolid(PixmapPtr dst, int x1, int y1, int x2, int 
     /* P2: same lease rule as the blit path (Present/Copy/Solid included). */
     if (lorieGateAProtoEnabled() && gateAPairOverlapsBuffer(dstBuffer))
         return FALSE;
+    lorieUnlockBgraAhb(dst);   /* PGA-GAP-4, see lorieTryScheduleGpuBlit */
 
     writeIndex = lorieGateAObserveWriteIndex(&pvfb->state->gpuCopyQueue.writeIndex);
     readIndex = lorieGateAObserveReadIndex(&pvfb->state->gpuCopyQueue.readIndex);
