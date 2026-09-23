@@ -151,8 +151,21 @@ def judge(ev: Path, freeze: dict) -> dict:
         all(g is not None and g >= need for g in gaps) and len(negk) == exp["negative"],
         {"gaps_s": gaps, "min_s": need, "negative_case_marks": len(negk)})
     nxt = summ.get("nextSequence")
-    complete = seqs.complete(nxt)
-    chk("validity", "events_complete", complete, {"lines": seqs.count, "nextSequence": nxt})
+    all_complete = seqs.complete(nxt)
+    # V3 (ORACLE_FROZEN_V3): attribution needs every event=5 line, not every line. Source
+    # (bfb5769): LEASE_GPU_OWNED is traced at ONE site (InitOutput.c:3419) and DIRECT_PUBLISH
+    # at ONE site (:3484) of the same function, with only halting paths between them, so in
+    # a run with no fatal the number of event=5 equals counter c0 (DIRECT_PUBLISH), which
+    # lives in shared memory and cannot be lost by logd. event=5 lines == c0 therefore proves
+    # no event=5 line was dropped. oracle-02 and b3-attr-01 each lost exactly one OTHER line
+    # (seq 25182 / 100919) with event=5 lines == c0 (1334 / 6790).
+    c0 = summ.get("c0")
+    no_fatal = (have and summ.get("generationFatal") == 0 and summ.get("firstFailed") == 0
+                and n_fat == 0)
+    complete = all_complete or (no_fatal and c0 is not None and len(ev5) == c0)
+    chk("validity", "event5_stream_complete", complete,
+        {"all_events_complete": all_complete, "lines": seqs.count, "nextSequence": nxt,
+         "event5_lines": len(ev5), "c0_direct_publish": c0, "no_fatal": no_fatal})
 
     # ---- attribution
     def in_phase(ph):

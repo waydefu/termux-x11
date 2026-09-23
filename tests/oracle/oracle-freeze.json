@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
-  "status": "ORACLE_FROZEN_V2",
+  "status": "ORACLE_FROZEN_V3",
   "packet": "V2-QUAL-ORACLE-DIRECT (V1 acceptance #6 exact narrow Over correctness, #9 unsupported fallback safe)",
   "frozen_date": "2026-09-23",
-  "frozen_before_any_run": "V2: frozen before any V2 run (V1 ran once: oracle-01)",
+  "frozen_before_any_run": "V3: frozen before any V3 run (V1 ran once: oracle-01; V2 ran once: oracle-02)",
   "binding": {
     "source_sha": "bfb576940ded333f49d29a8910a785f8d680261c",
     "apk_sha256": "ff7b9309c405b07245bc352911867a66e8498464e515e09dbd645b3a1ec18472",
@@ -59,13 +59,14 @@
     "x_survives": "X alive until terminate; Activity pid constant through the close",
     "environment": "X3 TracerPid 0; screen Awake and unlocked before and after; Stable :1 before == after",
     "window": "event=5 counted when its logcat stamp t_s satisfies BEGIN - 1 ms < t_s <= END (stamps are truncated to the ms)",
-    "construction": "validity: every gap between phase windows >= quiet_gap_min_s and one BEGIN/END pair per negative case - otherwise the V2 fixture did not run (INVALID)"
+    "construction": "validity: every gap between phase windows >= quiet_gap_min_s and one BEGIN/END pair per negative case - otherwise the V2 fixture did not run (INVALID)",
+    "event5_stream_complete": "validity: all GATEA_EVENT seq 0..nextSequence-1 present, OR (summary generationFatal == 0 and firstFailed == 0 and no fatal line) and count(event=5 lines from X/Activity) == c0"
   },
   "verdict": {
     "PASS": "every predicate true",
     "FAIL_CORRECTNESS": "any exact-RGB mismatch, a composite error, or a lifecycle / fatal predicate false; also any event=5 inside the negative window (an op outside the Over a8r8g8b8->x8r8g8b8 slice took a direct GPU lease: #9 breached)",
     "FAIL_ATTRIBUTION": "correct pixels, but fewer persistent cases took the direct path than cases run - the direct path is not proven for all of them",
-    "INVALID": "environment or capture predicate false, the event stream incomplete, or case counts wrong (the fixture did not run as frozen); also any correctness or attribution check that could not be evaluated",
+    "INVALID": "environment or capture predicate false, the event=5 stream not proven complete, or case counts wrong (the fixture did not run as frozen); also any correctness or attribution check that could not be evaluated",
     "precedence": "FAIL_CORRECTNESS > INVALID > FAIL_ATTRIBUTION > PASS"
   },
   "supersedes": {
@@ -73,6 +74,9 @@
     "V1_run": "p2-oracle-runtime/runtime-bfb5769/oracle-01 judged FAIL_CORRECTNESS by V1 (frozen, not re-judged)",
     "V1_triage": "INVALID_CONSTRUCTION, two construction defects, product correct on all 1341 cases (evidence p2-oracle-runtime/ORACLE-01-TRIAGE.md)",
     "defect_1_judge": "phases were 17 us apart and the judge widened each window +-5 ms: boundary event=5 lines were counted in two phases (persistent 1300 for 1298 cases; negative +1 from the fresh tail). Strict windows gave persistent 1298, fresh 36.",
-    "defect_2_fixture": "'repeat' composited 4x4 from a 4x4 source: a USELESS repeat, which the EXA core removes before the driver sees the op (exaComposite, exa_render.c:887-891); the driver then correctly accepted an in-slice Over. Its event=5 (seq 34044, src 103 / dst 104) is the one strict negative count."
+    "defect_2_fixture": "'repeat' composited 4x4 from a 4x4 source: a USELESS repeat, which the EXA core removes before the driver sees the op (exaComposite, exa_render.c:887-891); the driver then correctly accepted an in-slice Over. Its event=5 (seq 34044, src 103 / dst 104) is the one strict negative count.",
+    "V2": "678ae92 ORACLE_FROZEN_V2",
+    "V2_run": "p2-oracle-runtime/runtime-bfb5769/oracle-02 judged INVALID by V2 (events_complete false: 34063/34064 lines, seq 25182 lost; frozen, not re-judged). Capture otherwise complete; correctness all pass. Runner exit 1 after capture: tooling (oracle-02.RUNNER-EXIT.txt)",
+    "V3_change": "attribution needs every event=5 line, not every line: valid when all events are complete OR (no fatal and event=5 lines == c0 DIRECT_PUBLISH). Source proof: LEASE_GPU_OWNED (InitOutput.c:3419) and DIRECT_PUBLISH (:3484) have one trace site each in one function with only halting paths between them; c0 is a shared-memory counter logd cannot drop. Observed on oracle-01 / oracle-02 / b3-attr-01: event=5 lines == c0 == c6 (1335 / 1334 / 6790). Not a tolerance: an equality that proves the attributed quantity complete."
   }
 }

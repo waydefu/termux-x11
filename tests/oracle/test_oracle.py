@@ -32,7 +32,7 @@ class Run:
         self.marks = {"persistent": (B, B + 100), "fresh": (B + 101, B + 110), "negative": (B + 111, B + 112)}
         self.direct = {"persistent": 1298, "fresh": 30, "negative": 0}
         self.summary = ("GATEA_SUMMARY where=x-close-screen nonce=0 generation=0 nextSequence={n} overflow=1 "
-                        "firstFailed=0 generationFatal=0 fatalReason=0 c12=9 c13=9 c14=9 c15=9 c16=9 c17=9 "
+                        "firstFailed=0 generationFatal=0 fatalReason=0 c0={c0} c12=9 c13=9 c14=9 c15=9 c16=9 c17=9 "
                         "c18=0 c19=0 c20=0 c21=0 c22=0 c23=0 c24=0 c25=9 c26=9 c27=1")
         self.drop = 0
         self.extra = []
@@ -42,6 +42,7 @@ class Run:
                           "component-alpha"]
         self.neg_direct = {}    # kind -> event=5 lines inside that case's window
         self.at = []            # extra event=5 lines at these exact epochs (boundary tests)
+        self.drop_noise = 0     # lose this many event=30 lines (logd drop of a NON-direct line)
         (d / "x3-pid.txt").write_text(f"x3_pid={X}\n")
         (d / "activity-pid.txt").write_text(f"activity_pid={ACT}\n")
         (d / "activity-pid-after-close.txt").write_text(f"activity_pid_after_close={ACT}\n")
@@ -90,11 +91,14 @@ class Run:
             L.append(lc(t, X, "gatea-telemetry",
                         f"GATEA_EVENT seq={seq} role=1 event=5 generation=1 serial={seq} src=1 dst=2"))
             seq += 1
+        n5 = sum(1 for ln in L if " event=5 " in ln)       # what X emitted: c0 == event=5 count
         for i in range(self.drop):
             L.pop(0)
+        for i in range(self.drop_noise):
+            L.remove(next(ln for ln in L if " event=30 " in ln))
         L += self.extra
         (self.d / "raw-logcat.txt").write_text("\n".join(L) + "\n")
-        (self.d / "gatea-summary.txt").write_text(self.summary.format(n=seq) + "\n")
+        (self.d / "gatea-summary.txt").write_text(self.summary.format(n=seq, c0=n5) + "\n")
 
     def neg_windows(self):
         b = self.marks["negative"][0]
@@ -189,6 +193,23 @@ class T(unittest.TestCase):
     def test_fresh_shortfall_is_only_reported(self):
         self.r.direct["fresh"] = 0; self.r.write()
         self.assertEqual(self.v(), "PASS")
+
+    def test_non_direct_line_lost_is_still_valid(self):
+        # V3: one event=30 line lost (logd), every event=5 line present == c0 -> attributable
+        self.r.noise = 20; self.r.drop_noise = 1; self.r.write()
+        v = self.r.judge()
+        det = {c["check"]: c for c in v["checks"]["validity"]}["event5_stream_complete"]
+        self.assertTrue(det["ok"])
+        self.assertFalse(det["detail"]["all_events_complete"])
+        self.assertEqual(v["verdict"], "PASS")
+
+    def test_fatal_disables_the_c0_rule(self):
+        # the c0 equality is only proven for runs without a fatal
+        self.r.noise = 20; self.r.drop_noise = 1
+        self.r.summary = self.r.summary.replace("firstFailed=0", "firstFailed=7"); self.r.write()
+        v = self.r.judge()
+        det = {c["check"]: c for c in v["checks"]["validity"]}["event5_stream_complete"]
+        self.assertFalse(det["ok"])
 
     def test_events_incomplete_is_invalid(self):
         self.r.drop = 1; self.r.write()
