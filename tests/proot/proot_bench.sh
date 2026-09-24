@@ -18,7 +18,7 @@ ADBB="$TB/adb -P 5038 -s $SERIAL"
 HERE=$(cd "$(dirname "$0")" && pwd)
 DRIVE=$HERE/../gl/electron_bench_drive.mjs
 P0_BIN=/data/data/com.termux/files/usr/bin/proot
-PF_BIN=/data/data/com.termux/files/home/build/proot-fast/out/bin/proot-fast
+PF_BIN=${PF_BIN:-/data/data/com.termux/files/home/build/proot-fast/out/bin/proot-fast}   # PROOT-BENCH-02: out2/bin/proot-fast2
 BASE=/root/build/proot-bench
 WS_FILE=/root/build/electron-bench/ws/bench.cc
 XFER=/tmp/proot-bench            # == $PREFIX/tmp/proot-bench outside PRoot (bind /data/data/com.termux/files/usr/tmp:/tmp)

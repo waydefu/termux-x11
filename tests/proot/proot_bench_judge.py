@@ -20,7 +20,8 @@ import electron_bench_judge as ej  # noqa: E402
 
 CLK = 100
 BINS = {"p0": "/data/data/com.termux/files/usr/bin/proot",
-        "pf": "/data/data/com.termux/files/home/build/proot-fast/out/bin/proot-fast"}
+        "pf": os.environ.get("PF_BIN", "/data/data/com.termux/files/home/build/proot-fast/out/bin/proot-fast")}
+# PROOT-BENCH-02 judges proot-fast v2 with PF_BIN=.../out2/bin/proot-fast2 (same thresholds as 01)
 ORDER = {"01": [("r01-1-p0", "p0"), ("r01-2-pf", "pf"), ("r01-3-p0", "p0")],
          "02": [("r02-1-pf", "pf"), ("r02-2-p0", "p0"), ("r02-3-pf", "pf")]}
 FUNCTIONAL = ("driver errors", "editor found", "scroll had no effect", "typed text not visible", "rAF samples 0", "keys_acked", "chars_acked")
