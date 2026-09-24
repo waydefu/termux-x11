@@ -237,13 +237,15 @@ static LorieBuffer *lorieEnsureGpuSampleable(PixmapPtr pixmap, int8_t type) {
 
     desc = LorieBuffer_description(priv->buffer);
     if (desc->type == LORIEBUFFER_REGULAR) {
-        /* PGA-GAP-5 causal test (experiment, not a routing decision): TERMUX_X11_GPU_MIN_PIXELS=N
-         * leaves pixmaps with width*height < N in regular memory, so they never get an AHB, never
-         * get shared with the renderer and every op on them runs on the CPU. Unset = no change. */
+        /* PGA-GAP-5 size routing (decided 2026-09-24, planning-v2/pga/PGA-GAP-5-ROUTING-FREEZE.md):
+         * pixmaps with width*height < N stay in regular memory - no AHB, no sharing with the renderer,
+         * every op on them runs on the CPU. In XFCE, promoting ~2000 small pixmaps one by one stalled X
+         * for 50-450 ms; on the GPU such small ops are at best as fast as the CPU anyway.
+         * N = TERMUX_X11_GPU_MIN_PIXELS, default 4097 (<= 64x64 stays on the CPU); 0 = promote all. */
         static long minPixels = -1;
         if (minPixels < 0) {
             const char *e = getenv("TERMUX_X11_GPU_MIN_PIXELS");
-            minPixels = e && e[0] ? atol(e) : 0;
+            minPixels = e && e[0] ? atol(e) : 4097;
             if (minPixels > 0)
                 log(ERROR, "GPU min pixels %ld (smaller pixmaps are never promoted)", minPixels);
         }
