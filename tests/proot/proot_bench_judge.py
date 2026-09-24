@@ -5,8 +5,11 @@
   proot_bench_judge.py --selftest
 
 Reuses electron_bench_judge.analyse() for the shared validity checks (touch, thermal, focus, Cursor identity
-'Disabled', keys/typing effective, rAF, survivors) and adds: tracer identity (arg0), tracer CPU readable at every
-snapshot, tracer gone at the end. S = CPU s of scroll+type (Cursor session + tracer + X3).
+'Disabled', keys/typing effective, rAF, survivors) and adds: tracer identity (arg0 in the meter CSV header and the RUN
+line), tracer gone at the end. CPU comes from the run-as meter CSV (<run>.meter.csv, proot_meter.py), not from the
+driver JSON: the daily PRoot cannot read the processes launched through `adb run-as` (dry-run 01). Each phase boundary
+(driver `t`) is linearly interpolated between the two CSV samples around it; both must be within 0.5 s of it, have
+tracer and X3 ticks, and see >= 1 session process. S = CPU s of scroll+type (Cursor session + tracer + X3).
 CPU_BETTER  S(PF) <= S(P0) * (1 - max(0.10, 2*noise));  IDLE_OK  idle(PF) <= idle(P0) + 0.05 cores;
 FRAMES_NOT_WORSE  p95(PF) <= p95(P0)*1.10 and over50(PF) <= over50(P0)+3.
 PF runs whose Cursor did not work (driver errors / keys or typing without effect) -> PROOT_FAST_FAIL.
@@ -23,6 +26,36 @@ ORDER = {"01": [("r01-1-p0", "p0"), ("r01-2-pf", "pf"), ("r01-3-p0", "p0")],
 FUNCTIONAL = ("driver errors", "editor found", "scroll had no effect", "typed text not visible", "rAF samples 0", "keys_acked", "chars_acked")
 
 
+GAP_MS = 500
+
+
+def load_meter(path):
+    """-> (header dict, rows [(t, session, procs, tracer|None, x3|None)]) or raises"""
+    with open(path) as f:
+        head = dict(kv.split("=", 1) for kv in f.readline().lstrip("# ").split() if "=" in kv)
+        f.readline()
+        rows = []
+        for line in f:
+            t, se, n, tr, x = line.strip().split(",")
+            rows.append((int(t), int(se), int(n), int(tr) if tr else None, int(x) if x else None))
+    return head, rows
+
+
+def at(rows, t):
+    """interpolated (session, tracer, x3) at t, or a reason string"""
+    for (t0, s0, n0, r0, x0), (t1, s1, n1, r1, x1) in zip(rows, rows[1:]):
+        if t0 <= t <= t1:
+            if t - t0 > GAP_MS or t1 - t > GAP_MS:
+                return f"meter gap {t0}..{t1} around {t}"
+            if None in (r0, r1, x0, x1):
+                return "tracer/x3 ticks null"
+            if n0 == 0 or n1 == 0:
+                return "session_procs 0"
+            w = (t - t0) / (t1 - t0) if t1 > t0 else 0.0
+            return tuple(u + (v - u) * w for u, v in ((s0, s1), (r0, r1), (x0, x1)))
+    return f"meter does not cover {t}"
+
+
 def analyse(cell, name, var):
     a = ej.analyse(cell, name, "v0")          # both variants run Cursor with --disable-gpu
     why = list(a.get("why", []))
@@ -31,25 +64,31 @@ def analyse(cell, name, var):
         why.append(f"{name}: tracer arg0 {r.get('tracer_arg0')!r} != {BINS[var]}")
     if r.get("tracer_gone") != "true":
         why.append(f"{name}: tracer_gone={r.get('tracer_gone')}")
+    pts = {}
     try:
         ph = json.load(open(os.path.join(cell, r.get("json", name + ".json"))))["phases"]
+        head, rows = load_meter(os.path.join(cell, r.get("meter", name + ".meter.csv")))
+        if head.get("tracer_arg0") != BINS[var]:
+            why.append(f"{name}: meter tracer_arg0 {head.get('tracer_arg0')!r} != {BINS[var]}")
+        for p in ("idle", "scroll", "type"):
+            for e in ("start", "end"):
+                v = at(rows, ph[p][e]["t"])
+                if isinstance(v, str):
+                    why.append(f"{name}: {p}.{e} {v}")
+                else:
+                    pts[(p, e)] = v
     except Exception as e:
-        return {"valid": False, "fail": False, "why": why + [f"{name}: json {e}"]}
-    for p in ("idle", "scroll", "type"):
-        for s in ("start", "end"):
-            if (ph.get(p, {}).get(s) or {}).get("extra_ticks") is None:
-                why.append(f"{name}: {p}.{s} tracer ticks null")
+        why.append(f"{name}: json/meter {type(e).__name__} {e}")
     # a PF run whose Cursor did not work is a failure of proot-fast, not missing information
     functional = [w for w in why if any(k in w for k in FUNCTIONAL)]
     if why:
         return {"valid": False, "fail": var == "pf" and bool(functional) and len(functional) == len(why), "why": why}
 
     def cpu(p):
-        s, e = ph[p]["start"], ph[p]["end"]
-        return ((e["session_ticks"] - s["session_ticks"]) + (e["x3_ticks"] - s["x3_ticks"]) + (e["extra_ticks"] - s["extra_ticks"])) / CLK
+        return sum(pts[(p, "end")]) / CLK - sum(pts[(p, "start")]) / CLK
 
     def tracer(p):
-        return (ph[p]["end"]["extra_ticks"] - ph[p]["start"]["extra_ticks"]) / CLK
+        return (pts[(p, "end")][1] - pts[(p, "start")][1]) / CLK
     idle_s = (ph["idle"]["end"]["t"] - ph["idle"]["start"]["t"]) / 1000
     return {"valid": True, "fail": False, "why": [], "S": cpu("scroll") + cpu("type"), "idle": cpu("idle") / idle_s,
             "tracer_S": tracer("scroll") + tracer("type"), "p95": a["p95"], "over50": a["over50"]}
@@ -86,6 +125,34 @@ def judge(c1, c2, quiet=False):
 
 
 # ------------------------------------------------------------------ synthetic self-test
+def fake_meter(path, j, tracer, arg0, bad):
+    """CSV sampled every 200 ms whose curves pass through the JSON boundary values (session) and a tracer that
+    runs at `tracer` CPU s per 60 s inside the phases"""
+    ph = j["phases"]
+    b = [(ph[p][e]["t"], ph[p][e]["session_ticks"]) for p in ("idle", "scroll", "type") for e in ("start", "end")]
+    rate = tracer / 60 * CLK / 1000                       # ticks per ms inside a phase
+    tb, acc = [], 0.0
+    for p in ("idle", "scroll", "type"):
+        tb.append((ph[p]["start"]["t"], acc)); acc += rate * (ph[p]["end"]["t"] - ph[p]["start"]["t"]); tb.append((ph[p]["end"]["t"], acc))
+
+    def lin(pts, t):
+        if t <= pts[0][0]:
+            return pts[0][1]
+        for (t0, v0), (t1, v1) in zip(pts, pts[1:]):
+            if t0 <= t <= t1:
+                return v0 if t1 == t0 else v0 + (v1 - v0) * (t - t0) / (t1 - t0)
+        return pts[-1][1]
+    gap = ph["scroll"]["start"]["t"]
+    with open(path, "w") as f:
+        f.write(f"# sid=1 tracer_pid=1 tracer_arg0={arg0} x3=2 interval=0.2 rescan=5\n")
+        f.write("epoch_ms,session_ticks,session_procs,tracer_ticks,x3_ticks\n")
+        for t in range(b[0][0] - 1000, b[-1][0] + 1001, 200):
+            if bad == "meter_gap" and abs(t - gap) <= 600:
+                continue
+            tr = "" if bad == "tracer_null" else int(lin(tb, t))
+            f.write(f"{t},{int(lin(b, t))},{0 if bad == 'procs_zero' else 12},{tr},0\n")
+
+
 def fake_cells(root, tag, p0, pf, p0b=None, pfb=None, bad=None, on="pf"):
     cells = []
     for rep in ("01", "02"):
@@ -93,15 +160,15 @@ def fake_cells(root, tag, p0, pf, p0b=None, pfb=None, bad=None, on="pf"):
         for i, (n, var) in enumerate(ORDER[rep]):
             base = dict((p0b or p0) if (i == 2 and var == "p0") else (pfb or pf) if (i == 2 and var == "pf") else (p0 if var == "p0" else pf))
             tracer = base.pop("tracer")
-            line = ej.fake_run(cell, n, "v0", **base, **({"noeffect": True} if bad == "noeffect" and var == on else {}))
+            hit = bad if var == on else None
+            line = ej.fake_run(cell, n, "v0", **base, **({"noeffect": True} if hit == "noeffect" else {}))
             j = json.load(open(os.path.join(cell, n + ".json")))
-            for p, ph in j["phases"].items():
-                dur = (ph["end"]["t"] - ph["start"]["t"]) / 1000
-                ph["start"]["extra_ticks"] = 0
-                ph["end"]["extra_ticks"] = None if (bad == "tracer_null" and var == on) else int(tracer * dur / 60 * CLK)
-            json.dump(j, open(os.path.join(cell, n + ".json"), "w"))
-            arg0 = "/usr/bin/wrong-proot" if (bad == "wrong_tracer" and var == on) else BINS[var]
-            lines.append(line + f" tracer_pid=1 tracer_arg0={arg0} tracer_gone=true")
+            arg0 = "/usr/bin/wrong-proot" if hit == "wrong_tracer" else BINS[var]
+            if hit != "meter_missing":
+                fake_meter(os.path.join(cell, n + ".meter.csv"), j, tracer, arg0, hit)
+            if hit == "survivor":
+                line = line.replace("survivors_after_kill=0", "survivors_after_kill=1")
+            lines.append(line + f" tracer_pid=1 tracer_arg0={arg0} meter={n}.meter.csv tracer_gone=true")
         open(os.path.join(cell, "cmd.out"), "w").write("\n".join(lines) + "\n")
         cells.append(cell)
     return cells
@@ -121,6 +188,11 @@ def selftest():
         # idle counts the tracer too: keep PF's tracer load equal to P0's so only the Cursor idle is worse
         # (first version lowered PF's tracer as well, which made this must-be-red case pass - fixture error)
         ("h_idle_worse", dict(p0=P0, pf=dict(GOOD, idle=0.40, tracer=10.0)), "PROOT_FAST_NO_BENEFIT"),
+        # run-as meter (dry-run 01: the daily PRoot saw session_procs=0 and null tracer ticks, and ended nothing)
+        ("i_meter_gap_at_boundary", dict(p0=P0, pf=GOOD, bad="meter_gap"), "PROOT_INVALID"),
+        ("j_session_procs_zero", dict(p0=P0, pf=GOOD, bad="procs_zero"), "PROOT_INVALID"),
+        ("k_meter_missing", dict(p0=P0, pf=GOOD, bad="meter_missing"), "PROOT_INVALID"),
+        ("l_survivor_after_end", dict(p0=P0, pf=GOOD, bad="survivor", on="p0"), "PROOT_INVALID"),
     ]
     ok = True
     with tempfile.TemporaryDirectory() as root:
