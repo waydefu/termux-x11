@@ -51,13 +51,23 @@ function devState() {
   return { focus: focus ? focus.includes('com.waydefu.x11gpu/') : null, awake: wake ? wake === 'Awake' : null,
            keyguard: kg === undefined ? null : kg === 'true' };
 }
+// Optional EXTRA_PIDS (comma separated, e.g. the proot tracer of the launch in PROOT-BENCH): their own
+// utime+stime are recorded per snapshot as extra_ticks (null if any is unreadable). Unset -> null, and
+// nothing else changes (ELECTRON-BENCH-01 runs never set it).
+const EXTRA = (process.env.EXTRA_PIDS || '').split(',').filter(Boolean);
+function extraTicks() {
+  if (!EXTRA.length) return null;
+  let sum = 0;
+  for (const p of EXTRA) { const t = statTicks(p, false); if (!t) return null; sum += t.ticks; }
+  return sum;
+}
 // adb calls take 1-2 s: at a phase START they run before the CPU counters are read, at a phase END after,
 // so the adb time never falls inside the measured window. (Activity ticks are adb too: outside the window.)
 function snapshot(isStart) {
   const pre = isStart ? { state: devState(), act_ticks: actTicks() } : null;
-  const s = sessionTicks(); const x = statTicks(out.x3pid, false); const t = Date.now();
+  const s = sessionTicks(); const x = statTicks(out.x3pid, false); const e = extraTicks(); const t = Date.now();
   const post = isStart ? pre : { act_ticks: actTicks(), state: devState() };
-  return { t, session_ticks: s.ticks, session_procs: s.procs, x3_ticks: x ? x.ticks : null, ...post };
+  return { t, session_ticks: s.ticks, session_procs: s.procs, x3_ticks: x ? x.ticks : null, extra_ticks: e, ...post };
 }
 
 // ---- DevTools --------------------------------------------------------------------------------------------
