@@ -7,7 +7,7 @@
 
 Every Part B check is the SAME code as tests/xfce_v6/xfce_v6_judge.py (preflight, capture_b, separation, imported):
 the only differences are the client tracer (proot-fast7, swapped in for the duration of the call and restored) and
-the telemetry switch (freeze section 3): the env must match the group, and the raw logcat must hold 0 gatea-telemetry
+the telemetry switch (freeze section 3, deviation 1 in section 10: R8 never armed): the env must match the group, and the raw logcat must hold 0 gatea-telemetry
 lines for C / GT and >= 1000 for CT. CT is checked with capture_b's C rules (the same product settings).
 Missing evidence never passes.
 """
@@ -75,9 +75,11 @@ def capture(cap: Path, group: str) -> dict:
             why.append(f"CT but TERMUX_X11_GATEA_TELEMETRY={tel}")
         if group in ("C", "GT") and tel is not None:
             why.append(f"{group} but TERMUX_X11_GATEA_TELEMETRY={tel} (must be unset)")
-        for k, v in (("TERMUX_X11_GATEA_PROTO", "1"), ("TERMUX_X11_R8_ARM", "1"), ("TERMUX_X11_R8_CASE", "R8-C1")):
+        # freeze section 3 as amended by deviation 1 (section 10): PROTO=1 and R8 NOT armed in every group
+        # (R8 armed without telemetry halts X at start: x-r8-env, lorie_r8_obs.c:130)
+        for k, v in (("TERMUX_X11_GATEA_PROTO", "1"), ("TERMUX_X11_R8_ARM", None), ("TERMUX_X11_R8_CASE", None)):
             if env.get(k) != v:
-                why.append(f"{k}={env.get(k)} != {v} (freeze section 3, common to all groups)")
+                why.append(f"{k}={env.get(k)} != {v} (freeze section 3 / deviation 1, common to all groups)")
     n = telemetry_lines(cap)
     m["telemetry_lines"] = n
     if n is None:

@@ -32,7 +32,7 @@ class Base(TB.Base):
         over.setdefault("client", V7)
         over.setdefault("session", V7)
         cap = self.make_b(name, "C" if group == "CT" else group, **over)
-        env = {"TERMUX_X11_GATEA_PROTO": "1", "TERMUX_X11_R8_ARM": "1", "TERMUX_X11_R8_CASE": "R8-C1"}
+        env = {"TERMUX_X11_GATEA_PROTO": "1"}          # deviation 1: R8 never armed
         env.update({"C": {"TERMUX_X11_DISABLE_EXA_GPU": "1"}, "GT": {"TERMUX_X11_GPU_MIN_PIXELS": "4097"},
                     "CT": {"TERMUX_X11_DISABLE_EXA_GPU": "1", "TERMUX_X11_GATEA_TELEMETRY": "1"}}[group])
         env.update(env_extra or {})
@@ -87,7 +87,8 @@ class Capture(Base):
     def test_env_must_match_group(self):
         self.assertFalse(N.capture(self.make("a", "C", env_extra={"TERMUX_X11_GATEA_TELEMETRY": "1"}), "C")["valid"])
         self.assertFalse(N.capture(self.make("b", "CT", drop=("TERMUX_X11_GATEA_TELEMETRY",)), "CT")["valid"])
-        self.assertFalse(N.capture(self.make("c", "GT", drop=("TERMUX_X11_R8_ARM",)), "GT")["valid"])
+        self.assertFalse(N.capture(self.make("c", "GT", env_extra={"TERMUX_X11_R8_ARM": "1"}), "GT")["valid"])   # [RED] R8 armed
+        self.assertFalse(N.capture(self.make("d", "C", drop=("TERMUX_X11_GATEA_PROTO",)), "C")["valid"])
 
     def test_v6_client_tracer_invalid(self):  # [RED] run before the daily switch to proot-fast7
         v6 = TB.tracer_json(sha=J.V6_SHA)
