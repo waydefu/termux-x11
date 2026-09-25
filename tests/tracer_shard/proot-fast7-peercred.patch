@@ -1,0 +1,28 @@
+--- proot-5.1.107.92-v6/src/extension/fake_id0/getsockopt.c	2026-08-23 06:32:39.000000000 +0800
++++ proot-5.1.107.92-v7/src/extension/fake_id0/getsockopt.c	2026-09-25 20:41:18.820963546 +0800
+@@ -1,4 +1,5 @@
+ #include <sys/socket.h>  /* SOL_SOCKET,SO_PEERCRED */
++#include <unistd.h>      /* getuid */
+ 
+ #include "tracee/reg.h"
+ #include "tracee/mem.h"
+@@ -33,7 +34,18 @@
+ 		int status = read_data(tracee, &cred, cred_addr, sizeof(struct ucred));
+ 		if (status) return 0;
+ 		Config *peer_config = get_fake_id_for_pid(cred.pid);
+-		if (peer_config == NULL) return 0;
++		if (peer_config == NULL) {
++			/* proot-fast7 (TRACER-SHARD, 2026-09-25): a peer that is not one of our tracees but runs
++			 * with our real uid is another proot instance of the same app user (f8-shard) or the app
++			 * itself. Present it with the caller's fake identity, the way fake_id0 already presents
++			 * files owned by the real uid. Without this a D-Bus daemon under one tracer sees a client
++			 * under another tracer with the real uid and rejects its EXTERNAL auth (claimed uid 0). */
++			if (cred.uid != getuid())
++				return 0;
++			peer_config = get_fake_id_for_pid(tracee->pid);
++			if (peer_config == NULL)
++				return 0;
++		}
+ 		cred.uid = peer_config->euid;
+ 		cred.gid = peer_config->egid;
+ 		write_data(tracee, cred_addr, &cred, sizeof(struct ucred));

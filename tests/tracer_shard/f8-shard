@@ -1,0 +1,78 @@
+#!/bin/bash
+# f8-shard <program> [args...] — run one program under a proot tracer of its own (TRACER-SHARD, 2026-09-25).
+#
+# Why: every program of the daily desktop shares ONE single-threaded proot tracer. An Electron app launch
+# floods it with trapped syscalls and every other program queues behind (XFCE-V6-BASELINE-01 Part A: 59 of
+# 60 v6 fstatat stalls > 100 ms fell in seconds where the tracer used at least the stall length of CPU).
+# How: copy the calling shell's tracer exactly (argv without its guest command, environment, rootfs) into
+# a job dir under the shared Termux tmp; TermuxService runs shard-run.sh, which re-creates that tracer
+# outside every proot and runs <program> under it with this shell's environment and cwd.
+# The same rootfs, /tmp, X display and D-Bus are shared; --sysvipc emulation is per tracer, so SysV IPC
+# between a sharded program and the rest of the desktop does not work.
+# f8-shard stays in the foreground until the program exits and forwards SIGTERM/SIGINT/SIGHUP to it, so a
+# caller that owns the f8-shard pid owns the program. Output: one line
+#   F8_SHARD tracer=<pid> app=<pid> job=<dir>
+# Exit: the program's absence ends it with 0; 3 = refused / could not start.
+set -uo pipefail
+RUN=/data/data/com.termux/files/home/build/proot-fast/shard/shard-run.sh
+AM=/data/data/com.termux/files/usr/bin/am
+BASE=/data/data/com.termux/files/usr/tmp/f8-shard
+refuse() { echo "F8_SHARD_REFUSE $*" >&2; exit 3; }
+[ $# -ge 1 ] || refuse "usage: f8-shard <program> [args...]"
+[ -x "$RUN" ] || refuse "no $RUN"
+T=$(awk '/^TracerPid/{print $2}' /proc/self/status)
+[ -n "$T" ] && [ "$T" != 0 ] || refuse "not_traced"
+mapfile -d '' A < "/proc/$T/cmdline" || refuse "tracer_cmdline $T"
+# the guest command starts at the first argument after argv[0] that is not an option
+n=${#A[@]}; g=0
+for ((i = 1; i < n; i++)); do case "${A[$i]}" in -*) ;; *) g=$i; break;; esac; done
+[ "$g" -gt 1 ] || refuse "tracer_args_unparsed"
+L2S=$(tr '\0' '\n' < "/proc/$T/environ" | sed -n 's/^PROOT_L2S_DIR=//p')
+ROOTFS=${L2S%/.l2s}
+[ -n "$L2S" ] && [ "$ROOTFS" != "$L2S" ] && [ -x "$ROOTFS/usr/bin/bash" ] || refuse "rootfs '$ROOTFS'"
+J=$BASE/$(date +%Y%m%d-%H%M%S)-$$
+mkdir -p "$J" || refuse "jobdir $J"
+# test hook: F8_SHARD_PROOT replaces the tracer binary (only builds under ~/build/proot-fast/out*/bin/)
+if [ -n "${F8_SHARD_PROOT:-}" ]; then
+  case "$F8_SHARD_PROOT" in /data/data/com.termux/files/home/build/proot-fast/out*/bin/proot*) ;; *) refuse "F8_SHARD_PROOT $F8_SHARD_PROOT";; esac
+  [ -x "$F8_SHARD_PROOT" ] || refuse "F8_SHARD_PROOT not executable"
+  A[0]=$F8_SHARD_PROOT
+fi
+printf '%s\0' "${A[@]:0:g}" > "$J/tracer.argv"
+cat "/proc/$T/environ" > "$J/tracer.env"
+env -0 > "$J/guest.env"
+printf '%s\0' "$@" > "$J/guest.argv"
+pwd > "$J/guest.cwd"
+echo "$ROOTFS" > "$J/rootfs"
+echo "$T" > "$J/parent-tracer.pid"
+"$AM" startservice --user 0 -n com.termux/com.termux.app.TermuxService -a com.termux.service_execute \
+  -d com.termux.file:/data/data/com.termux/files/usr/bin/bash \
+  --esa com.termux.execute.arguments "-c,unset BASH_ENV ENV; exec $RUN $J" \
+  --ez com.termux.execute.background true > "$J/am.out" 2>&1 || refuse "am $(tail -1 "$J/am.out")"
+# wait for the new tracer and the program pid (written by the guest bash under the NEW tracer); bash builtins
+# only, so waiting adds no forks to this shell's tracer
+mkfifo "$J/wait.fifo" && exec 3<> "$J/wait.fifo" || refuse "wait fifo $J"
+TP=""; APP=""
+for ((i = 0; i < 100; i++)); do
+  [ -z "$TP" ] && [ -s "$J/tracer.pid" ] && read -r TP < "$J/tracer.pid"
+  [ -s "$J/app.pid" ] && read -r APP < "$J/app.pid" && break
+  read -r -t 0.1 -u 3 || true
+done
+[ -n "$TP" ] || refuse "tracer_never_started $J"
+[ -n "$APP" ] || refuse "guest_never_started tracer=$TP $J"
+# confirm the program runs under the NEW tracer; retried for up to 3 s, every attempt logged (app-check.log)
+AT=""
+for ((i = 0; i < 30; i++)); do
+  AT=""
+  { while read -r k v _; do [ "$k" = "TracerPid:" ] && AT=$v; done < "/proc/$APP/status"; } 2>> "$J/app-check.log"
+  echo "try=$i app=$APP TracerPid='$AT' want=$TP" >> "$J/app-check.log"
+  [ "$AT" = "$TP" ] && break
+  read -r -t 0.1 -u 3 || true
+done
+[ -n "$AT" ] || [ -d "/proc/$APP" ] || { echo "F8_SHARD tracer=$TP app=$APP job=$J exited_before_check"; exit 0; }
+[ "$AT" = "$TP" ] || refuse "app $APP TracerPid '$AT' != new tracer $TP (see $J/app-check.log)"
+echo "F8_SHARD tracer=$TP app=$APP job=$J"
+fwd() { kill -"$1" "$APP" 2>/dev/null; }
+trap 'fwd TERM' TERM; trap 'fwd INT' INT; trap 'fwd HUP' HUP
+while kill -0 "$APP" 2>/dev/null; do read -r -t 1 -u 3 || true; done
+exit 0
