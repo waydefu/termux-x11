@@ -30,6 +30,9 @@ MUTANTS = [   # (name, exact source text, replacement) or (name, [(old, new), ..
      'if pc.get("cursor_running") is not False or pc.get("hermes_running") is not False:', "if False:"),
     ("test_mode captures accepted", 'if b.get("test_mode") is not False:', "if False:"),
     ("Claude-open precheck ignored", 'if pc.get("claude_running") is not True:', "if False:"),
+    ("replacement accepted for a valid capture",
+     'why.append(f"{slot}: replacement given although the original is valid")', "pass"),
+    ("invalid replacement accepted", 'if rc["valid"]:\n                used[slot] = rc', 'if True:\n                used[slot] = rc'),
     ("too few valid captures still judged",
      'if why or len(valid["C"]) < 3 or len(valid["GT"]) < 3:', "if why:"),
 ]

@@ -5,7 +5,7 @@ evidence/session/xfce-v6/XFCE-V6-BASELINE-01-FREEZE.md sections 4, 5, 6 and 9, n
     xfce_v6_judge.py preflight <dir>                     section 5.2 (+ deviation 1)
     xfce_v6_judge.py capture-b <dir> <C|GT|G0>           one Part B capture: validity + metrics
     xfce_v6_judge.py part-b <preflight dir> <series.json>
-    xfce_v6_judge.py part-a <v6-1 dir> <stock-1 dir> <v6-2 dir>
+    xfce_v6_judge.py part-a <v6-1 dir> <stock-1 dir> <v6-2 dir> [v6-1=<dir> stock-1=<dir> v6-2=<dir>]
 
 Missing evidence never passes: an absent file, an unreadable value or a null count makes the
 capture INVALID (null is not 0).
@@ -407,14 +407,39 @@ def capture_a(d: Path, kind: str) -> dict:
     return {"valid": not why, "why": why, "metrics": m}
 
 
-def part_a(v6_1: Path, stock_1: Path, v6_2: Path) -> dict:
-    caps = {"v6-1": capture_a(v6_1, "v6"), "stock-1": capture_a(stock_1, "stock"), "v6-2": capture_a(v6_2, "v6")}
-    out = {"captures": caps}
-    bad = [k for k, c in caps.items() if not c["valid"]]
-    if bad:   # the freeze defines no replacement for Part A
+def part_a(v6_1: Path, stock_1: Path, v6_2: Path, r1: dict | None = None) -> dict:
+    """r1: {slot: dir} replacement captures (freeze section 9, supplement 7): at most one per slot,
+    only for a slot whose original capture is INVALID; an INVALID replacement ends Part A."""
+    r1 = r1 or {}
+    kinds = {"v6-1": "v6", "stock-1": "stock", "v6-2": "v6"}
+    orig = {"v6-1": v6_1, "stock-1": stock_1, "v6-2": v6_2}
+    caps, used, why = {}, {}, []
+    for slot, kind in kinds.items():
+        c = capture_a(orig[slot], kind)
+        caps[slot] = c
+        if c["valid"]:
+            used[slot] = c
+            if slot in r1:
+                why.append(f"{slot}: replacement given although the original is valid")
+        elif slot in r1:
+            rc = capture_a(Path(r1[slot]), kind)
+            caps[slot + "-r1"] = rc
+            if rc["valid"]:
+                used[slot] = rc
+            else:
+                why.append(f"{slot} INVALID and its replacement INVALID")
+        else:
+            why.append(f"{slot} INVALID")
+    for slot in r1:
+        if slot not in kinds:
+            why.append(f"unknown replacement slot {slot}")
+    out = {"captures": caps, "used": {k: ("replacement" if k + "-r1" in caps and v is caps[k + "-r1"] else "original")
+                                      for k, v in used.items()}}
+    if why:
         out["verdict"] = "INCONCLUSIVE"
-        out["why"] = [f"{k} INVALID" for k in bad]
+        out["why"] = why
         return out
+    caps = used
     e_stock = caps["stock-1"]["metrics"]["E"]
     e_v6 = [caps["v6-1"]["metrics"]["E"], caps["v6-2"]["metrics"]["E"]]
     if e_stock < 3:
@@ -442,8 +467,8 @@ def main(argv) -> int:
         r = capture_b(Path(argv[1]), argv[2])
     elif len(argv) >= 3 and argv[0] == "part-b":
         r = part_b(Path(argv[1]), Path(argv[2]))
-    elif len(argv) >= 4 and argv[0] == "part-a":
-        r = part_a(Path(argv[1]), Path(argv[2]), Path(argv[3]))
+    elif len(argv) >= 4 and argv[0] == "part-a":      # optional trailing  slot=dir  replacements
+        r = part_a(Path(argv[1]), Path(argv[2]), Path(argv[3]), dict(x.split("=", 1) for x in argv[4:]))
     else:
         print(__doc__)
         return 64

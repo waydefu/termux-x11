@@ -322,6 +322,26 @@ class PartA(Base):
         r = J.part_a(self.make_a("a", "v6", s3=4), self.make_a("b", "stock", s1=9), self.make_a("c", "v6"))
         self.assertEqual(r["A1"], "DAILY_STUTTER_GONE")
 
+    def test_replacement_rescues_one_invalid_slot(self):
+        bad = self.make_a("a", "v6", pre={"claude_running": True, "cursor_running": True, "hermes_running": False,
+                                           "electron_others": [], "mem_available_mb": 5100})
+        r = J.part_a(bad, self.make_a("b", "stock", s1=9), self.make_a("c", "v6"), {"v6-1": self.make_a("a-r1", "v6")})
+        self.assertEqual(r["verdict"], "JUDGED", r.get("why"))
+        self.assertEqual(r["used"]["v6-1"], "replacement")
+
+    def test_invalid_replacement_ends_part_a(self):
+        t = {"selftest": True, "events": 2}
+        bad = self.make_a("a", "v6", pre={"claude_running": False, "cursor_running": False, "hermes_running": False,
+                                           "electron_others": [], "mem_available_mb": 5100})
+        rep = self.make_a("a-r1", "v6", test_mode=True)
+        r = J.part_a(bad, self.make_a("b", "stock", s1=9), self.make_a("c", "v6"), {"v6-1": rep})
+        self.assertEqual(r["verdict"], "INCONCLUSIVE")
+
+    def test_no_replacing_a_valid_capture(self):   # no cherry-picking
+        r = J.part_a(self.make_a("a", "v6"), self.make_a("b", "stock", s1=9), self.make_a("c", "v6"),
+                     {"v6-2": self.make_a("c-r1", "v6", s1=0)})
+        self.assertEqual(r["verdict"], "INCONCLUSIVE")
+
     def test_stock_run_under_v6_invalid(self):
         r = J.part_a(self.make_a("a", "v6"), self.make_a("b", "stock", client=tracer_json(sha=J.V6_SHA)),
                      self.make_a("c", "v6"))

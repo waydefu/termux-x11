@@ -14,8 +14,11 @@ Then: screen + touch recorder (adb) -> the untraced probe (TermuxService), the t
 traced_lat on the display -> baseline -> launches the daily launchers (default cursor-gpu,
 hermes-gpu), launch_time = the first launch -> loaded -> stops. Every second: MemAvailable, swap,
 cores per group (the tracer found by TracerPid, not by name: v1 matched comm 'proot', which misses
-proot-fast6). Stable :1 is only read: two X round-trip probes and /proc via adb. The launched apps
-are left running; the user closes them.
+proot-fast6). Stable :1 is only read: two X round-trip probes and /proc via adb.
+--close-launched (freeze section 9, deviation 3): after sampling, SIGTERM exactly the launched main
+processes (pid recorded at launch; `setsid nohup sh -c "exec ..."` keeps the pid through every exec),
+each only if its cmdline still matches, and record it in closed.json (a construction step, not
+cleanup). Without the flag the apps are left running for the user to close.
 """
 from __future__ import annotations
 
@@ -105,6 +108,36 @@ def x1_pid(proc: str = "/proc"):
     return P.find_pid(P.X1_PREFIX, proc)
 
 
+def close_launched(out: Path, launched: list, procs: dict, notes) -> None:
+    """SIGTERM exactly the recorded main processes; record pid, cmdline and outcome."""
+    rec = []
+    for item in launched:
+        pid = item["pid"]
+        pr = procs.get(pid)
+        if pr is not None and pr.poll() is not None:
+            rec.append({**item, "cmdline": None, "action": "already_gone", "rc": pr.returncode})
+            continue
+        try:
+            text = P.cmdline_text(open(f"/proc/{pid}/cmdline", "rb").read())
+        except OSError:
+            rec.append({**item, "cmdline": None, "action": "already_gone"})
+            continue
+        exe = text.split(" ", 1)[0]
+        if not any(exe.endswith(m) for m in ELECTRON):
+            rec.append({**item, "cmdline": text[:200], "action": "skipped_cmdline_mismatch"})
+            continue
+        os.kill(pid, 15)
+        notes.write(f"close_launched sigterm pid={pid} cmdline={text[:160]}\n")
+        t0 = time.time()
+        while time.time() - t0 < 20 and pr is not None and pr.poll() is None:
+            time.sleep(0.5)
+        gone = pr is not None and pr.poll() is not None
+        rec.append({**item, "cmdline": text[:200], "action": "sigterm",
+                    "gone_after_s": round(time.time() - t0, 1) if gone else None})
+    left = main_processes()
+    (out / "closed.json").write_text(json.dumps({"closed": rec, "electron_left": left}, indent=2) + "\n")
+
+
 def refuse(why: str) -> int:
     print(f"DAILY_SAMPLER_REFUSED {why}")
     return 3
@@ -120,6 +153,7 @@ def main() -> int:
     ap.add_argument("--loaded", type=float, default=240)
     ap.add_argument("--launch", action="append")
     ap.add_argument("--test-mode", action="store_true")
+    ap.add_argument("--close-launched", action="store_true")
     a = ap.parse_args()
     launch = a.launch or ["/root/.local/bin/cursor-gpu", "/root/.local/bin/hermes-gpu"]
     out = Path(a.out)
@@ -183,14 +217,19 @@ def main() -> int:
     phases = {"baseline_start": t_start, "launch_time": None, "loaded_end": None}
     prev = {"tracer": ticks(tracer), "x1": ticks(x1) if x1 else None, "t": time.monotonic()}
     reason = "completed"
+    launched: list[dict] = []
+    procs: dict = {}               # pid -> Popen: poll() reaps, so an exited app is not a zombie "still alive"
     while True:
         time.sleep(1.0)
         el = time.time() - t_start
         if phases["launch_time"] is None and el >= a.baseline:
             phases["launch_time"] = time.time()
             for c in launch:
-                subprocess.Popen(["setsid", "nohup", "sh", "-c", f"DISPLAY={a.display} exec {c}"],
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+                lp = subprocess.Popen(["setsid", "nohup", "sh", "-c", f"DISPLAY={a.display} exec {c}"],
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+                launched.append({"cmd": c, "pid": lp.pid})
+                procs[lp.pid] = lp
+            (out / "launched.json").write_text(json.dumps(launched, indent=2) + "\n")
             notes.write(f"launched {launch} at {phases['launch_time']:.3f}\n")
         now = {"tracer": ticks(tracer), "x1": ticks(x1) if x1 else None, "t": time.monotonic()}
         dt = now["t"] - prev["t"]
@@ -227,6 +266,8 @@ def main() -> int:
     ut.collect(out / "untraced-rtt.txt")
     for n in ut.notes:
         notes.write(n + "\n")
+    if a.close_launched:
+        close_launched(out, launched, procs, notes)
     rc = 0 if reason == "completed" and ut_ok else 5
     (out / "sampler-exit.txt").write_text(f"rc={rc}\n")
     notes.write(f"reason={reason}\n")
