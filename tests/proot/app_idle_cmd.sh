@@ -13,5 +13,8 @@ case "$1" in
   # no daily Cursor profile exists (~/.config/Cursor absent): fresh profile per run, flags of PROOT-BENCH
   cursor)     exec /usr/share/cursor/cursor --no-sandbox --disable-gpu-sandbox --disable-dev-shm-usage --ozone-platform=x11 \
                 --disable-gpu --user-data-dir="$2/prof-cursor" ;;
+  # Claude Desktop with a throwaway profile (sanity only: the daily instance holds the real one)
+  claude)     exec /usr/lib/claude-desktop/claude-desktop --no-sandbox --disable-gpu --disable-dev-shm-usage --ozone-platform=x11 \
+                --password-store=basic --user-data-dir="$2/prof-claude" ;;
   *) echo "app_idle_cmd: unknown app $1" >&2; exit 2 ;;
 esac

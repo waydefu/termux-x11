@@ -3,6 +3,7 @@
 # proot (P0) and under proot-fast2 (PF), on the experimental X (:3). Run by evidence/session/gl/run-gl-bench.sh KIND=cmd.
 #   SERIAL=<5038-lane serial> DISPLAY=:3 bash app_idle.sh <cell evidence dir>
 #   APP_IDLE_DRYRUN=1: one app (chatgpt), P0 and PF once (harness check, never judged)
+#   APP_IDLE_SANITY=1: one PF run per app (functional sanity of a proot build, never judged)
 # Per app ABBA: P0, PF, PF, P0. Launch 60 s (not measured), then a 60 s idle window [t0, t1] with no input.
 # CPU = meter CSV on the run-as side (proot_meter.py), as in PROOT-BENCH; end of run = proot_bench_end.py (run-as).
 set -uo pipefail
@@ -122,6 +123,9 @@ $XFER_HOST/$name.sid $XFER_HOST/$name.tracer $bin $XFER_HOST/$name.end.log" </de
   [ "${left:-x}" = 0 ] && [ "${tracer_gone:-x}" = true ] || { echo "APP_IDLE_ABORT end_unverified run=$name end='${endr}'"; exit 4; }
 }
 
+if [ "${APP_IDLE_SANITY:-0}" = 1 ]; then   # one PF run per app: does it start, show a window, stay alive, end clean?
+  for app in ${APPS:-claude chatgpt chatgptweb hermes cursor}; do run_one $app-sanity $app pf; done; echo APP_IDLE_SANITY_DONE; exit 0
+fi
 if [ "${APP_IDLE_DRYRUN:-0}" = 1 ]; then
   run_one dry-chatgpt-p0 chatgpt p0; run_one dry-chatgpt-pf chatgpt pf; echo APP_IDLE_DRYRUN_DONE; exit 0
 fi
