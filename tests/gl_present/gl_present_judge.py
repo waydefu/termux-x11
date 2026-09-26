@@ -4,8 +4,12 @@
     gl_present_judge.py --rep <main cell dir> --rep <main cell dir> [--xdbg <xdbg cell dir>] [--json out]
     gl_present_judge.py --self-test
 
-Reads the SEG lines in <cell>/cmd.out plus <seg>.log, <seg>.present.jsonl, <seg>.x3t0/.x3t1 and
-(xdbg) raw-logcat.txt. Every threshold is a constant below and is quoted verbatim in the freeze doc.
+Reads the SEG lines in <cell>/cmd.out plus <seg>.log, <seg>.present.jsonl, <seg>.req.jsonl, <seg>.px.txt,
+<seg>.x3t0/.x3t1 and (xdbg) raw-logcat.txt.
+Amendment 1 (2026-09-26, before any judged cell): the EGL/Zink client presents nothing on :3 (dry-01-r2,
+diag-egl-01, not judged), so J2/J3 are judged for vk + glx, and a NOT_PRESENTED path class exists that needs
+both the protocol-level request histogram and the root-pixel probe. No threshold value changed.
+Every threshold is a constant below and is quoted verbatim in the freeze doc.
 A value that could not be measured is None and makes its segment INVALID; it is never read as 0.
 """
 from __future__ import annotations
@@ -27,8 +31,13 @@ OFF_CTRL_MARGIN = 0.05        # J2 control: off X3 cores <= idle X3 cores + 0.05
 CHEAP_MAX = 0.05              # J2: on-l X3 cores < 0.05 in both reps -> X3_PRESENT_CHEAP
 SCALE_PER_PIXEL = 2.0         # J3: r = X3 ms/frame (1200x1200) / (600x600) >= 2.0 in both reps
 SCALE_FIXED = 1.5             # J3: r <= 1.5 in both reps
-ONSCREEN = ["vk-l", "vk-s", "egl-l", "egl-s", "glx-l"]
-OFFSCREEN = ["vk-off", "egl-off"]
+ONSCREEN = ["vk-l", "vk-s", "glx-l", "glx-s", "egl-l"]
+OFFSCREEN = ["vk-off", "glx-off"]
+JUDGED_APIS = ("vk", "glx")      # amendment 1 (was vk, egl)
+CLIENT_COLOURS = {0x0080ff, 0xff8000}   # the two clear colours of every client, as 0xRRGGBB
+# requests that hand a frame to the server: (extension, minor) at xcb level and core majors at libc level
+PRESENT_EXT_REQS = {("Present", 1), ("MIT-SHM", 3), ("MIT-SHM", 5), ("DRI3", 2), ("DRI3", 7)}
+PRESENT_CORE_MAJORS = {72, 62, 63}      # PutImage, CopyArea, CopyPlane
 SW_CONTROL = "vk-l-sw"
 NON_DRI3_PATHS = {"SHM_PIXMAP_PRESENT", "SHM_PUT", "CORE_PUT"}
 PRESENT_KEYS = ["dri3_open", "pixmap_from_buffer", "pixmap_from_buffers", "present_pixmap", "shm_put_image",
@@ -108,6 +117,38 @@ def classify(c, frames):
     return "UNEXPLAINED"
 
 
+def req_hist(cell, seg):
+    """-> the single req_count JSON object, or None."""
+    try:
+        lines = [l for l in open(os.path.join(cell, f"{seg}.req.jsonl")) if l.strip()]
+        return json.loads(lines[0]) if len(lines) == 1 else None
+    except (OSError, ValueError):
+        return None
+
+
+def px_samples(cell, seg):
+    """-> list of 0xRRGGBB ints (4 expected) or None if the probe did not produce 4 readable samples."""
+    try:
+        vals = [l.split()[2] for l in open(os.path.join(cell, f"{seg}.px.txt")) if l.startswith("PX ")]
+    except (OSError, IndexError):
+        return None
+    if len(vals) != 4 or any(not v.startswith("0x") for v in vals):
+        return None
+    return [int(v, 16) & 0xffffff for v in vals]
+
+
+def not_presented(req, px):
+    """True only when the protocol stream shows no frame hand-off AND the window pixel never shows a client
+    colour. Unknown (None) when either witness is missing."""
+    if req is None or px is None or not req.get("majors"):
+        return None
+    if any((r["ext"], r["op"]) in PRESENT_EXT_REQS and r["n"] > 0 for r in req.get("requests", [])):
+        return False
+    if any(m["major"] in PRESENT_CORE_MAJORS and m["n"] > 0 for m in req["majors"]):
+        return False
+    return not any(v in CLIENT_COLOURS for v in px)
+
+
 def thread_deltas(cell, seg):
     def load(p):
         d = {}
@@ -177,6 +218,10 @@ def segment(cell, seg, kv):
     r["counts"] = {k: c.get(k, 0) for k in PRESENT_KEYS}
     r["modifiers"] = sorted({str(i.get("modifier")) for i in c.get("imports", [])})
     r["path"] = "NONE" if seg in OFFSCREEN else classify(r["counts"], frames)
+    px = px_samples(cell, seg)
+    r["px_client_colour"] = None if px is None else any(v in CLIENT_COLOURS for v in px)
+    if r["path"] == "UNEXPLAINED" and not_presented(req_hist(cell, seg), px) is True:
+        r["path"] = "NOT_PRESENTED"
     return r
 
 
@@ -198,7 +243,7 @@ def xdbg_witness(cell):
     except OSError:
         return None
     out = {}
-    for seg in ("vk-l", "egl-l", "glx-l"):
+    for seg in ("vk-l", "glx-l", "egl-l"):
         kv = kvs.get(seg)
         if not kv or "date0" not in kv or kv.get("rc") != "0":
             out[api_of(seg)] = None
@@ -263,7 +308,7 @@ def judge(reps, xdbg=None):
         else:
             V[f"J1x_{api}"] = "X_WITNESS_CONTRADICTS" if w["lines"] >= 1 else "X_WITNESS_CONSISTENT"
     # J2 X3 present cost, J3 scaling
-    for api in ("vk", "egl"):
+    for api in JUDGED_APIS:
         rows, ctrl_fail = [], False
         for cell in cells:
             idle, off, on = cell["idle"], cell[f"{api}-off"], cell[f"{api}-l"]
@@ -303,11 +348,11 @@ def judge(reps, xdbg=None):
             V[f"J3_{api}"] = "INCONCLUSIVE"
     if not tool_ok:
         V["STEP1"] = "GL_PRESENT_INVALID"
-    elif all(V[f"J2_{a}"] == "X3_PRESENT_COST" and V[f"J3_{a}"] == "X3_COST_PER_PIXEL" for a in ("vk", "egl")):
+    elif all(V[f"J2_{a}"] == "X3_PRESENT_COST" and V[f"J3_{a}"] == "X3_COST_PER_PIXEL" for a in JUDGED_APIS):
         V["STEP1"] = "PRESENT_COST_IS_X3_PER_PIXEL_COPY"
-    elif all(V[f"J2_{a}"] == "X3_PRESENT_CHEAP" for a in ("vk", "egl")):
+    elif all(V[f"J2_{a}"] == "X3_PRESENT_CHEAP" for a in JUDGED_APIS):
         V["STEP1"] = "PRESENT_COST_NOT_IN_X3"
-    elif any(V[f"J2_{a}"] in ("CONTROL_FAILED", "INSUFFICIENT_REPS", "INVALID_TOOL") for a in ("vk", "egl")):
+    elif any(V[f"J2_{a}"] in ("CONTROL_FAILED", "INSUFFICIENT_REPS", "INVALID_TOOL") for a in JUDGED_APIS):
         V["STEP1"] = "GL_PRESENT_INVALID"
     else:
         V["STEP1"] = "PRESENT_COST_MIXED"
@@ -324,10 +369,10 @@ def _write_cell(d, over=None):
                 focus_pre="true", awake_pre="true", keyguard_pre="false", focus_post="true", awake_post="true",
                 keyguard_post="false")
     # X3 ticks over 20 s: idle 10 (0.005 core), off 20 (0.01), on-l 1600 (0.8), on-s 800 (0.4)
-    plan = {"idle": 10, "vk-off": 20, "egl-off": 20, "vk-l": 1600, "vk-s": 800, "egl-l": 1600, "egl-s": 800,
-            "glx-l": 1600, "vk-l-sw": 1800}
-    frames = {"vk-l": 2000, "vk-s": 4000, "egl-l": 2000, "egl-s": 4000, "glx-l": 2000, "vk-l-sw": 1500,
-              "vk-off": 9000, "egl-off": 9000}
+    plan = {"idle": 10, "vk-off": 20, "glx-off": 20, "vk-l": 1600, "vk-s": 800, "glx-l": 1600, "glx-s": 800,
+            "egl-l": 30, "vk-l-sw": 1800}
+    frames = {"vk-l": 2000, "vk-s": 4000, "glx-l": 2000, "glx-s": 4000, "egl-l": 4000, "vk-l-sw": 1500,
+              "vk-off": 9000, "glx-off": 9000}
     lines = []
     for seg, ticks in plan.items():
         kv = dict(base, x3_t0="1000", x3_t1=str(1000 + over.get(("ticks", seg), ticks)))
@@ -349,11 +394,25 @@ def _write_cell(d, over=None):
                 f.write(f"GL_PRESENT api={seg.split('-')[0]} frames={n} secs=20.000 fps=100.0 size=1200x1200\n")
         c = {k: 0 for k in PRESENT_KEYS}
         c["imports"] = []
-        if seg in ONSCREEN:
+        req = {"requests": [{"ext": "DRI3", "op": 0, "n": 1}], "majors": [{"major": 14, "n": n}]}
+        px = "0x00000000"
+        if seg in ONSCREEN and seg != "egl-l":   # egl-l: the observed EGL/Zink behaviour, nothing handed over
             c.update(pixmap_from_buffers=3, present_pixmap=n, dri3_open=1)
             c["imports"] = [{"modifier": 0}] * 3
+            req["requests"] += [{"ext": "Present", "op": 1, "n": n}, {"ext": "DRI3", "op": 7, "n": 3}]
+            px = "0xffff8000"
         elif seg == SW_CONTROL:
             c.update(shm_create_pixmap=3, shm_attach=3, present_pixmap=n)
+            req["requests"] += [{"ext": "Present", "op": 1, "n": n}, {"ext": "MIT-SHM", "op": 5, "n": 3}]
+            px = "0xff0080ff"
+        req.update(over.get(("req", seg), {}))
+        px = over.get(("px", seg), px)
+        if seg in ONSCREEN or seg == SW_CONTROL:
+            with open(os.path.join(d, f"{seg}.req.jsonl"), "w") as f:
+                f.write(json.dumps(req) + "\n")
+            if px is not None:
+                with open(os.path.join(d, f"{seg}.px.txt"), "w") as f:
+                    f.write("".join(f"PX t={i * 150} {px}\n" for i in range(4)))
         c.update(over.get(("counts", seg), {}))
         if over.get(("no_shim", seg)):
             continue
@@ -365,23 +424,28 @@ def _write_cell(d, over=None):
 
 def self_test():
     cases = [
-        ("baseline", {}, {"J0": "GL_PRESENT_TOOL_VALID", "J1_vk": "PATH_DRI3", "J2_vk": "X3_PRESENT_COST",
-                          "J3_vk": "X3_COST_PER_PIXEL", "STEP1": "PRESENT_COST_IS_X3_PER_PIXEL_COPY"}),
+        ("baseline", {}, {"J0": "GL_PRESENT_TOOL_VALID", "J1_vk": "PATH_DRI3", "J1_glx": "PATH_DRI3",
+                          "J1_egl": "PATH_NOT_PRESENTED", "J2_vk": "X3_PRESENT_COST", "J3_vk": "X3_COST_PER_PIXEL",
+                          "J2_glx": "X3_PRESENT_COST", "STEP1": "PRESENT_COST_IS_X3_PER_PIXEL_COPY"}),
         ("shim_blind_to_path", {("counts", "vk-l"): {"pixmap_from_buffers": 0, "present_pixmap": 0}},
          {"J0": "GL_PRESENT_TOOL_INVALID", "STEP1": "GL_PRESENT_INVALID"}),
+        ("blind_but_pixels_show_frames", {("px", "egl-l"): "0xffff8000"}, {"J0": "GL_PRESENT_TOOL_INVALID"}),
+        ("blind_protocol_shows_present", {("req", "egl-l"): {"requests": [{"ext": "Present", "op": 1, "n": 50}]}},
+         {"J0": "GL_PRESENT_TOOL_INVALID"}),
+        ("not_presented_needs_pixels", {("px", "egl-l"): None}, {"J0": "GL_PRESENT_TOOL_INVALID"}),
         ("sw_control_did_not_flip", {("counts", "vk-l-sw"): {"shm_create_pixmap": 0, "pixmap_from_buffers": 3}},
          {"J0": "GL_PRESENT_TOOL_INVALID"}),
-        ("offscreen_counts_presents", {("counts", "egl-off"): {"present_pixmap": 50}}, {"J0": "GL_PRESENT_TOOL_INVALID"}),
+        ("offscreen_counts_presents", {("counts", "glx-off"): {"present_pixmap": 50}}, {"J0": "GL_PRESENT_TOOL_INVALID"}),
         ("off_control_busy", {("ticks", "vk-off"): 400}, {"J2_vk": "CONTROL_FAILED", "STEP1": "GL_PRESENT_INVALID"}),
-        ("touch_invalidates_on", {("kv", "egl-l"): {"touch_events": "4"}}, {"J2_egl": "INSUFFICIENT_REPS"}),
+        ("touch_invalidates_on", {("kv", "glx-l"): {"touch_events": "4"}}, {"J2_glx": "INSUFFICIENT_REPS"}),
         ("missing_shim_is_null", {("no_shim", "vk-s"): True}, {"J3_vk": "INSUFFICIENT_REPS"}),
         ("fixed_cost_not_pixels", {("ticks", "vk-s"): 1600, ("frames", "vk-s"): 2000}, {"J3_vk": "X3_COST_PER_FRAME_FIXED"}),
-        ("cheap_x3", {("ticks", s): 40 for s in ("vk-l", "egl-l", "vk-s", "egl-s")},
-         {"J2_vk": "X3_PRESENT_CHEAP", "J2_egl": "X3_PRESENT_CHEAP", "STEP1": "PRESENT_COST_NOT_IN_X3"}),
-        ("wrong_driver", {("kv", "vk-l"): {}}, {}),   # placeholder replaced below
-        ("shm_path_classified", {("counts", "egl-l"): {"pixmap_from_buffers": 0, "shm_create_pixmap": 3},
-                                 ("counts", "egl-s"): {"pixmap_from_buffers": 0, "shm_create_pixmap": 3}},
-         {"J1_egl": "PATH_SHM_PIXMAP_PRESENT"}),
+        ("cheap_x3", {("ticks", s): 40 for s in ("vk-l", "glx-l", "vk-s", "glx-s")},
+         {"J2_vk": "X3_PRESENT_CHEAP", "J2_glx": "X3_PRESENT_CHEAP", "STEP1": "PRESENT_COST_NOT_IN_X3"}),
+        ("wrong_driver", {}, {}),   # expectations set below
+        ("shm_path_classified", {("counts", "glx-l"): {"pixmap_from_buffers": 0, "shm_create_pixmap": 3},
+                                 ("counts", "glx-s"): {"pixmap_from_buffers": 0, "shm_create_pixmap": 3}},
+         {"J1_glx": "PATH_SHM_PIXMAP_PRESENT"}),
     ]
     tmp = tempfile.mkdtemp(prefix="glp-selftest-")
     fails = 0
@@ -392,11 +456,11 @@ def self_test():
                 d = os.path.join(tmp, f"{name}-{rep}")
                 _write_cell(d, over)
                 dirs.append(d)
-            if name == "wrong_driver":   # llvmpipe instead of zink on both reps -> egl segments invalid
+            if name == "wrong_driver":   # llvmpipe instead of zink on both reps -> glx-l invalid
                 for d in dirs:
-                    p = os.path.join(d, "egl-l.log")
-                    open(p, "w").write('GL_RENDERER "llvmpipe (LLVM 20)" GL_VERSION "x"\nGL_PRESENT api=egl frames=2000 secs=20.000\n')
-                want = {"J2_egl": "INSUFFICIENT_REPS"}
+                    p = os.path.join(d, "glx-l.log")
+                    open(p, "w").write('GL_RENDERER "llvmpipe (LLVM 20)" GL_VERSION "x"\nGL_PRESENT api=glx frames=2000 secs=20.000\n')
+                want = {"J2_glx": "INSUFFICIENT_REPS"}
             got = judge(dirs)["verdicts"]
             bad = {k: (got.get(k), v) for k, v in want.items() if got.get(k) != v}
             print(f"SELFTEST {name}: {'ok' if not bad else 'FAIL ' + str(bad)}")
@@ -425,11 +489,11 @@ def main():
         for seg, s in cell.items():
             keep = {k: (round(v, 4) if isinstance(v, float) else v) for k, v in s.items()
                     if k in ("valid", "why", "x3_cores", "x3_ms_per_frame", "frames", "path", "modifiers",
-                             "client_ms_per_frame", "x3_top_thread")}
+                             "client_ms_per_frame", "x3_top_thread", "px_client_colour")}
             print(f"rep{i + 1} {seg:8s} {json.dumps(keep)}")
     print("J0_why", res["J0_why"])
     print("xdbg_witness", json.dumps(res["xdbg_witness"]))
-    for api in ("vk", "egl"):
+    for api in JUDGED_APIS:
         print(f"J2_{api}_rows", res[f"J2_{api}_rows"], f"J3_{api}_ratios", [round(r, 3) for r in res[f"J3_{api}_ratios"]])
     for k, v in res["verdicts"].items():
         print(f"VERDICT {k} {v}")

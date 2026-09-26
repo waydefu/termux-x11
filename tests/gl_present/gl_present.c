@@ -3,9 +3,10 @@
 //   -DAPI_GLX  GLX + desktop GL:           the path Blender and most X11 GL programs take
 // Every frame is glClear (colour alternates) + swap with swap interval 0, so the GPU does almost
 // nothing and what is left is the cost of handing the frame to the X server.
-//   gl_present_{egl,glx} --size WxH --seconds S [--offscreen]      (--offscreen: EGL build only)
+//   gl_present_{egl,glx} --size WxH --seconds S [--offscreen]
 // --offscreen clears a WxH FBO texture and calls glFinish every frame instead of swapping:
-// the "nothing is presented" control. The window still exists (same context setup).
+// the "nothing is presented" control. The window still exists (same context setup). Both builds
+// (GLX offscreen added in GL-PRESENT-01 amendment 1: FBO entry points come from glXGetProcAddress).
 // Last stdout line: GL_PRESENT key=value ... ; exit 0 only when at least one frame completed.
 //   cc -O2 -Wall -DAPI_EGL -o gl_present_egl gl_present.c -lEGL -lGLESv2 -lX11
 //   cc -O2 -Wall -DAPI_GLX -o gl_present_glx gl_present.c -lGL -lX11
@@ -77,7 +78,6 @@ int main(int argc, char **argv) {
     if (!eglMakeCurrent(ed, surf, surf, ctx)) FAIL("call=eglMakeCurrent err=0x%x", eglGetError());
     eglSwapInterval(ed, 0);
 #else
-    if (offscreen) FAIL("offscreen_is_egl_only");
     int va[] = { GLX_RGBA, GLX_DOUBLEBUFFER, GLX_RED_SIZE, 8, GLX_GREEN_SIZE, 8, GLX_BLUE_SIZE, 8, None };
     XVisualInfo *vi = glXChooseVisual(dpy, DefaultScreen(dpy), va);
     if (!vi) FAIL("call=glXChooseVisual");
@@ -101,7 +101,24 @@ int main(int argc, char **argv) {
     }
     printf("GL_RENDERER \"%s\" GL_VERSION \"%s\"\n", (const char *) glGetString(GL_RENDERER), (const char *) glGetString(GL_VERSION));
 
-#if defined(API_EGL)
+#if defined(API_GLX)
+    // desktop libGL only exports GL 1.x entry points; the FBO ones come from glXGetProcAddress
+    typedef void (*genfb_t)(GLsizei, GLuint *);
+    typedef void (*bindfb_t)(GLenum, GLuint);
+    typedef void (*fbtex_t)(GLenum, GLenum, GLenum, GLuint, GLint);
+    typedef GLenum (*fbstat_t)(GLenum);
+    genfb_t glGenFramebuffers = (genfb_t) glXGetProcAddress((const GLubyte *) "glGenFramebuffers");
+    bindfb_t glBindFramebuffer = (bindfb_t) glXGetProcAddress((const GLubyte *) "glBindFramebuffer");
+    fbtex_t glFramebufferTexture2D = (fbtex_t) glXGetProcAddress((const GLubyte *) "glFramebufferTexture2D");
+    fbstat_t glCheckFramebufferStatus = (fbstat_t) glXGetProcAddress((const GLubyte *) "glCheckFramebufferStatus");
+#ifndef GL_FRAMEBUFFER
+#define GL_FRAMEBUFFER 0x8D40
+#define GL_COLOR_ATTACHMENT0 0x8CE0
+#define GL_FRAMEBUFFER_COMPLETE 0x8CD5
+#endif
+    if (offscreen && !(glGenFramebuffers && glBindFramebuffer && glFramebufferTexture2D && glCheckFramebufferStatus))
+        FAIL("call=glXGetProcAddress_fbo");
+#endif
     GLuint tex = 0, fbo = 0;
     if (offscreen) {
         glGenTextures(1, &tex);
@@ -112,7 +129,6 @@ int main(int argc, char **argv) {
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
         if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) FAIL("call=fbo_incomplete");
     }
-#endif
     glViewport(0, 0, W, H);
     unsigned long long frames = 0;
     double t0 = now();
@@ -120,11 +136,11 @@ int main(int argc, char **argv) {
         float s = (float) (frames % 2);
         glClearColor(s, 0.5f, 1.0f - s, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
-#if defined(API_EGL)
         if (offscreen) glFinish();
+#if defined(API_EGL)
         else if (!eglSwapBuffers(ed, surf)) FAIL("call=eglSwapBuffers err=0x%x frames=%llu", eglGetError(), frames);
 #else
-        glXSwapBuffers(dpy, win);
+        else glXSwapBuffers(dpy, win);
 #endif
         while (XPending(dpy)) { XEvent e; XNextEvent(dpy, &e); }
         frames++;

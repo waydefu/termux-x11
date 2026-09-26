@@ -10,4 +10,7 @@ cc -O2 -Wall -shared -fPIC -o build/present_count.so present_count.c -Wl,--no-as
 cc -O2 -Wall -I"$MESA_INC" -o build/vk_present vk_present.c -l:libvulkan.so.1 -lxcb
 cc -O2 -Wall -DAPI_EGL -o build/gl_present_egl gl_present.c -lEGL -lGLESv2 -lX11
 cc -O2 -Wall -DAPI_GLX -o build/gl_present_glx gl_present.c -lGL -lX11
-(cd build && sha256sum present_count.so vk_present gl_present_egl gl_present_glx)
+# amendment 1: protocol-level request histogram and root-pixel probe (X-side witnesses)
+cc -O2 -Wall -shared -fPIC -o build/req_count.so req_count.c -Wl,--no-as-needed -lxcb -ldl
+cc -O2 -Wall -o build/px_probe px_probe.c -lxcb
+(cd build && sha256sum present_count.so vk_present gl_present_egl gl_present_glx req_count.so px_probe)

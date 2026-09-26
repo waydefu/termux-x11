@@ -16,7 +16,12 @@
 #   present calls   <seg>.present.jsonl from present_count.so (one line per client process)
 #   Activity CPU    /proc/<act>/stat via adb (descriptive only)
 #   thermal / focus / awake / keyguard / touches, as in GL-BENCH-01
+#   (amendment 1) protocol   <seg>.req.jsonl from req_count.so: every request written to the X socket, by major
+#                   opcode (libc writev/sendmsg level), so a client that presents nothing is seen as such
+#   (amendment 1) pixels     <seg>.px.txt: root pixel (300,300) - inside both window sizes - sampled 4x at mid-run
 # One 'SEG' line per segment goes to stdout; gl_present_judge.py reads those plus the files.
+# Amendment 1 (GL-PRESENT-01-FREEZE.md): in dry-01-r2 / diag-egl-01 (not judged) the EGL/Zink client sent one
+# GetGeometry per frame and nothing else, and its window stayed black; judged APIs become vk + glx.
 set -uo pipefail
 OUT=${1:?evidence dir}
 REP=${REP:?REP}
@@ -117,7 +122,10 @@ seg() {   # name secs cmd...
   touch_start "$OUT/$name.touch"; selftest=$SELFTEST
   a0=$(act_ticks)
   x3_threads "$OUT/$name.x3t0"; d0=$(date '+%m-%dT%H:%M:%S.%3N'); m0=$(mono); x0=$(x3_ticks)
+  local pxp=""
+  if [ -n "${PX_AT:-}" ]; then ( sleep "$PX_AT"; "$TOOLS/px_probe" 300 300 4 150 > "$OUT/$name.px.txt" 2>&1 ) & pxp=$!; fi
   res=$(run "$name" "$secs" "$@")
+  [ -n "$pxp" ] && wait "$pxp"
   x1=$(x3_ticks); m1=$(mono); d1=$(date '+%m-%dT%H:%M:%S.%3N'); x3_threads "$OUT/$name.x3t1"
   a1=$(act_ticks)
   touches=$(touch_stop "$OUT/$name.touch")
@@ -128,13 +136,13 @@ seg() {   # name secs cmd...
        "touch_selftest=$selftest touch_events=$touches thermal_start=$th_start thermal_waited_s=$waited thermal_end=$th_end" \
        "focus_pre=$5 awake_pre=$6 keyguard_pre=$7 focus_post=$8 awake_post=$9 keyguard_post=${10}"
 }
-PC() {   # segment name -> env words for the counter
-  echo "LD_PRELOAD=$TOOLS/present_count.so PRESENT_COUNT_OUT=$OUT/$1.present.jsonl vblank_mode=0"
+PC() {   # segment name -> env words for both counters
+  echo "LD_PRELOAD=$TOOLS/present_count.so:$TOOLS/req_count.so PRESENT_COUNT_OUT=$OUT/$1.present.jsonl REQ_COUNT_OUT=$OUT/$1.req.jsonl vblank_mode=0"
 }
 
 $ADBB shell getevent -pl "$TOUCH_DEV" </dev/null 2>/dev/null | tr -d '\r' | grep -m1 'name:' > "$OUT/touch-device.txt" || true
 grep -qi focaltech "$OUT/touch-device.txt" && TOUCH_NAME_OK=true
-( cd "$TOOLS" && sha256sum present_count.so vk_present gl_present_egl gl_present_glx ) > "$OUT/gl-present-tools.sha256"
+( cd "$TOOLS" && sha256sum present_count.so vk_present gl_present_egl gl_present_glx req_count.so px_probe ) > "$OUT/gl-present-tools.sha256"
 sha256sum "$GPU" "$0" >> "$OUT/gl-present-tools.sha256"
 echo "TOOLS $(tr '\n' ' ' < "$OUT/gl-present-tools.sha256" | cut -c1-400)"
 echo "SET $SET REP $REP X3 $X3 ACT $ACT touch_name_ok=$TOUCH_NAME_OK"
@@ -150,19 +158,22 @@ case "$SET" in
     seg egl-l $T $GPU env $(PC egl-l) $TOOLS/gl_present_egl --size $L --seconds 5
     ;;
   xdbg)   # X3 started with TERMUX_X11_DEBUG=2: its DRI3 import log is the server-side witness of the path
+    PX_AT=5
     seg vk-l $T $GPU env $(PC vk-l) $TOOLS/vk_present --size $L --seconds 10
-    seg egl-l $T $GPU env $(PC egl-l) $TOOLS/gl_present_egl --size $L --seconds 10
     seg glx-l $T $GPU env $(PC glx-l) $TOOLS/gl_present_glx --size $L --seconds 10
+    seg egl-l $T $GPU env $(PC egl-l) $TOOLS/gl_present_egl --size $L --seconds 10
     ;;
-  main)
+  main)   # amendment 1 order; PX_AT = mid-run (client start-up is ~1-2 s)
+    PX_AT=""
     seg idle $T sleep "$S"
     seg vk-off $T $GPU env $(PC vk-off) $TOOLS/vk_present --size $L --seconds "$S" --offscreen
+    seg glx-off $T $GPU env $(PC glx-off) $TOOLS/gl_present_glx --size $L --seconds "$S" --offscreen
+    PX_AT=$((S / 2))
     seg vk-l $T $GPU env $(PC vk-l) $TOOLS/vk_present --size $L --seconds "$S"
     seg vk-s $T $GPU env $(PC vk-s) $TOOLS/vk_present --size $M --seconds "$S"
-    seg egl-off $T $GPU env $(PC egl-off) $TOOLS/gl_present_egl --size $L --seconds "$S" --offscreen
-    seg egl-l $T $GPU env $(PC egl-l) $TOOLS/gl_present_egl --size $L --seconds "$S"
-    seg egl-s $T $GPU env $(PC egl-s) $TOOLS/gl_present_egl --size $M --seconds "$S"
     seg glx-l $T $GPU env $(PC glx-l) $TOOLS/gl_present_glx --size $L --seconds "$S"
+    seg glx-s $T $GPU env $(PC glx-s) $TOOLS/gl_present_glx --size $M --seconds "$S"
+    seg egl-l $T $GPU env $(PC egl-l) $TOOLS/gl_present_egl --size $L --seconds "$S"
     seg vk-l-sw $T $GPU env MESA_VK_WSI_DEBUG=sw $(PC vk-l-sw) $TOOLS/vk_present --size $L --seconds "$S"
     ;;
   *) echo "GL_PRESENT_ABORT bad_set $SET"; exit 4;;
