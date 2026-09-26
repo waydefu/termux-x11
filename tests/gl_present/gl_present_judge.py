@@ -9,6 +9,10 @@ Reads the SEG lines in <cell>/cmd.out plus <seg>.log, <seg>.present.jsonl, <seg>
 Amendment 1 (2026-09-26, before any judged cell): the EGL/Zink client presents nothing on :3 (dry-01-r2,
 diag-egl-01, not judged), so J2/J3 are judged for vk + glx, and a NOT_PRESENTED path class exists that needs
 both the protocol-level request histogram and the root-pixel probe. No threshold value changed.
+GL-PRESENT-02 (2026-09-26, after GL-PRESENT-01 was judged INVALID on these two defects; thresholds unchanged):
+  - J0 rule 2 counts only frame hand-offs in off segments (HANDOFF_*): Zink kopper builds its swapchain at
+    glXMakeCurrent, so glx-off imports 3 DRI3 buffers and never presents - that is not presenting.
+  - J1x is X_WITNESS_NULL when J1 is not a path class (it said CONTRADICTS when J1 was PATH_INVALID).
 Every threshold is a constant below and is quoted verbatim in the freeze doc.
 A value that could not be measured is None and makes its segment INVALID; it is never read as 0.
 """
@@ -38,6 +42,9 @@ CLIENT_COLOURS = {0x0080ff, 0xff8000}   # the two clear colours of every client,
 # requests that hand a frame to the server: (extension, minor) at xcb level and core majors at libc level
 PRESENT_EXT_REQS = {("Present", 1), ("MIT-SHM", 3), ("MIT-SHM", 5), ("DRI3", 2), ("DRI3", 7)}
 PRESENT_CORE_MAJORS = {72, 62, 63}      # PutImage, CopyArea, CopyPlane
+# GL-PRESENT-02: what counts as handing a frame over in an off segment (swapchain set-up imports do not)
+HANDOFF_COUNTS = ["present_pixmap", "shm_put_image", "put_image", "x_put_image", "x_shm_put_image"]
+HANDOFF_EXT_REQS = {("Present", 1), ("MIT-SHM", 3)}
 SW_CONTROL = "vk-l-sw"
 NON_DRI3_PATHS = {"SHM_PIXMAP_PRESENT", "SHM_PUT", "CORE_PUT"}
 PRESENT_KEYS = ["dri3_open", "pixmap_from_buffer", "pixmap_from_buffers", "present_pixmap", "shm_put_image",
@@ -218,6 +225,8 @@ def segment(cell, seg, kv):
     r["counts"] = {k: c.get(k, 0) for k in PRESENT_KEYS}
     r["modifiers"] = sorted({str(i.get("modifier")) for i in c.get("imports", [])})
     r["path"] = "NONE" if seg in OFFSCREEN else classify(r["counts"], frames)
+    if seg in OFFSCREEN:
+        r["req"] = req_hist(cell, seg)
     px = px_samples(cell, seg)
     r["px_client_colour"] = None if px is None else any(v in CLIENT_COLOURS for v in px)
     if r["path"] == "UNEXPLAINED" and not_presented(req_hist(cell, seg), px) is True:
@@ -275,8 +284,16 @@ def judge(reps, xdbg=None):
                 why.append(f"rep{i + 1}:{seg}:unexplained_frames")
         for seg in OFFSCREEN:
             s = cell[seg]
-            if s["valid"] and any(s["counts"].get(k, 0) for k in PRESENT_KEYS if k != "dri3_open"):
-                why.append(f"rep{i + 1}:{seg}:counts_without_presenting")
+            if not s["valid"]:
+                continue
+            if any(s["counts"].get(k, 0) for k in HANDOFF_COUNTS):
+                why.append(f"rep{i + 1}:{seg}:handoff_counted_without_presenting")
+            h = s.get("req")
+            if h is None or not h.get("majors"):
+                why.append(f"rep{i + 1}:{seg}:protocol_histogram_missing")
+            elif any((r["ext"], r["op"]) in HANDOFF_EXT_REQS and r["n"] > 0 for r in h.get("requests", [])) or \
+                    any(m["major"] in PRESENT_CORE_MAJORS and m["n"] > 0 for m in h["majors"]):
+                why.append(f"rep{i + 1}:{seg}:protocol_handoff_without_presenting")
     sw = [cell[SW_CONTROL] for cell in cells if cell[SW_CONTROL]["valid"]]
     if not sw:
         why.append("sw_control_never_valid")
@@ -301,7 +318,7 @@ def judge(reps, xdbg=None):
     res["xdbg_witness"] = wit
     for api in ("vk", "egl", "glx"):
         w = None if wit is None else wit.get(api)
-        if w is None:
+        if w is None or not V[f"J1_{api}"].startswith("PATH_") or V[f"J1_{api}"] in ("PATH_INVALID", "PATH_UNSTABLE"):
             V[f"J1x_{api}"] = "X_WITNESS_NULL"
         elif V[f"J1_{api}"] == "PATH_DRI3":
             V[f"J1x_{api}"] = "X_WITNESS_CONFIRMS" if w["lines"] >= 1 else "X_WITNESS_CONTRADICTS"
@@ -407,7 +424,12 @@ def _write_cell(d, over=None):
             px = "0xff0080ff"
         req.update(over.get(("req", seg), {}))
         px = over.get(("px", seg), px)
-        if seg in ONSCREEN or seg == SW_CONTROL:
+        if seg == "glx-off":   # GL-PRESENT-01 observation: kopper swapchain built at MakeCurrent, never presented
+            c.update(dri3_open=1, pixmap_from_buffers=3)
+            c["imports"] = [{"modifier": 0}] * 3
+            req["requests"] += [{"ext": "DRI3", "op": 7, "n": 3}, {"ext": "Present", "op": 3, "n": 3}]
+            c.update(over.get(("counts", seg), {}))
+        if seg in ONSCREEN or seg in OFFSCREEN or seg == SW_CONTROL:
             with open(os.path.join(d, f"{seg}.req.jsonl"), "w") as f:
                 f.write(json.dumps(req) + "\n")
             if px is not None:
@@ -420,6 +442,19 @@ def _write_cell(d, over=None):
             f.write(json.dumps(c) + "\n")
     with open(os.path.join(d, "cmd.out"), "w") as f:
         f.write("\n".join(lines) + "\nGL_PRESENT_DONE\n")
+
+
+def _write_xdbg(d):
+    """Synthetic xdbg cell: vk-l / glx-l each with one X3 'DRI3: imported' line inside its window, egl-l none."""
+    os.makedirs(d, exist_ok=True)
+    wins = {"vk-l": ("09-26T11:00:00.000", "09-26T11:00:10.000"), "glx-l": ("09-26T11:00:20.000", "09-26T11:00:30.000"),
+            "egl-l": ("09-26T11:00:40.000", "09-26T11:00:50.000")}
+    with open(os.path.join(d, "cmd.out"), "w") as f:
+        for seg, (a, b) in wins.items():
+            f.write(f"SEG {seg} rc=0 date0={a} date1={b}\n")
+    with open(os.path.join(d, "raw-logcat.txt"), "w") as f:
+        f.write("09-26 11:00:02.000  1  2 I LorieNative: DRI3: imported raw fd, modifier 0, 1200x1200 stride 4864\n")
+        f.write("09-26 11:00:22.000  1  2 I LorieNative: DRI3: imported raw fd, modifier 0, 1200x1200 stride 4864\n")
 
 
 def self_test():
@@ -436,6 +471,13 @@ def self_test():
         ("sw_control_did_not_flip", {("counts", "vk-l-sw"): {"shm_create_pixmap": 0, "pixmap_from_buffers": 3}},
          {"J0": "GL_PRESENT_TOOL_INVALID"}),
         ("offscreen_counts_presents", {("counts", "glx-off"): {"present_pixmap": 50}}, {"J0": "GL_PRESENT_TOOL_INVALID"}),
+        ("off_protocol_handoff", {("req", "vk-off"): {"requests": [{"ext": "Present", "op": 1, "n": 9}]}},
+         {"J0": "GL_PRESENT_TOOL_INVALID"}),
+        ("off_protocol_missing", {("req", "vk-off"): {"majors": []}}, {"J0": "GL_PRESENT_TOOL_INVALID"}),
+        ("j1x_null_when_tool_invalid", {("counts", "vk-l"): {"pixmap_from_buffers": 0, "present_pixmap": 0}, "xdbg": 1},
+         {"J0": "GL_PRESENT_TOOL_INVALID", "J1x_vk": "X_WITNESS_NULL", "J1x_glx": "X_WITNESS_NULL"}),
+        ("xdbg_confirms", {"xdbg": 1}, {"J1x_vk": "X_WITNESS_CONFIRMS", "J1x_glx": "X_WITNESS_CONFIRMS",
+                                        "J1x_egl": "X_WITNESS_CONSISTENT"}),
         ("off_control_busy", {("ticks", "vk-off"): 400}, {"J2_vk": "CONTROL_FAILED", "STEP1": "GL_PRESENT_INVALID"}),
         ("touch_invalidates_on", {("kv", "glx-l"): {"touch_events": "4"}}, {"J2_glx": "INSUFFICIENT_REPS"}),
         ("missing_shim_is_null", {("no_shim", "vk-s"): True}, {"J3_vk": "INSUFFICIENT_REPS"}),
@@ -461,7 +503,11 @@ def self_test():
                     p = os.path.join(d, "glx-l.log")
                     open(p, "w").write('GL_RENDERER "llvmpipe (LLVM 20)" GL_VERSION "x"\nGL_PRESENT api=glx frames=2000 secs=20.000\n')
                 want = {"J2_glx": "INSUFFICIENT_REPS"}
-            got = judge(dirs)["verdicts"]
+            xd = None
+            if over.get("xdbg"):
+                xd = os.path.join(tmp, f"{name}-xdbg")
+                _write_xdbg(xd)
+            got = judge(dirs, xd)["verdicts"]
             bad = {k: (got.get(k), v) for k, v in want.items() if got.get(k) != v}
             print(f"SELFTEST {name}: {'ok' if not bad else 'FAIL ' + str(bad)}")
             fails += bool(bad)
