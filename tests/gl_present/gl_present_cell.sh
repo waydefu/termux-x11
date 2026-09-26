@@ -54,11 +54,20 @@ PY
 act_ticks() { [ -n "$ACT" ] || { echo null; return; }
   $ADBB shell "cat /proc/$ACT/stat" </dev/null 2>/dev/null | tr -d '\r' | awk 'NF>15{print $14+$15; f=1} END{if(!f) print "null"}'; }
 thermal() { $ADBB shell dumpsys thermalservice </dev/null 2>/dev/null | tr -d '\r' | sed -n 's/^Thermal Status: *//p' | head -1; }
+q3() {   # read-only query, re-read up to 2 more times when it comes back empty (GL-PRESENT-03: in 02 one
+         # 'dumpsys window' focus read came back empty with no adb disconnect and invalidated vk-off rep2)
+  local out i
+  for i in 1 2 3; do
+    out=$(eval "$1" 2>/dev/null || true)
+    [ -n "$out" ] && { echo "$out"; return; }
+    echo "$(date +%T) retry $i" >> "$OUT/state-retries.txt"; sleep 0.5   # file, not a variable: q3 runs in $(...)
+  done
+}
 state() {   # focus_ok awake keyguard  (true/false/null)
   local f w k
-  f=$($ADBB shell dumpsys window </dev/null 2>/dev/null | tr -d '\r' | grep -m1 'mCurrentFocus=' || true)
-  w=$($ADBB shell dumpsys power </dev/null 2>/dev/null | tr -d '\r' | grep -m1 'mWakefulness=' | sed 's/.*mWakefulness=//' || true)
-  k=$($ADBB shell dumpsys window </dev/null 2>/dev/null | tr -d '\r' | grep -m1 'isKeyguardShowing=' | sed 's/.*isKeyguardShowing=//' || true)
+  f=$(q3 "\$ADBB shell dumpsys window </dev/null 2>/dev/null | tr -d '\\r' | grep -m1 'mCurrentFocus='")
+  w=$(q3 "\$ADBB shell dumpsys power </dev/null 2>/dev/null | tr -d '\\r' | grep -m1 'mWakefulness=' | sed 's/.*mWakefulness=//'")
+  k=$(q3 "\$ADBB shell dumpsys window </dev/null 2>/dev/null | tr -d '\\r' | grep -m1 'isKeyguardShowing=' | sed 's/.*isKeyguardShowing=//'")
   case "$f" in *"$EXP_PKG/"*) f=true;; "") f=null;; *) f=false;; esac
   case "$w" in Awake) w=true;; "") w=null;; *) w=false;; esac
   [ -n "$k" ] || k=null
@@ -134,7 +143,7 @@ seg() {   # name secs cmd...
   set -- $res; set -- "$@" $st_pre $st_post
   echo "SEG $name wall_s=$1 user_s=$2 sys_s=$3 rc=$4 x3_t0=$x0 x3_t1=$x1 mono0=$m0 mono1=$m1 date0=$d0 date1=$d1 act_t0=$a0 act_t1=$a1" \
        "touch_selftest=$selftest touch_events=$touches thermal_start=$th_start thermal_waited_s=$waited thermal_end=$th_end" \
-       "focus_pre=$5 awake_pre=$6 keyguard_pre=$7 focus_post=$8 awake_post=$9 keyguard_post=${10}"
+       "focus_pre=$5 awake_pre=$6 keyguard_pre=$7 focus_post=$8 awake_post=$9 keyguard_post=${10} state_retries_total=$(cat "$OUT/state-retries.txt" 2>/dev/null | wc -l)"
 }
 PC() {   # segment name -> env words for both counters
   echo "LD_PRELOAD=$TOOLS/present_count.so:$TOOLS/req_count.so PRESENT_COUNT_OUT=$OUT/$1.present.jsonl REQ_COUNT_OUT=$OUT/$1.req.jsonl vblank_mode=0"

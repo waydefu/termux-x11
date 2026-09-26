@@ -13,6 +13,10 @@ GL-PRESENT-02 (2026-09-26, after GL-PRESENT-01 was judged INVALID on these two d
   - J0 rule 2 counts only frame hand-offs in off segments (HANDOFF_*): Zink kopper builds its swapchain at
     glXMakeCurrent, so glx-off imports 3 DRI3 buffers and never presents - that is not presenting.
   - J1x is X_WITNESS_NULL when J1 is not a path class (it said CONTRADICTS when J1 was PATH_INVALID).
+GL-PRESENT-03 (2026-09-26, after GL-PRESENT-02 was judged INVALID; thresholds unchanged):
+  - an off segment fails the protocol check only when its histogram is missing/unreadable; an EMPTY histogram
+    is "measured, sent nothing" (vk_present --offscreen never connects to X). 02 failed rep1 vk-off on this.
+  - replayed on the real 01/02 cells before freezing (tool check only; 01/02 verdicts stay INVALID).
 Every threshold is a constant below and is quoted verbatim in the freeze doc.
 A value that could not be measured is None and makes its segment INVALID; it is never read as 0.
 """
@@ -289,10 +293,10 @@ def judge(reps, xdbg=None):
             if any(s["counts"].get(k, 0) for k in HANDOFF_COUNTS):
                 why.append(f"rep{i + 1}:{seg}:handoff_counted_without_presenting")
             h = s.get("req")
-            if h is None or not h.get("majors"):
+            if h is None:
                 why.append(f"rep{i + 1}:{seg}:protocol_histogram_missing")
             elif any((r["ext"], r["op"]) in HANDOFF_EXT_REQS and r["n"] > 0 for r in h.get("requests", [])) or \
-                    any(m["major"] in PRESENT_CORE_MAJORS and m["n"] > 0 for m in h["majors"]):
+                    any(m["major"] in PRESENT_CORE_MAJORS and m["n"] > 0 for m in h.get("majors", [])):
                 why.append(f"rep{i + 1}:{seg}:protocol_handoff_without_presenting")
     sw = [cell[SW_CONTROL] for cell in cells if cell[SW_CONTROL]["valid"]]
     if not sw:
@@ -412,6 +416,8 @@ def _write_cell(d, over=None):
         c = {k: 0 for k in PRESENT_KEYS}
         c["imports"] = []
         req = {"requests": [{"ext": "DRI3", "op": 0, "n": 1}], "majors": [{"major": 14, "n": n}]}
+        if seg == "vk-off":    # GL-PRESENT-02 observation: offscreen Vulkan never connects to X
+            req = {"requests": [], "majors": []}
         px = "0x00000000"
         if seg in ONSCREEN and seg != "egl-l":   # egl-l: the observed EGL/Zink behaviour, nothing handed over
             c.update(pixmap_from_buffers=3, present_pixmap=n, dri3_open=1)
@@ -429,7 +435,7 @@ def _write_cell(d, over=None):
             c["imports"] = [{"modifier": 0}] * 3
             req["requests"] += [{"ext": "DRI3", "op": 7, "n": 3}, {"ext": "Present", "op": 3, "n": 3}]
             c.update(over.get(("counts", seg), {}))
-        if seg in ONSCREEN or seg in OFFSCREEN or seg == SW_CONTROL:
+        if (seg in ONSCREEN or seg in OFFSCREEN or seg == SW_CONTROL) and not over.get(("no_req", seg)):
             with open(os.path.join(d, f"{seg}.req.jsonl"), "w") as f:
                 f.write(json.dumps(req) + "\n")
             if px is not None:
@@ -473,7 +479,7 @@ def self_test():
         ("offscreen_counts_presents", {("counts", "glx-off"): {"present_pixmap": 50}}, {"J0": "GL_PRESENT_TOOL_INVALID"}),
         ("off_protocol_handoff", {("req", "vk-off"): {"requests": [{"ext": "Present", "op": 1, "n": 9}]}},
          {"J0": "GL_PRESENT_TOOL_INVALID"}),
-        ("off_protocol_missing", {("req", "vk-off"): {"majors": []}}, {"J0": "GL_PRESENT_TOOL_INVALID"}),
+        ("off_protocol_file_missing", {("no_req", "glx-off"): True}, {"J0": "GL_PRESENT_TOOL_INVALID"}),
         ("j1x_null_when_tool_invalid", {("counts", "vk-l"): {"pixmap_from_buffers": 0, "present_pixmap": 0}, "xdbg": 1},
          {"J0": "GL_PRESENT_TOOL_INVALID", "J1x_vk": "X_WITNESS_NULL", "J1x_glx": "X_WITNESS_NULL"}),
         ("xdbg_confirms", {"xdbg": 1}, {"J1x_vk": "X_WITNESS_CONFIRMS", "J1x_glx": "X_WITNESS_CONFIRMS",
