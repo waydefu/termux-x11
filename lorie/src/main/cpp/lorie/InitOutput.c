@@ -31,6 +31,7 @@
 #include <signal.h>
 #include <sys/syscall.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <ucontext.h>
 #include "fb.h"
 #include "mipointer.h"
@@ -1407,6 +1408,8 @@ bool lorieRendererAvailable(void) {
 
 static Bool lorieTryScheduleGpuBlit(PixmapPtr pixmap, PixmapPtr dst, RegionPtr update, int16_t x_off, int16_t y_off,
                                     uint8_t gpuOp, uint64_t *out_serial, void **out_dst_buffer);
+Bool lorieGpuCopyIsDone(uint64_t serial);
+static Bool lorieGpuCopyWait(uint64_t serial, int timeout_ms);
 
 // Tries to offload a Present "copy" operation (present_execute_copy) to the renderer's GPU
 // context instead of doing a CPU CopyArea here. dst is whatever GetWindowPixmap(window) is - root
@@ -1435,6 +1438,66 @@ static Bool lorieD0aEnabled(void) {
     return e && e[0] == '1' && e[1] == '\0';
 }
 
+/* D0b is deliberately opt-in on top of D0a. The renderer uses the same
+ * process environment gate before selecting its partial-upload path. */
+static Bool lorieD0bEnabled(void) {
+    const char *e = getenv("TERMUX_X11_D0B");
+    return lorieD0aEnabled() && e && e[0] == '1' && e[1] == '\0';
+}
+
+/* Private one-slot reuse proof. The serial meaning and queue ABI stay in the
+ * existing shared state; these values only decide whether this X process may
+ * overwrite its cached FD on a later transaction. */
+static uint64_t d0bLastStagingSerial;
+static Bool d0bCacheQuarantined;
+static uint64_t d0bCacheQuarantineCount;
+
+static void lorieD0bSetCacheTelemetry(uint32_t b3aRecord, Bool reuse_proven) {
+    if (pvfb->state)
+        lorieB3aSetD0bCache(&pvfb->state->b3aTelemetry, b3aRecord,
+                           reuse_proven, d0bCacheQuarantineCount);
+}
+
+static void lorieD0bQuarantineCache(uint32_t b3aRecord) {
+    if (!d0bCacheQuarantined && d0bCacheQuarantineCount != UINT64_MAX)
+        d0bCacheQuarantineCount++;
+    d0bCacheQuarantined = TRUE;
+    lorieD0bSetCacheTelemetry(b3aRecord, FALSE);
+}
+
+static Bool lorieD0bProveCacheReusable(uint32_t b3aRecord) {
+    Bool proven;
+
+    if (!d0aStagingCache)
+        return TRUE;
+    if (d0bCacheQuarantined && d0bLastStagingSerial == 0) {
+        lorieD0bSetCacheTelemetry(b3aRecord, FALSE);
+        return FALSE;
+    }
+    if (d0bLastStagingSerial == 0) {
+        d0bCacheQuarantined = FALSE;
+        lorieD0bSetCacheTelemetry(b3aRecord, TRUE);
+        return TRUE;
+    }
+    if (!pvfb->state) {
+        lorieD0bQuarantineCache(b3aRecord);
+        return FALSE;
+    }
+    if (!lorieConnectionAlive() || !lorieRendererAvailable()) {
+        lorieD0bQuarantineCache(b3aRecord);
+        return FALSE;
+    }
+    proven = lorieGpuCopyIsDone(d0bLastStagingSerial) ||
+             lorieGpuCopyWait(d0bLastStagingSerial, 2000);
+    if (proven) {
+        d0bCacheQuarantined = FALSE;
+        lorieD0bSetCacheTelemetry(b3aRecord, TRUE);
+        return TRUE;
+    }
+    lorieD0bQuarantineCache(b3aRecord);
+    return FALSE;
+}
+
 static Bool d0aCacheMatches(const LorieBuffer_Desc *d) {
     const LorieBuffer_Desc *cd;
     if (!d0aStagingCache || !d)
@@ -1444,6 +1507,55 @@ static Bool d0aCacheMatches(const LorieBuffer_Desc *d) {
            cd->format == AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM &&
            cd->width == d->width && cd->height == d->height &&
            cd->stride == d->width;
+}
+
+static LorieBuffer *lorieAcquireD0bStaging(const LorieBuffer_Desc *d, uint32_t b3aRecord) {
+    LorieBuffer *fd;
+    const LorieBuffer_Desc *fdDesc;
+    Bool hit;
+
+    if (!d || d->type != LORIEBUFFER_AHARDWAREBUFFER ||
+        d->format != AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM ||
+        d->width <= 0 || d->height <= 0 || d->stride < d->width)
+        return NULL;
+
+    if (!lorieD0bProveCacheReusable(b3aRecord))
+        return NULL;
+
+    hit = d0aCacheMatches(d);
+    if (hit) {
+        fd = d0aStagingCache;
+        LorieBuffer_acquire(fd);
+    } else {
+        fd = LorieBuffer_allocate(d->width, d->height,
+                                   AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM,
+                                   LORIEBUFFER_FD);
+        if (!fd) {
+            lorieD0bSetCacheTelemetry(b3aRecord, FALSE);
+            return NULL;
+        }
+        /* The proof above covers the old cache before unregister/replacement.
+         * Install the new owner only after allocation has succeeded. */
+        if (d0aStagingCache) {
+            lorieUnregisterBuffer(d0aStagingCache);
+            LorieBuffer_release(d0aStagingCache);
+        }
+        d0aStagingCache = fd;
+        LorieBuffer_acquire(fd);
+        d0bLastStagingSerial = 0;
+        d0bCacheQuarantined = FALSE;
+    }
+
+    fdDesc = LorieBuffer_description(fd);
+    if (fdDesc->type != LORIEBUFFER_FD || !fdDesc->data || fdDesc->data == MAP_FAILED) {
+        LorieBuffer_release(fd);
+        lorieD0bSetCacheTelemetry(b3aRecord, FALSE);
+        return NULL;
+    }
+    lorieB3aMarkStaging(pvfb->state ? &pvfb->state->b3aTelemetry : NULL,
+                        b3aRecord, hit, fdDesc->id);
+    lorieD0bSetCacheTelemetry(b3aRecord, hit ? TRUE : FALSE);
+    return fd;
 }
 
 /* D0a cached path. Returns a caller-owned reference exactly like the one-shot
@@ -2072,7 +2184,22 @@ static struct {
     int nrepair;
     BoxRec repair[32];
     BoxRec repairUnion;
+    Bool d0b;
+    Bool d0bFailed;
+    Bool d0bRegionInitialized;
+    Bool d0bOffsetSet;
+    int16_t d0bXOff, d0bYOff;
+    uint64_t d0bStagedPhysicalBytes;
+    uint32_t d0bBoundsRejectCount;
+    uint32_t d0bRecord;
+    RegionRec d0bRegion;
 } exaGpuComp;
+
+static void lorieExaResetComposite(void) {
+    if (exaGpuComp.d0bRegionInitialized)
+        RegionUninit(&exaGpuComp.d0bRegion);
+    memset(&exaGpuComp, 0, sizeof(exaGpuComp));
+}
 
 static Bool lorieCanAccelCompositePictures(int op, PicturePtr src, PicturePtr mask, PicturePtr dst) {
     if (op != PictOpOver)
@@ -2146,7 +2273,7 @@ static Bool lorieExaPrepareComposite(int op, PicturePtr pSrc, PicturePtr pMask, 
                                     PixmapPtr pSrcPix, PixmapPtr pMaskPix, PixmapPtr pDstPix) {
     uint64_t prepare_start = lorieB3aEnabled() ? lorieB3aNowNs() : 0;
     uint32_t b3aRecord = lorieB3aCurrentRecord();
-    memset(&exaGpuComp, 0, sizeof(exaGpuComp));
+    lorieExaResetComposite();
     if (!lorieCanAccelComposite(op, pSrc, pMask, pDst, pSrcPix, pMaskPix, pDstPix)) {
         exaCompPrepareFalse++;
         lorieB3aSetFallback(pvfb->state ? &pvfb->state->b3aTelemetry : NULL, b3aRecord, true);
@@ -2160,26 +2287,50 @@ static Bool lorieExaPrepareComposite(int op, PicturePtr pSrc, PicturePtr pMask, 
     }
     exaGpuComp.src = pSrcPix;
     exaGpuComp.dst = pDstPix;
+    exaGpuComp.d0bRecord = b3aRecord;
     if (exaCompSrcUpload) {
         LorieBuffer_release(exaCompSrcUpload);
         exaCompSrcUpload = NULL;
     }
-    /* Snapshot BGRA src into an FD while X still holds the CPU lock. Renderer
-     * cannot AHardwareBuffer_lock the live AHB, and BGRA EGLImages sample black. */
-    exaCompSrcUpload = lorieCloneBgraAhbToFd(pSrcPix);
+    if (lorieD0bEnabled()) {
+        LoriePixmapPriv *sp = LORIE_PIXMAP_PRIV_FROM_PIXMAP(pSrcPix);
+        const LorieBuffer_Desc *sd = sp && sp->buffer ? LorieBuffer_description(sp->buffer) : NULL;
+        exaGpuComp.d0b = TRUE;
+        if (!RegionInit(&exaGpuComp.d0bRegion, NULL, 0)) {
+            exaCompPrepareFalse++;
+            lorieB3aSetFallback(pvfb->state ? &pvfb->state->b3aTelemetry : NULL, b3aRecord, true);
+            if (prepare_start && pvfb->state)
+                lorieB3aAddNs(&pvfb->state->b3aTelemetry, b3aRecord, LORIE_B3A_VALID_PREPARE,
+                              lorieB3aNowNs() - prepare_start);
+            lorieExaResetComposite();
+#ifdef __ANDROID__
+            p2a2_emit("Gcomp Prepare FALSE");
+#endif
+            return FALSE;
+        }
+        exaGpuComp.d0bRegionInitialized = TRUE;
+        /* D0b only acquires the bounded cached FD here. Dirty bytes are copied
+         * by Composite callbacks after their exact source bounds are known. */
+        exaCompSrcUpload = lorieAcquireD0bStaging(sd, b3aRecord);
+    } else {
+        /* Snapshot BGRA src into an FD while X still holds the CPU lock. Renderer
+         * cannot AHardwareBuffer_lock the live AHB, and BGRA EGLImages sample black. */
+        exaCompSrcUpload = lorieCloneBgraAhbToFd(pSrcPix);
+    }
     if (!exaCompSrcUpload) {
         exaCompPrepareFalse++;
         lorieB3aSetFallback(pvfb->state ? &pvfb->state->b3aTelemetry : NULL, b3aRecord, true);
         if (prepare_start && pvfb->state)
             lorieB3aAddNs(&pvfb->state->b3aTelemetry, b3aRecord, LORIE_B3A_VALID_PREPARE,
                           lorieB3aNowNs() - prepare_start);
+        lorieExaResetComposite();
 #ifdef __ANDROID__
         p2a2_emit("Gcomp Prepare FALSE");
 #endif
         return FALSE;
     }
 #ifdef __ANDROID__
-    {
+    if (!exaGpuComp.d0b) {
         LoriePixmapPriv *sp = LORIE_PIXMAP_PRIV_FROM_PIXMAP(pSrcPix);
         uint32_t px0 = sp && sp->locked ? *((uint32_t *) sp->locked) : 0;
         char msg[96];
@@ -2232,6 +2383,165 @@ static void lorieExaCpuOverRect(PixmapPtr src, PixmapPtr dst, int srcX, int srcY
     lorieFinishAccess(src, EXA_PREPARE_SRC);
 }
 
+static Bool lorieD0bRectInBounds(PixmapPtr src, int srcX, int srcY, int width, int height) {
+    int64_t sourceWidth, sourceHeight;
+
+    if (!src || width <= 0 || height <= 0 || srcX < 0 || srcY < 0)
+        return FALSE;
+    sourceWidth = (int64_t) src->drawable.width;
+    sourceHeight = (int64_t) src->drawable.height;
+    if ((int64_t) srcX > sourceWidth || (int64_t) width > sourceWidth - srcX ||
+        (int64_t) srcY > sourceHeight || (int64_t) height > sourceHeight - srcY)
+        return FALSE;
+    if ((int64_t) srcX > SHRT_MAX || (int64_t) srcX + width > SHRT_MAX ||
+        (int64_t) srcY > SHRT_MAX || (int64_t) srcY + height > SHRT_MAX)
+        return FALSE;
+    return TRUE;
+}
+
+static Bool lorieD0bSetOffset(int srcX, int srcY, int dstX, int dstY) {
+    int64_t xoff = (int64_t) dstX - (int64_t) srcX;
+    int64_t yoff = (int64_t) dstY - (int64_t) srcY;
+
+    if (xoff < SHRT_MIN || xoff > SHRT_MAX || yoff < SHRT_MIN || yoff > SHRT_MAX)
+        return FALSE;
+    if (!exaGpuComp.d0bOffsetSet) {
+        exaGpuComp.d0bXOff = (int16_t) xoff;
+        exaGpuComp.d0bYOff = (int16_t) yoff;
+        exaGpuComp.d0bOffsetSet = TRUE;
+        return TRUE;
+    }
+    return exaGpuComp.d0bXOff == (int16_t) xoff && exaGpuComp.d0bYOff == (int16_t) yoff;
+}
+
+static Bool lorieD0bRegionAdd(const BoxRec *box) {
+    RegionRec one, combined;
+    Bool ok;
+
+    memset(&one, 0, sizeof(one));
+    memset(&combined, 0, sizeof(combined));
+    if (!RegionInit(&one, (BoxPtr) box, 1))
+        return FALSE;
+    if (!RegionInit(&combined, NULL, 0)) {
+        RegionUninit(&one);
+        return FALSE;
+    }
+    ok = RegionUnion(&combined, &exaGpuComp.d0bRegion, &one);
+    RegionUninit(&one);
+    if (!ok) {
+        RegionUninit(&combined);
+        return FALSE;
+    }
+    RegionUninit(&exaGpuComp.d0bRegion);
+    exaGpuComp.d0bRegion = combined;
+    return TRUE;
+}
+
+static Bool lorieD0bRegionStats(uint64_t *pixels) {
+    BoxPtr boxes;
+    int count, i;
+    uint64_t total = 0;
+
+    if (!pixels || !exaGpuComp.d0bRegionInitialized)
+        return FALSE;
+    count = RegionNumRects(&exaGpuComp.d0bRegion);
+    if (count < 0)
+        return FALSE;
+    boxes = RegionRects(&exaGpuComp.d0bRegion);
+    for (i = 0; i < count; i++) {
+        uint64_t width, height, area;
+        if (boxes[i].x1 < 0 || boxes[i].y1 < 0 || boxes[i].x2 <= boxes[i].x1 ||
+            boxes[i].y2 <= boxes[i].y1)
+            return FALSE;
+        width = (uint64_t) (boxes[i].x2 - boxes[i].x1);
+        height = (uint64_t) (boxes[i].y2 - boxes[i].y1);
+        if (width > UINT64_MAX / height)
+            return FALSE;
+        area = width * height;
+        if (area > UINT64_MAX - total)
+            return FALSE;
+        total += area;
+    }
+    *pixels = total;
+    return TRUE;
+}
+
+static void lorieD0bCpuFallbackRegion(PixmapPtr dst) {
+    BoxPtr boxes;
+    int count, i;
+
+    if (!dst || !exaGpuComp.d0bRegionInitialized || !exaGpuComp.d0bOffsetSet)
+        return;
+    count = RegionNumRects(&exaGpuComp.d0bRegion);
+    boxes = RegionRects(&exaGpuComp.d0bRegion);
+    for (i = 0; i < count; i++) {
+        int width = boxes[i].x2 - boxes[i].x1;
+        int height = boxes[i].y2 - boxes[i].y1;
+        lorieExaCpuOverRect(exaGpuComp.src, dst, boxes[i].x1, boxes[i].y1,
+                            boxes[i].x1 + exaGpuComp.d0bXOff,
+                            boxes[i].y1 + exaGpuComp.d0bYOff, width, height);
+        exaCompCpuRects++;
+    }
+}
+
+static void lorieD0bFailWithRect(PixmapPtr dst, int srcX, int srcY, int dstX, int dstY,
+                                 int width, int height, Bool currentInRegion) {
+    if (!exaGpuComp.d0bFailed) {
+        exaGpuComp.d0bFailed = TRUE;
+        lorieB3aSetFallback(pvfb->state ? &pvfb->state->b3aTelemetry : NULL,
+                            exaGpuComp.d0bRecord, TRUE);
+        lorieD0bCpuFallbackRegion(dst);
+    }
+    if (!currentInRegion) {
+        lorieExaCpuOverRect(exaGpuComp.src, dst, srcX, srcY, dstX, dstY, width, height);
+        exaCompCpuRects++;
+    }
+}
+
+static Bool lorieD0bAddPhysicalBytes(uint64_t *total, int width, int height) {
+    uint64_t pixels;
+    if (!total || width <= 0 || height <= 0 ||
+        (uint64_t) width > UINT64_MAX / (uint64_t) height)
+        return FALSE;
+    pixels = (uint64_t) width * (uint64_t) height;
+    if (pixels > UINT64_MAX / 4ull || pixels * 4ull > UINT64_MAX - *total)
+        return FALSE;
+    *total += pixels * 4ull;
+    return TRUE;
+}
+
+static Bool lorieExaRepairD0bDest(PixmapPtr dst) {
+    BoxPtr boxes;
+    int count, i;
+
+    if (!dst || !exaGpuComp.d0bRegionInitialized || !exaGpuComp.d0bOffsetSet)
+        return FALSE;
+    count = RegionNumRects(&exaGpuComp.d0bRegion);
+    boxes = RegionRects(&exaGpuComp.d0bRegion);
+    exaGpuComp.nrepair = 0;
+    for (i = 0; i < count && i < 32; i++) {
+        int64_t x1 = (int64_t) boxes[i].x1 + exaGpuComp.d0bXOff;
+        int64_t y1 = (int64_t) boxes[i].y1 + exaGpuComp.d0bYOff;
+        int64_t x2 = (int64_t) boxes[i].x2 + exaGpuComp.d0bXOff;
+        int64_t y2 = (int64_t) boxes[i].y2 + exaGpuComp.d0bYOff;
+        BoxRec dbox;
+        if (x1 < SHRT_MIN || x1 > SHRT_MAX || x2 < SHRT_MIN || x2 > SHRT_MAX ||
+            y1 < SHRT_MIN || y1 > SHRT_MAX || y2 < SHRT_MIN || y2 > SHRT_MAX)
+            return FALSE;
+        dbox = (BoxRec) { (short) x1, (short) y1, (short) x2, (short) y2 };
+        if (exaGpuComp.nrepair == 0)
+            exaGpuComp.repairUnion = dbox;
+        else {
+            if (dbox.x1 < exaGpuComp.repairUnion.x1) exaGpuComp.repairUnion.x1 = dbox.x1;
+            if (dbox.y1 < exaGpuComp.repairUnion.y1) exaGpuComp.repairUnion.y1 = dbox.y1;
+            if (dbox.x2 > exaGpuComp.repairUnion.x2) exaGpuComp.repairUnion.x2 = dbox.x2;
+            if (dbox.y2 > exaGpuComp.repairUnion.y2) exaGpuComp.repairUnion.y2 = dbox.y2;
+        }
+        exaGpuComp.repair[exaGpuComp.nrepair++] = dbox;
+    }
+    return exaGpuComp.nrepair == count;
+}
+
 static void lorieExaRepairDestXByteZero(PixmapPtr dst, BoxPtr boxes, int nbox) {
     int b, y, x, x1, y1, x2, y2, dstride;
     uint8_t *d;
@@ -2267,6 +2577,64 @@ static void lorieExaRepairDestXByteZero(PixmapPtr dst, BoxPtr boxes, int nbox) {
                            lorieB3aNowNs() - repair_start);
 }
 
+static void lorieExaD0bComposite(PixmapPtr dst, int srcX, int srcY, int dstX, int dstY,
+                                  int width, int height) {
+    LoriePixmapPriv *sp;
+    const LorieBuffer_Desc *sd;
+    BoxRec box;
+    uint64_t copyBytes = 0;
+
+    if (exaGpuComp.d0bFailed) {
+        if (!lorieD0bRectInBounds(exaGpuComp.src, srcX, srcY, width, height))
+            exaGpuComp.d0bBoundsRejectCount++;
+        lorieExaCpuOverRect(exaGpuComp.src, dst, srcX, srcY, dstX, dstY, width, height);
+        exaCompCpuRects++;
+        return;
+    }
+    if (!lorieD0bRectInBounds(exaGpuComp.src, srcX, srcY, width, height)) {
+        exaGpuComp.d0bBoundsRejectCount++;
+        lorieD0bFailWithRect(dst, srcX, srcY, dstX, dstY, width, height, FALSE);
+        return;
+    }
+    if (!lorieD0bSetOffset(srcX, srcY, dstX, dstY)) {
+        lorieD0bFailWithRect(dst, srcX, srcY, dstX, dstY, width, height, FALSE);
+        return;
+    }
+    if (!exaCompSrcUpload ||
+        !lorieD0bAddPhysicalBytes(&copyBytes, width, height) ||
+        copyBytes > UINT64_MAX - exaGpuComp.d0bStagedPhysicalBytes) {
+        lorieD0bFailWithRect(dst, srcX, srcY, dstX, dstY, width, height, FALSE);
+        return;
+    }
+    sp = LORIE_PIXMAP_PRIV_FROM_PIXMAP(exaGpuComp.src);
+    sd = sp && sp->buffer ? LorieBuffer_description(sp->buffer) : NULL;
+    if (!sp || !sp->locked || !sd ||
+        !LorieBuffer_copyRectFrom(exaCompSrcUpload, sp->locked,
+                                  sd->width, sd->height, sd->stride,
+                                  srcX, srcY, width, height)) {
+        lorieD0bFailWithRect(dst, srcX, srcY, dstX, dstY, width, height, FALSE);
+        return;
+    }
+    exaGpuComp.d0bStagedPhysicalBytes += copyBytes;
+    box = (BoxRec) { (short) srcX, (short) srcY,
+                     (short) (srcX + width), (short) (srcY + height) };
+    if (!lorieD0bRegionAdd(&box)) {
+        lorieD0bFailWithRect(dst, srcX, srcY, dstX, dstY, width, height, FALSE);
+        return;
+    }
+    if (RegionNumRects(&exaGpuComp.d0bRegion) > LORIE_GPU_COPY_MAX_RECTS) {
+        lorieD0bFailWithRect(dst, srcX, srcY, dstX, dstY, width, height, TRUE);
+        return;
+    }
+    if (pvfb->state) {
+        const LorieBuffer_Desc *dd = LorieBuffer_description(LORIE_BUFFER_FROM_PIXMAP(dst));
+        lorieB3aSetGeometry(&pvfb->state->b3aTelemetry, exaGpuComp.d0bRecord,
+                            exaGpuComp.src->drawable.width, exaGpuComp.src->drawable.height, sd->stride,
+                            dst->drawable.width, dst->drawable.height, dd->stride,
+                            width, height);
+    }
+}
+
 static void lorieExaComposite(PixmapPtr dst, int srcX, int srcY, unused int maskX, unused int maskY,
                              int dstX, int dstY, int width, int height) {
     BoxRec box;
@@ -2275,6 +2643,10 @@ static void lorieExaComposite(PixmapPtr dst, int srcX, int srcY, unused int mask
     void *dstBuf = NULL;
     Bool scheduled = FALSE;
 
+    if (exaGpuComp.d0b) {
+        lorieExaD0bComposite(dst, srcX, srcY, dstX, dstY, width, height);
+        return;
+    }
     if (width <= 0 || height <= 0 || !exaGpuComp.src)
         return;
     if (pvfb->state) {
@@ -2344,7 +2716,89 @@ static void lorieExaComposite(PixmapPtr dst, int srcX, int srcY, unused int mask
     exaCompCpuRects++;
 }
 
+static void lorieExaDoneD0bComposite(PixmapPtr dst) {
+    LorieBuffer *upload = exaCompSrcUpload;
+    uint64_t done_start = lorieB3aEnabled() ? lorieB3aNowNs() : 0;
+    uint64_t unionPixels = 0, stagedLogicalBytes = 0, serial = 0;
+    uint32_t b3aRecord = exaGpuComp.d0bRecord;
+    uint32_t rects = 0;
+    void *dstBuf = NULL;
+    Bool regionReady = !exaGpuComp.d0bFailed && exaGpuComp.d0bRegionInitialized;
+    Bool statsOk = exaGpuComp.d0bRegionInitialized && lorieD0bRegionStats(&unionPixels);
+    Bool scheduled = FALSE;
+
+    if (regionReady || exaGpuComp.d0bBoundsRejectCount)
+        rects = exaGpuComp.d0bRegionInitialized
+            ? (uint32_t) RegionNumRects(&exaGpuComp.d0bRegion) : 0;
+    if (statsOk && unionPixels <= UINT64_MAX / 4ull) {
+        stagedLogicalBytes = unionPixels * 4ull;
+        lorieB3aSetD0bDirty(pvfb->state ? &pvfb->state->b3aTelemetry : NULL,
+                            b3aRecord, rects, unionPixels, stagedLogicalBytes,
+                            exaGpuComp.d0bStagedPhysicalBytes,
+                            exaGpuComp.d0bBoundsRejectCount);
+    }
+    if (!exaGpuComp.d0bFailed && statsOk && upload && exaGpuComp.d0bOffsetSet &&
+        rects > 0 && rects <= LORIE_GPU_COPY_MAX_RECTS &&
+        lorieExaRepairD0bDest(dst)) {
+        scheduled = lorieTryScheduleGpuBlit(exaGpuComp.src, dst, &exaGpuComp.d0bRegion,
+                                            exaGpuComp.d0bXOff, exaGpuComp.d0bYOff,
+                                            LORIE_GPU_OP_COMPOSITE, &serial, &dstBuf);
+        if (scheduled) {
+            exaGpuComp.lastSerial = serial;
+            exaGpuComp.scheduled = 1;
+            exaGpuComp.dstBuf = dstBuf;
+            exaCompGpuRects += rects;
+            d0bLastStagingSerial = serial;
+        }
+    }
+    if (!scheduled && !exaGpuComp.d0bFailed) {
+        exaGpuComp.d0bFailed = TRUE;
+        lorieB3aSetFallback(pvfb->state ? &pvfb->state->b3aTelemetry : NULL,
+                            b3aRecord, TRUE);
+        lorieD0bCpuFallbackRegion(dst);
+    }
+    if (scheduled) {
+        Bool completion = lorieGpuCopyWait(exaGpuComp.lastSerial, 2000);
+        if (!completion) {
+            log(ERROR, "EXA D0b GPU composite wait timeout serial=%llu",
+                (unsigned long long) exaGpuComp.lastSerial);
+            lorieD0bQuarantineCache(b3aRecord);
+        } else {
+            d0bCacheQuarantined = FALSE;
+        }
+        lorieB3aSetD0bCompletion(pvfb->state ? &pvfb->state->b3aTelemetry : NULL,
+                                 b3aRecord, completion);
+        if (dst && dst->drawable.depth < 32)
+            lorieExaRepairDestXByteZero(dst, exaGpuComp.repair, exaGpuComp.nrepair);
+        if (upload) {
+            LorieBuffer_gpuCopyPendingDec(upload);
+            LorieBuffer_release(upload);
+            if (exaGpuComp.dstBuf) {
+                LorieBuffer_gpuCopyPendingDec((LorieBuffer *) exaGpuComp.dstBuf);
+                LorieBuffer_release((LorieBuffer *) exaGpuComp.dstBuf);
+            } else
+                pvfb->rootGpuCopyPending--;
+        }
+    }
+    if (upload) {
+        LorieBuffer_release(upload);
+        exaCompSrcUpload = NULL;
+    }
+    if (done_start && pvfb->state)
+        lorieB3aAddNs(&pvfb->state->b3aTelemetry, b3aRecord, LORIE_B3A_VALID_DONE,
+                      lorieB3aNowNs() - done_start);
+    exaCompDone++;
+#ifdef __ANDROID__
+    p2a2_emit("Gcomp Done");
+#endif
+    lorieExaResetComposite();
+}
+
 static void lorieExaDoneComposite(PixmapPtr dst) {
+    if (exaGpuComp.d0b) {
+        lorieExaDoneD0bComposite(dst);
+        return;
+    }
     int i;
     LorieBuffer *upload = exaCompSrcUpload;
     uint64_t done_start = lorieB3aEnabled() ? lorieB3aNowNs() : 0;

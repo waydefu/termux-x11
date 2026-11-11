@@ -316,6 +316,51 @@ void lorieB3aMarkStaging(LorieB3aTelemetry *telemetry, uint32_t index,
     b3a_valid(record, LORIE_B3A_VALID_STAGING);
 }
 
+void lorieB3aSetD0bDirty(LorieB3aTelemetry *telemetry, uint32_t index,
+                         uint64_t dirty_rect_count, uint64_t dirty_union_pixels,
+                         uint64_t staged_logical_bytes, uint64_t staged_physical_bytes,
+                         uint64_t bounds_reject_count) {
+    LorieB3aRecord *record = b3a_record(telemetry, index);
+    if (!record)
+        return;
+    record->dirty_rect_count = dirty_rect_count;
+    record->dirty_union_pixels = dirty_union_pixels;
+    record->staged_logical_bytes = staged_logical_bytes;
+    record->staged_physical_bytes = staged_physical_bytes;
+    record->bounds_reject_count = bounds_reject_count;
+    b3a_valid(record, LORIE_B3A_VALID_D0B_DIRTY);
+}
+
+void lorieB3aSetD0bCache(LorieB3aTelemetry *telemetry, uint32_t index,
+                         bool reuse_proven, uint64_t quarantine_count) {
+    LorieB3aRecord *record = b3a_record(telemetry, index);
+    if (!record)
+        return;
+    record->cache_reuse_proven = reuse_proven ? 1 : 0;
+    record->cache_quarantine_count = quarantine_count;
+    b3a_valid(record, LORIE_B3A_VALID_D0B_CACHE);
+}
+
+void lorieB3aAddD0bUpload(LorieB3aTelemetry *telemetry, uint32_t index,
+                          uint64_t logical_bytes, uint64_t physical_bytes,
+                          uint64_t upload_call_count) {
+    LorieB3aRecord *record = b3a_record(telemetry, index);
+    if (!record)
+        return;
+    lorieB3aAddUploadBytes(telemetry, index, logical_bytes, physical_bytes);
+    record->upload_call_count += upload_call_count;
+    b3a_valid(record, LORIE_B3A_VALID_D0B_UPLOAD);
+}
+
+void lorieB3aSetD0bCompletion(LorieB3aTelemetry *telemetry, uint32_t index,
+                              bool completion_proven) {
+    LorieB3aRecord *record = b3a_record(telemetry, index);
+    if (!record)
+        return;
+    record->completion_proven = completion_proven ? 1 : 0;
+    b3a_valid(record, LORIE_B3A_VALID_D0B_COMPLETION);
+}
+
 static const char *b3a_candidate_name(uint8_t candidate) {
     switch (candidate) {
         case LORIE_B3A_CANDIDATE_CPU: return "cpu";
@@ -424,6 +469,15 @@ static void json_record(FILE *fp, const LorieB3aRecord *record) {
     fprintf(fp, ",\"staging_cache_hit\":"); json_u64(fp, record, LORIE_B3A_VALID_STAGING, record->staging_cache_hit);
     fprintf(fp, ",\"staging_cache_miss\":"); json_u64(fp, record, LORIE_B3A_VALID_STAGING, record->staging_cache_miss);
     fprintf(fp, ",\"staging_buffer_id\":"); json_u64(fp, record, LORIE_B3A_VALID_STAGING, record->staging_buffer_id);
+    fprintf(fp, ",\"dirty_rect_count\":"); json_u64(fp, record, LORIE_B3A_VALID_D0B_DIRTY, record->dirty_rect_count);
+    fprintf(fp, ",\"dirty_union_pixels\":"); json_u64(fp, record, LORIE_B3A_VALID_D0B_DIRTY, record->dirty_union_pixels);
+    fprintf(fp, ",\"staged_logical_bytes\":"); json_u64(fp, record, LORIE_B3A_VALID_D0B_DIRTY, record->staged_logical_bytes);
+    fprintf(fp, ",\"staged_physical_bytes\":"); json_u64(fp, record, LORIE_B3A_VALID_D0B_DIRTY, record->staged_physical_bytes);
+    fprintf(fp, ",\"upload_call_count\":"); json_u64(fp, record, LORIE_B3A_VALID_D0B_UPLOAD, record->upload_call_count);
+    fprintf(fp, ",\"bounds_reject_count\":"); json_u64(fp, record, LORIE_B3A_VALID_D0B_DIRTY, record->bounds_reject_count);
+    fprintf(fp, ",\"cache_reuse_proven\":"); json_u64(fp, record, LORIE_B3A_VALID_D0B_CACHE, record->cache_reuse_proven);
+    fprintf(fp, ",\"cache_quarantine_count\":"); json_u64(fp, record, LORIE_B3A_VALID_D0B_CACHE, record->cache_quarantine_count);
+    fprintf(fp, ",\"completion_proven\":"); json_u64(fp, record, LORIE_B3A_VALID_D0B_COMPLETION, record->completion_proven);
     fputc('}', fp);
 }
 
@@ -489,7 +543,16 @@ static void csv_record(FILE *fp, const LorieB3aRecord *record) {
     csv_u64(fp, record, LORIE_B3A_VALID_CORRECTNESS, record->x_nz); fputc(',', fp);
     csv_u64(fp, record, LORIE_B3A_VALID_STAGING, record->staging_cache_hit); fputc(',', fp);
     csv_u64(fp, record, LORIE_B3A_VALID_STAGING, record->staging_cache_miss); fputc(',', fp);
-    csv_u64(fp, record, LORIE_B3A_VALID_STAGING, record->staging_buffer_id); fputc('\n', fp);
+    csv_u64(fp, record, LORIE_B3A_VALID_STAGING, record->staging_buffer_id); fputc(',', fp);
+    csv_u64(fp, record, LORIE_B3A_VALID_D0B_DIRTY, record->dirty_rect_count); fputc(',', fp);
+    csv_u64(fp, record, LORIE_B3A_VALID_D0B_DIRTY, record->dirty_union_pixels); fputc(',', fp);
+    csv_u64(fp, record, LORIE_B3A_VALID_D0B_DIRTY, record->staged_logical_bytes); fputc(',', fp);
+    csv_u64(fp, record, LORIE_B3A_VALID_D0B_DIRTY, record->staged_physical_bytes); fputc(',', fp);
+    csv_u64(fp, record, LORIE_B3A_VALID_D0B_UPLOAD, record->upload_call_count); fputc(',', fp);
+    csv_u64(fp, record, LORIE_B3A_VALID_D0B_DIRTY, record->bounds_reject_count); fputc(',', fp);
+    csv_u64(fp, record, LORIE_B3A_VALID_D0B_CACHE, record->cache_reuse_proven); fputc(',', fp);
+    csv_u64(fp, record, LORIE_B3A_VALID_D0B_CACHE, record->cache_quarantine_count); fputc(',', fp);
+    csv_u64(fp, record, LORIE_B3A_VALID_D0B_COMPLETION, record->completion_proven); fputc('\n', fp);
 }
 
 void lorieB3aDump(LorieB3aTelemetry *telemetry, const char *reason) {
@@ -536,7 +599,7 @@ void lorieB3aDump(LorieB3aTelemetry *telemetry, const char *reason) {
         json_record(json, &telemetry->records[i]);
     }
     fputs("]}\n", json);
-    fputs("candidate,serial,rect_w,rect_h,src_w,src_h,src_stride,dst_w,dst_h,dst_stride,rect_area,src_area,src_rect_ratio,batch_rects,requested_bytes,clone_bytes,clone_logical_bytes,clone_physical_bytes,clone_amplification,prepare_ns,promotion_ns,ahb_allocate_ns,ahb_lock_ns,buffer_copy_ns,ahb_unlock_ns,fd_allocate_ns,fd_mmap_ns,clone_ns,clone_copy_ns,upload_bytes,upload_logical_bytes,upload_physical_bytes,upload_amplification,upload_ns,queue_ns,draw_submit_ns,gpu_exec_ns,fence_wait_ns,done_composite_ns,repair_bytes,repair_ns,wall_ns,fallback,exact_fail,max_delta,x_nz,staging_cache_hit,staging_cache_miss,staging_buffer_id\n", csv);
+    fputs("candidate,serial,rect_w,rect_h,src_w,src_h,src_stride,dst_w,dst_h,dst_stride,rect_area,src_area,src_rect_ratio,batch_rects,requested_bytes,clone_bytes,clone_logical_bytes,clone_physical_bytes,clone_amplification,prepare_ns,promotion_ns,ahb_allocate_ns,ahb_lock_ns,buffer_copy_ns,ahb_unlock_ns,fd_allocate_ns,fd_mmap_ns,clone_ns,clone_copy_ns,upload_bytes,upload_logical_bytes,upload_physical_bytes,upload_amplification,upload_ns,queue_ns,draw_submit_ns,gpu_exec_ns,fence_wait_ns,done_composite_ns,repair_bytes,repair_ns,wall_ns,fallback,exact_fail,max_delta,x_nz,staging_cache_hit,staging_cache_miss,staging_buffer_id,dirty_rect_count,dirty_union_pixels,staged_logical_bytes,staged_physical_bytes,upload_call_count,bounds_reject_count,cache_reuse_proven,cache_quarantine_count,completion_proven\n", csv);
     for (i = 0; i < count; i++)
         csv_record(csv, &telemetry->records[i]);
     fclose(json);

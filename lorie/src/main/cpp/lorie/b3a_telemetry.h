@@ -14,7 +14,7 @@ extern "C" {
  * process-local current context. No per-pixel logging and no fsync are done
  * on the hot path.
  */
-#define LORIE_B3A_SCHEMA_VERSION 2u
+#define LORIE_B3A_SCHEMA_VERSION 3u
 #define LORIE_B3A_MAX_RECORDS 16384u
 #define LORIE_B3A_INVALID_INDEX UINT32_MAX
 
@@ -48,6 +48,10 @@ enum LorieB3aPhase {
     LORIE_B3A_VALID_CLONE_COPY = 1ull << 20,
     LORIE_B3A_VALID_CORRECTNESS = 1ull << 21,
     LORIE_B3A_VALID_STAGING = 1ull << 22,
+    LORIE_B3A_VALID_D0B_DIRTY = 1ull << 23,
+    LORIE_B3A_VALID_D0B_CACHE = 1ull << 24,
+    LORIE_B3A_VALID_D0B_UPLOAD = 1ull << 25,
+    LORIE_B3A_VALID_D0B_COMPLETION = 1ull << 26,
 };
 
 /* The layout intentionally mirrors the JSON/CSV record documented by Gate B3a. */
@@ -111,6 +115,18 @@ typedef struct {
     uint64_t queue_publish_ns;
 
     volatile uint64_t valid_mask;
+
+    /* D0b narrow persistent-staging counters. These fields are append-only so
+     * the pre-existing B3a record offsets remain stable. */
+    uint64_t dirty_rect_count;
+    uint64_t dirty_union_pixels;
+    uint64_t staged_logical_bytes;
+    uint64_t staged_physical_bytes;
+    uint64_t upload_call_count;
+    uint64_t bounds_reject_count;
+    uint64_t cache_reuse_proven;
+    uint64_t cache_quarantine_count;
+    uint64_t completion_proven;
 } LorieB3aRecord;
 
 typedef struct {
@@ -163,6 +179,17 @@ void lorieB3aMarkCorrectness(LorieB3aTelemetry *telemetry, uint32_t index,
                              uint64_t exact_fail, uint64_t max_delta, uint64_t x_nz);
 void lorieB3aMarkStaging(LorieB3aTelemetry *telemetry, uint32_t index,
                          bool hit, uint64_t buffer_id);
+void lorieB3aSetD0bDirty(LorieB3aTelemetry *telemetry, uint32_t index,
+                         uint64_t dirty_rect_count, uint64_t dirty_union_pixels,
+                         uint64_t staged_logical_bytes, uint64_t staged_physical_bytes,
+                         uint64_t bounds_reject_count);
+void lorieB3aSetD0bCache(LorieB3aTelemetry *telemetry, uint32_t index,
+                         bool reuse_proven, uint64_t quarantine_count);
+void lorieB3aAddD0bUpload(LorieB3aTelemetry *telemetry, uint32_t index,
+                          uint64_t logical_bytes, uint64_t physical_bytes,
+                          uint64_t upload_call_count);
+void lorieB3aSetD0bCompletion(LorieB3aTelemetry *telemetry, uint32_t index,
+                              bool completion_proven);
 
 /* Writes <base>.json and <base>.csv once when TERMUX_X11_B3A_OUTPUT is set. */
 void lorieB3aDump(LorieB3aTelemetry *telemetry, const char *reason);

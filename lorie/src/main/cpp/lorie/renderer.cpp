@@ -21,6 +21,7 @@
 #include <media/NdkImageReader.h>
 #include <dlfcn.h>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <sys/mman.h>
 #include <sys/socket.h>
@@ -767,6 +768,91 @@ LorieBuffer *Renderer::findBufferWithRetry(uint64_t id) {
     return buf;
 }
 
+static bool rendererD0bEnabled() {
+    const char *d0a = std::getenv("TERMUX_X11_D0A");
+    const char *d0b = std::getenv("TERMUX_X11_D0B");
+    return d0a && d0a[0] == '1' && d0a[1] == '\0' &&
+           d0b && d0b[0] == '1' && d0b[1] == '\0';
+}
+
+/* D0b's FD texture is stride-wide, but GLES2 has no row-length upload
+ * contract here. Validate the complete entry before issuing any row upload. */
+static bool uploadFdRegion(LorieBuffer *buffer, const LorieGpuCopyEntry *entry,
+                           uint64_t *logicalBytes, uint64_t *physicalBytes,
+                           uint64_t *uploadCalls) {
+    const LorieBuffer_Desc *desc;
+    const uint8_t *data;
+    size_t totalPixels;
+    uint64_t logical = 0, physical = 0, calls = 0;
+    int i;
+
+    if (logicalBytes) *logicalBytes = 0;
+    if (physicalBytes) *physicalBytes = 0;
+    if (uploadCalls) *uploadCalls = 0;
+    if (!buffer || !entry || entry->numRects == 0 ||
+        entry->numRects > LORIE_GPU_COPY_MAX_RECTS)
+        return false;
+    desc = LorieBuffer_description(buffer);
+    if (desc->type != LORIEBUFFER_FD || !desc->data || desc->data == MAP_FAILED ||
+        desc->width <= 0 || desc->height <= 0 || desc->stride < desc->width ||
+        !LorieBuffer_getGLTextureId(buffer))
+        return false;
+    if ((size_t) desc->stride > (size_t) -1 / (size_t) desc->height)
+        return false;
+    totalPixels = (size_t) desc->stride * (size_t) desc->height;
+    if (totalPixels > (size_t) -1 / sizeof(uint32_t))
+        return false;
+    data = (const uint8_t *) desc->data;
+
+    for (i = 0; i < entry->numRects; i++) {
+        const LorieGpuCopyRect *rect = &entry->rects[i];
+        int width = rect->x2 - rect->x1;
+        int height = rect->y2 - rect->y1;
+        uint64_t area;
+        int y;
+        if (rect->x1 < 0 || rect->y1 < 0 || width <= 0 || height <= 0 ||
+            rect->x2 > desc->width || rect->y2 > desc->height ||
+            rect->x1 > desc->stride || width > desc->stride - rect->x1)
+            return false;
+        if ((uint64_t) width > UINT64_MAX / (uint64_t) height)
+            return false;
+        area = (uint64_t) width * (uint64_t) height;
+        if (area > UINT64_MAX / sizeof(uint32_t) ||
+            area * sizeof(uint32_t) > UINT64_MAX - logical ||
+            area * sizeof(uint32_t) > UINT64_MAX - physical ||
+            (uint64_t) height > UINT64_MAX - calls)
+            return false;
+        logical += area * sizeof(uint32_t);
+        physical += area * sizeof(uint32_t);
+        calls += (uint64_t) height;
+        for (y = rect->y1; y < rect->y2; y++) {
+            size_t rowPixels = (size_t) y * (size_t) desc->stride;
+            size_t startPixels;
+            if (rowPixels > totalPixels || (size_t) rect->x1 > totalPixels - rowPixels)
+                return false;
+            startPixels = rowPixels + (size_t) rect->x1;
+            if ((size_t) width > totalPixels - startPixels ||
+                startPixels > (size_t) -1 / sizeof(uint32_t))
+                return false;
+        }
+    }
+
+    glBindTexture(GL_TEXTURE_2D, LorieBuffer_getGLTextureId(buffer));
+    for (i = 0; i < entry->numRects; i++) {
+        const LorieGpuCopyRect *rect = &entry->rects[i];
+        int y;
+        for (y = rect->y1; y < rect->y2; y++) {
+            size_t offset = ((size_t) y * (size_t) desc->stride + (size_t) rect->x1) * sizeof(uint32_t);
+            glTexSubImage2D(GL_TEXTURE_2D, 0, rect->x1, y, rect->x2 - rect->x1, 1,
+                            GL_RGBA, GL_UNSIGNED_BYTE, data + offset);
+        }
+    }
+    if (logicalBytes) *logicalBytes = logical;
+    if (physicalBytes) *physicalBytes = physical;
+    if (uploadCalls) *uploadCalls = calls;
+    return true;
+}
+
 uint64_t Renderer::applyPendingGpuCopiesLocked() {
     bool fboSetUp = false;
     uint64_t lastSerial = 0;
@@ -857,12 +943,23 @@ uint64_t Renderer::applyPendingGpuCopiesLocked() {
                 const LorieBuffer_Desc *srcDesc = LorieBuffer_description(src);
                 uint8_t composite = entry.op == LORIE_GPU_OP_COMPOSITE;
                 uint64_t upload_start = lorieB3aEnabled() ? lorieB3aNowNs() : 0;
-                LorieBuffer_bindTexture(src);
-                if (upload_start)
-                    lorieB3aAddUploadBytes(&state->b3aTelemetry, entry.telemetryIndex,
-                                           (uint64_t) srcDesc->width * (uint64_t) srcDesc->height * 4ull,
-                                           (uint64_t) srcDesc->stride * (uint64_t) srcDesc->height * 4ull);
-                if (upload_start)
+                bool upload_ok = true;
+                if (composite && rendererD0bEnabled() && srcDesc->type == LORIEBUFFER_FD) {
+                    uint64_t logical_bytes = 0, physical_bytes = 0, upload_calls = 0;
+                    upload_ok = uploadFdRegion(src, &entry, &logical_bytes, &physical_bytes, &upload_calls);
+                    if (upload_ok)
+                        lorieB3aAddD0bUpload(&state->b3aTelemetry, entry.telemetryIndex,
+                                             logical_bytes, physical_bytes, upload_calls);
+                    else
+                        loge("rendererApplyPendingGpuCopies: invalid D0b FD region, skipping upload");
+                } else {
+                    LorieBuffer_bindTexture(src);
+                    if (upload_start)
+                        lorieB3aAddUploadBytes(&state->b3aTelemetry, entry.telemetryIndex,
+                                               (uint64_t) srcDesc->width * (uint64_t) srcDesc->height * 4ull,
+                                               (uint64_t) srcDesc->stride * (uint64_t) srcDesc->height * 4ull);
+                }
+                if (upload_start && upload_ok)
                     lorieB3aAddNs(&state->b3aTelemetry, entry.telemetryIndex, LORIE_B3A_VALID_UPLOAD,
                                   lorieB3aNowNs() - upload_start);
                 {

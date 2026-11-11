@@ -154,6 +154,16 @@ int LorieBuffer_lock(LorieBuffer* _Nullable buffer, void* _Nullable * _Nonnull o
 int LorieBuffer_unlock(LorieBuffer* _Nullable buffer);
 
 /**
+ * Copy an exact source rectangle, row by row, into an FD-backed staging buffer.
+ * The destination rectangle uses the same coordinates as the source rectangle.
+ * Returns false without copying when any geometry or byte span is invalid.
+ */
+bool LorieBuffer_copyRectFrom(LorieBuffer* _Nullable buffer,
+                               const void* _Nullable source,
+                               int32_t sourceWidth, int32_t sourceHeight, int32_t sourceStride,
+                               int32_t x, int32_t y, int32_t width, int32_t height);
+
+/**
  * Send the AHardwareBuffer to an AF_UNIX socket.
  *
  * @param buffer

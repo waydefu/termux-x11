@@ -483,6 +483,65 @@ __LIBC_HIDDEN__ int LorieBuffer_unlock(LorieBuffer* buffer) {
     return ret;
 }
 
+__LIBC_HIDDEN__ bool LorieBuffer_copyRectFrom(LorieBuffer* buffer, const void* source,
+                                             int32_t sourceWidth, int32_t sourceHeight, int32_t sourceStride,
+                                             int32_t x, int32_t y, int32_t width, int32_t height) {
+    const LorieBuffer_Desc *desc;
+    const uint8_t *sourceBytes;
+    uint8_t *destinationBytes;
+    size_t sourcePixels, destinationPixels, sourceBytesSize, destinationBytesSize, rowBytes;
+    int32_t row;
+
+    if (!buffer || !source || buffer->desc.type != LORIEBUFFER_FD ||
+        !buffer->desc.data || buffer->desc.data == MAP_FAILED)
+        return false;
+
+    desc = &buffer->desc;
+    if (sourceWidth <= 0 || sourceHeight <= 0 || sourceStride < sourceWidth ||
+        desc->width <= 0 || desc->height <= 0 || desc->stride < desc->width ||
+        width <= 0 || height <= 0 || x < 0 || y < 0 ||
+        x > sourceWidth || width > sourceWidth - x ||
+        y > sourceHeight || height > sourceHeight - y ||
+        x > desc->width || width > desc->width - x ||
+        y > desc->height || height > desc->height - y)
+        return false;
+
+    if ((size_t) sourceStride > SIZE_MAX / (size_t) sourceHeight)
+        return false;
+    sourcePixels = (size_t) sourceStride * (size_t) sourceHeight;
+    if (sourcePixels > SIZE_MAX / sizeof(uint32_t))
+        return false;
+    sourceBytesSize = sourcePixels * sizeof(uint32_t);
+
+    if ((size_t) desc->stride > SIZE_MAX / (size_t) desc->height)
+        return false;
+    destinationPixels = (size_t) desc->stride * (size_t) desc->height;
+    if (destinationPixels > SIZE_MAX / sizeof(uint32_t))
+        return false;
+    destinationBytesSize = destinationPixels * sizeof(uint32_t);
+    if (destinationBytesSize > buffer->size)
+        return false;
+
+    if ((size_t) width > SIZE_MAX / sizeof(uint32_t))
+        return false;
+    rowBytes = (size_t) width * sizeof(uint32_t);
+    sourceBytes = (const uint8_t *) source;
+    destinationBytes = (uint8_t *) desc->data;
+
+    for (row = 0; row < height; row++) {
+        size_t sourceRow = (size_t) y + (size_t) row;
+        size_t destinationRow = (size_t) y + (size_t) row;
+        size_t sourceOffset = (sourceRow * (size_t) sourceStride + (size_t) x) * sizeof(uint32_t);
+        size_t destinationOffset = (destinationRow * (size_t) desc->stride + (size_t) x) * sizeof(uint32_t);
+
+        if (sourceOffset > sourceBytesSize - rowBytes ||
+            destinationOffset > destinationBytesSize - rowBytes)
+            return false;
+        memcpy(destinationBytes + destinationOffset, sourceBytes + sourceOffset, rowBytes);
+    }
+    return true;
+}
+
 __LIBC_HIDDEN__ void LorieBuffer_sendHandleToUnixSocket(LorieBuffer* _Nonnull buffer, int socketFd) {
     if (socketFd < 0 || !buffer)
         return;
