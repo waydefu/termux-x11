@@ -1,7 +1,7 @@
 #!/bin/bash
 # smoke_electron.sh <launcher> <out> — functional smoke of f8-shard with a real Electron app on Xvfb :99
 # (TRACER-SHARD, 2026-09-25; never touches the daily :1). Passes when, within 60 s, the app's main process and
-# at least one renderer (a zygote child; it keeps the zygote cmdline) run under the NEW tracer and it maps a window on :99; then f8-shard's pid
+# at least one renderer (--type=renderer, or a zygote child that keeps the zygote cmdline) run under the NEW tracer and it maps a window on :99; then f8-shard's pid
 # gets SIGTERM and the app, its children and the shard tracer must all be gone within 30 s.
 set -uo pipefail
 L=${1:?launcher}; OUT=${2:?out}
@@ -30,8 +30,11 @@ for i in $(seq 1 60); do
     c=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)
     t=$(printf '%s' "$c" | grep -o -- '--type=[a-z-]*' | head -1)
     echo "${p#/proc/} ${t:-main} $(printf '%s' "$c" | cut -c1-60)" >> "$OUT/under-shard.txt"
-    # renderers are forked by the zygote and keep its cmdline (--type=zygote): count zygote children of a zygote
-    if [ "$t" = "--type=zygote" ]; then
+    # a renderer either keeps the zygote's cmdline (Cursor, Hermes: count zygote children of a zygote) or
+    # retitles itself --type=renderer (ChatGPT desktop); count both
+    if [ "$t" = "--type=renderer" ]; then
+      R=$((R + 1))
+    elif [ "$t" = "--type=zygote" ]; then
       pp=$(awk '/^PPid/{print $2}' "$p/status" 2>/dev/null)
       tr '\0' ' ' < "/proc/$pp/cmdline" 2>/dev/null | grep -q -- '--type=zygote' && R=$((R + 1))
     fi

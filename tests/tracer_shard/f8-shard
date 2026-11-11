@@ -1,24 +1,50 @@
 #!/bin/bash
-# f8-shard <program> [args...] — run one program under a proot tracer of its own (TRACER-SHARD, 2026-09-25).
+# f8-shard [--auto=electron|terminal] <program> [args...] — run one program under a proot tracer of its own
+# (TRACER-SHARD, 2026-09-25; v2 AUTO-SHARD, 2026-09-26).
 #
 # Why: every program of the daily desktop shares ONE single-threaded proot tracer. An Electron app launch
 # floods it with trapped syscalls and every other program queues behind (XFCE-V6-BASELINE-01 Part A: 59 of
 # 60 v6 fstatat stalls > 100 ms fell in seconds where the tracer used at least the stall length of CPU).
 # How: copy the calling shell's tracer exactly (argv without its guest command, environment, rootfs) into
-# a job dir under the shared Termux tmp; TermuxService runs shard-run.sh, which re-creates that tracer
-# outside every proot and runs <program> under it with this shell's environment and cwd.
+# a job dir under the shared Termux tmp; shard-run.sh, started outside every proot, re-creates that tracer
+# and runs <program> under it with this shell's environment and cwd.
 # The same rootfs, /tmp, X display and D-Bus are shared; --sysvipc emulation is per tracer, so SysV IPC
 # between a sharded program and the rest of the desktop does not work.
+# v2: a resident shard-daemon.sh (started once through TermuxService) takes the job over a FIFO; `am
+# startservice` alone costs 0.96-1.19 s per call (measured 2026-09-26). Without a live daemon the job goes
+# through am as in v1 and the daemon is started for the next call.
+# --auto=<class> is what proot-fast8 passes when it shards an execve by itself (PROOT_F8_AUTOSHARD=1). The
+# program then gets F8_SHARDED=1 and F8_SHARD_EXE=<its canonical path> (proot leaves the app's re-execs and
+# the helpers next to it alone), the new tracer runs without --kill-on-exit (a terminal's nohup'ed jobs and an
+# app's relaunched instance outlive the first process, as they do under the desktop tracer), and whatever
+# keeps the shard from starting runs the program in place instead (F8_NO_SHARD=1): an automatic shard never
+# keeps a program from starting.
 # f8-shard stays in the foreground until the program exits and forwards SIGTERM/SIGINT/SIGHUP to it, so a
-# caller that owns the f8-shard pid owns the program. Output: one line
-#   F8_SHARD tracer=<pid> app=<pid> job=<dir>
-# Exit: the program's absence ends it with 0; 3 = refused / could not start.
+# caller that owns the f8-shard pid owns the program. Output (--auto: into <job>/f8-shard.out) one line
+#   F8_SHARD tracer=<pid> app=<pid> job=<dir> via=<daemon|am>
+# Exit: the program's absence ends it with 0; 3 = refused / could not start (explicit mode only).
 set -uo pipefail
-RUN=/data/data/com.termux/files/home/build/proot-fast/shard/shard-run.sh
+TERMUX_HOME=/data/data/com.termux/files/home
+RUN=$TERMUX_HOME/build/proot-fast/shard2/shard-run.sh
+DAEMON=$TERMUX_HOME/build/proot-fast/shard2/shard-daemon.sh
 AM=/data/data/com.termux/files/usr/bin/am
 BASE=/data/data/com.termux/files/usr/tmp/f8-shard
-refuse() { echo "F8_SHARD_REFUSE $*" >&2; exit 3; }
-[ $# -ge 1 ] || refuse "usage: f8-shard <program> [args...]"
+AUTO=""
+case "${1:-}" in --auto=terminal) AUTO=terminal; shift;; --auto=*) AUTO=electron; shift;; esac
+PROG=("$@")
+J=""
+say() { if [ -n "$AUTO" ] && [ -n "$J" ]; then echo "$*" >> "$J/f8-shard.out"; else echo "$*"; fi; }
+# nothing has started the program yet: explicit mode gives up (rc 3), --auto runs the program in place
+refuse() {
+  echo "F8_SHARD_REFUSE $*" >&2
+  [ -n "$J" ] && echo "F8_SHARD_REFUSE $*" >> "$J/f8-shard.out" 2>/dev/null
+  if [ -n "$AUTO" ] && [ ${#PROG[@]} -gt 0 ]; then
+    export F8_NO_SHARD=1
+    exec "${PROG[@]}"
+  fi
+  exit 3
+}
+[ ${#PROG[@]} -ge 1 ] || refuse "usage: f8-shard [--auto=electron|terminal] <program> [args...]"
 [ -x "$RUN" ] || refuse "no $RUN"
 T=$(awk '/^TracerPid/{print $2}' /proc/self/status)
 [ -n "$T" ] && [ "$T" != 0 ] || refuse "not_traced"
@@ -31,48 +57,100 @@ L2S=$(tr '\0' '\n' < "/proc/$T/environ" | sed -n 's/^PROOT_L2S_DIR=//p')
 ROOTFS=${L2S%/.l2s}
 [ -n "$L2S" ] && [ "$ROOTFS" != "$L2S" ] && [ -x "$ROOTFS/usr/bin/bash" ] || refuse "rootfs '$ROOTFS'"
 J=$BASE/$(date +%Y%m%d-%H%M%S)-$$
-mkdir -p "$J" || refuse "jobdir $J"
-# test hook: F8_SHARD_PROOT replaces the tracer binary (only builds under ~/build/proot-fast/out*/bin/)
+mkdir -p "$J" || { J=""; refuse "jobdir"; }
+# test hooks: F8_SHARD_PROOT replaces the tracer binary (only builds under ~/build/proot-fast/out*/bin/);
+# F8_SHARD_TRACER_ENV ("K=V K=V", only together with F8_SHARD_PROOT) adds to the tracer's environment
 if [ -n "${F8_SHARD_PROOT:-}" ]; then
   case "$F8_SHARD_PROOT" in /data/data/com.termux/files/home/build/proot-fast/out*/bin/proot*) ;; *) refuse "F8_SHARD_PROOT $F8_SHARD_PROOT";; esac
   [ -x "$F8_SHARD_PROOT" ] || refuse "F8_SHARD_PROOT not executable"
   A[0]=$F8_SHARD_PROOT
+elif [ -n "${F8_SHARD_TRACER_ENV:-}" ]; then
+  refuse "F8_SHARD_TRACER_ENV needs F8_SHARD_PROOT"
 fi
-printf '%s\0' "${A[@]:0:g}" > "$J/tracer.argv"
+TA=("${A[@]:0:g}")
+if [ -n "$AUTO" ]; then
+  TA=(); for a in "${A[@]:0:g}"; do [ "$a" = --kill-on-exit ] || TA+=("$a"); done
+  CANON=$(readlink -f -- "${PROG[0]}" 2>/dev/null) || CANON=""
+  export F8_SHARDED=1 F8_SHARD_EXE="${CANON:-${PROG[0]}}"
+fi
+printf '%s\0' "${TA[@]}" > "$J/tracer.argv"
 cat "/proc/$T/environ" > "$J/tracer.env"
-env -0 > "$J/guest.env"
-printf '%s\0' "$@" > "$J/guest.argv"
+for kv in ${F8_SHARD_TRACER_ENV:-}; do printf '%s\0' "$kv" >> "$J/tracer.env"; done
+( unset F8_SHARD_PROOT F8_SHARD_TRACER_ENV; env -0 ) > "$J/guest.env"
+printf '%s\0' "${PROG[@]}" > "$J/guest.argv"
 pwd > "$J/guest.cwd"
 echo "$ROOTFS" > "$J/rootfs"
 echo "$T" > "$J/parent-tracer.pid"
-"$AM" startservice --user 0 -n com.termux/com.termux.app.TermuxService -a com.termux.service_execute \
-  -d com.termux.file:/data/data/com.termux/files/usr/bin/bash \
-  --esa com.termux.execute.arguments "-c,unset BASH_ENV ENV; exec $RUN $J" \
-  --ez com.termux.execute.background true > "$J/am.out" 2>&1 || refuse "am $(tail -1 "$J/am.out")"
+echo "${AUTO:-explicit}" > "$J/mode"
+
+am_job() {   # am_job <jobdir> <script> — TermuxService runs <script> <jobdir> outside every proot
+  "$AM" startservice --user 0 -n com.termux/com.termux.app.TermuxService -a com.termux.service_execute \
+    -d com.termux.file:/data/data/com.termux/files/usr/bin/bash \
+    --esa com.termux.execute.arguments "-c,unset BASH_ENV ENV; exec $2 $1" \
+    --ez com.termux.execute.background true > "$1/am.out" 2>&1
+}
+daemon_alive() {
+  local dp c
+  [ -p "$BASE/ctl.fifo" ] && [ -x "$DAEMON" ] && read -r dp < "$BASE/daemon.pid" 2>/dev/null || return 1
+  mapfile -d '' c < "/proc/$dp/cmdline" 2>/dev/null || return 1
+  [[ " ${c[*]} " == *shard-daemon.sh* ]]
+}
+start_daemon_bg() {
+  [ -x "$DAEMON" ] || return 0
+  ( "$AM" startservice --user 0 -n com.termux/com.termux.app.TermuxService -a com.termux.service_execute \
+      -d com.termux.file:/data/data/com.termux/files/usr/bin/bash \
+      --esa com.termux.execute.arguments "-c,unset BASH_ENV ENV; exec $DAEMON" \
+      --ez com.termux.execute.background true > /dev/null 2>&1 & )
+}
+VIA=am
+if [ -z "${F8_SHARD_NO_DAEMON:-}" ] && daemon_alive && exec 4<> "$BASE/ctl.fifo"; then
+  printf '%s\n' "$J" >&4; exec 4>&-
+  VIA=daemon
+else
+  am_job "$J" "$RUN" || refuse "am $(tail -1 "$J/am.out")"
+  [ -z "${F8_SHARD_NO_DAEMON:-}" ] && start_daemon_bg
+fi
 # wait for the new tracer and the program pid (written by the guest bash under the NEW tracer); bash builtins
 # only, so waiting adds no forks to this shell's tracer
 mkfifo "$J/wait.fifo" && exec 3<> "$J/wait.fifo" || refuse "wait fifo $J"
 TP=""; APP=""
-for ((i = 0; i < 100; i++)); do
+for ((i = 0; i < 500; i++)); do
   [ -z "$TP" ] && [ -s "$J/tracer.pid" ] && read -r TP < "$J/tracer.pid"
   [ -s "$J/app.pid" ] && read -r APP < "$J/app.pid" && break
-  read -r -t 0.1 -u 3 || true
+  # a daemon that took the job but did not start it within 2 s: cancel (claim) it and go through am
+  if [ "$VIA" = daemon ] && [ "$i" = 100 ] && [ -z "$TP" ] && mkdir "$J/claim" 2>/dev/null; then
+    J2=$J-am; mkdir -p "$J2" && cp "$J"/tracer.argv "$J"/tracer.env "$J"/guest.* "$J"/rootfs "$J"/parent-tracer.pid "$J"/mode "$J2"/ \
+      || refuse "daemon_stuck, copy to $J2 failed"
+    exec 3>&-; J=$J2; VIA=am-after-daemon
+    am_job "$J" "$RUN" || refuse "am $(tail -1 "$J/am.out")"
+    mkfifo "$J/wait.fifo" && exec 3<> "$J/wait.fifo" || refuse "wait fifo $J"
+  fi
+  read -r -t 0.02 -u 3 || true
 done
-[ -n "$TP" ] || refuse "tracer_never_started $J"
-[ -n "$APP" ] || refuse "guest_never_started tracer=$TP $J"
-# confirm the program runs under the NEW tracer; retried for up to 3 s, every attempt logged (app-check.log)
+if [ -z "$APP" ]; then
+  # not claimed by shard-run.sh yet: claiming it here means it never starts, so refusing is safe
+  mkdir "$J/claim" 2>/dev/null && refuse "never_started via=$VIA tracer='$TP' $J"
+  echo "F8_SHARD_FAIL claimed but no program pid after 10 s via=$VIA tracer='$TP' $J" >&2
+  exit 3
+fi
+# confirm the program runs under the NEW tracer (up to 3 s); a program that already exited ends it
 AT=""
-for ((i = 0; i < 30; i++)); do
+for ((i = 0; i < 150; i++)); do
+  [ -d "/proc/$APP" ] || break
   AT=""
   { while read -r k v _; do [ "$k" = "TracerPid:" ] && AT=$v; done < "/proc/$APP/status"; } 2>> "$J/app-check.log"
-  echo "try=$i app=$APP TracerPid='$AT' want=$TP" >> "$J/app-check.log"
   [ "$AT" = "$TP" ] && break
-  read -r -t 0.1 -u 3 || true
+  read -r -t 0.02 -u 3 || true
 done
-[ -n "$AT" ] || [ -d "/proc/$APP" ] || { echo "F8_SHARD tracer=$TP app=$APP job=$J exited_before_check"; exit 0; }
-[ "$AT" = "$TP" ] || refuse "app $APP TracerPid '$AT' != new tracer $TP (see $J/app-check.log)"
-echo "F8_SHARD tracer=$TP app=$APP job=$J"
+echo "tries=$i app=$APP TracerPid='$AT' want=$TP" >> "$J/app-check.log"
+if [ "$AT" != "$TP" ] && [ ! -d "/proc/$APP" ]; then
+  say "F8_SHARD tracer=$TP app=$APP job=$J via=$VIA exited_before_check"
+  exit 0
+fi
+# the program is running: never start it a second time, only report
+[ "$AT" = "$TP" ] || echo "F8_SHARD_WARN app $APP TracerPid '$AT' != new tracer $TP (see $J/app-check.log)" >&2
+say "F8_SHARD tracer=$TP app=$APP job=$J via=$VIA"
 fwd() { kill -"$1" "$APP" 2>/dev/null; }
 trap 'fwd TERM' TERM; trap 'fwd INT' INT; trap 'fwd HUP' HUP
-while kill -0 "$APP" 2>/dev/null; do read -r -t 1 -u 3 || true; done
+while kill -0 "$APP" 2>/dev/null; do read -r -t 0.25 -u 3 || true; done
 exit 0

@@ -5,9 +5,13 @@
 # command under it, so the guest gets a tracer of its own. Writes $$ (= the new tracer pid, env and proot
 # are exec'd) to <jobdir>/tracer.pid before exec; the guest bash writes its own pid (= the program, it execs)
 # to <jobdir>/app.pid, so the caller never has to scan /proc under its own tracer.
+# v2 (AUTO-SHARD, 2026-09-26): installed as ~/build/proot-fast/shard2/shard-run.sh, started by shard-daemon.sh
+# or TermuxService. It first claims the job (mkdir <jobdir>/claim, atomic): a job f8-shard gave up on, or one
+# handed over twice, is never started a second time.
 set -u
 J=${1:?jobdir}
 case "$J" in /data/data/com.termux/files/usr/tmp/f8-shard/*) ;; *) echo "SHARD_RUN_REFUSE jobdir $J"; exit 3;; esac
+mkdir "$J/claim" 2>/dev/null || { echo "SHARD_RUN_SKIP already claimed" >> "$J/log"; exit 0; }
 for f in tracer.argv tracer.env guest.env guest.argv guest.cwd rootfs; do
   [ -s "$J/$f" ] || { echo "SHARD_RUN_REFUSE missing $f" >> "$J/log"; exit 3; }
 done
